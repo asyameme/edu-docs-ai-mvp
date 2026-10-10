@@ -1,0 +1,8 @@
+# Применяется только scripts/verify-integration.ps1 в тестовом проекте education-acceptance.
+services:
+  api:
+    ports: !override
+      - "127.0.0.1:18000:8000"
+  frontend:
+    ports: !override
+      - "127.0.0.1:18080:80"
