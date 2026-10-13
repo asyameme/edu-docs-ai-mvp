@@ -37,7 +37,7 @@ services:
 
   api:
     <<: *backend
-    build: .
+    build: ./backend
     volumes:
       - original-files:/data/originals
     ports:
@@ -121,7 +121,7 @@ services:
       POSTGRES_USER: education_temporal
       SQL_PASSWORD: ${TEMPORAL_DB_PASSWORD:?Set TEMPORAL_DB_PASSWORD in .env}
     volumes:
-      - ./temporal/setup-schema.sh:/scripts/setup-schema.sh:ro
+      - ./backend/temporal/setup-schema.sh:/scripts/setup-schema.sh:ro
       - temporal-init-state:/init-state:ro
     depends_on:
       temporal-db-init:
@@ -141,7 +141,7 @@ services:
       BIND_ON_IP: 0.0.0.0
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
     volumes:
-      - ./temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/development-sql.yaml:ro
+      - ./backend/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/development-sql.yaml:ro
     depends_on:
       temporal-schema-init:
         condition: service_completed_successfully
@@ -157,7 +157,7 @@ services:
     image: temporalio/admin-tools:1.32.1
     entrypoint: ["/bin/sh", "/scripts/setup-namespace.sh"]
     volumes:
-      - ./temporal/setup-namespace.sh:/scripts/setup-namespace.sh:ro
+      - ./backend/temporal/setup-namespace.sh:/scripts/setup-namespace.sh:ro
     depends_on:
       temporal:
         condition: service_healthy
