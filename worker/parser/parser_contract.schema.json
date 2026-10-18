@@ -1,0 +1,738 @@
+{
+  "$defs": {
+    "AssessmentTool": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "name"
+      ],
+      "title": "AssessmentTool",
+      "type": "object"
+    },
+    "Competency": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "formulation": {
+          "title": "Formulation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "code",
+        "formulation"
+      ],
+      "title": "Competency",
+      "type": "object"
+    },
+    "CourseTopic": {
+      "additionalProperties": false,
+      "description": "Строка таблицы «Структура и содержание»: тема × вид занятий × часы.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        },
+        "activity": {
+          "title": "Activity",
+          "type": "string"
+        },
+        "hours": {
+          "minimum": 0,
+          "title": "Hours",
+          "type": "integer"
+        },
+        "module": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module"
+        }
+      },
+      "required": [
+        "source_ref",
+        "topic",
+        "activity",
+        "hours"
+      ],
+      "title": "CourseTopic",
+      "type": "object"
+    },
+    "CurriculumItem": {
+      "additionalProperties": false,
+      "description": "Строка учебного плана (xlsx).",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "discipline_name": {
+          "title": "Discipline Name",
+          "type": "string"
+        },
+        "semester": {
+          "maximum": 8,
+          "minimum": 1,
+          "title": "Semester",
+          "type": "integer"
+        },
+        "credit_units": {
+          "minimum": 1,
+          "title": "Credit Units",
+          "type": "integer"
+        },
+        "hours_total": {
+          "minimum": 0,
+          "title": "Hours Total",
+          "type": "integer"
+        },
+        "block": {
+          "title": "Block",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "discipline_name",
+        "semester",
+        "credit_units",
+        "hours_total",
+        "block"
+      ],
+      "title": "CurriculumItem",
+      "type": "object"
+    },
+    "Discipline": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "semesters": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Semesters",
+          "type": "array"
+        },
+        "credit_units": {
+          "minimum": 1,
+          "title": "Credit Units",
+          "type": "integer"
+        },
+        "hours_total": {
+          "minimum": 0,
+          "title": "Hours Total",
+          "type": "integer"
+        },
+        "hours_by_kind": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Hours By Kind",
+          "type": "object"
+        },
+        "control_forms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Control Forms",
+          "type": "array"
+        },
+        "prerequisites": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Prerequisites",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_ref",
+        "name",
+        "semesters",
+        "credit_units",
+        "hours_total",
+        "hours_by_kind"
+      ],
+      "title": "Discipline",
+      "type": "object"
+    },
+    "Indicator": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "competency_code": {
+          "title": "Competency Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "code",
+        "text",
+        "competency_code"
+      ],
+      "title": "Indicator",
+      "type": "object"
+    },
+    "LearningOutcome": {
+      "additionalProperties": false,
+      "description": "Результат обучения «знать/уметь/владеть».\n\nlocal_id назначает парсер (уникален в файле, «LO-001») — ключ для связей:\nв источнике у результатов кода нет, кроме вариантов вида «ПКП-УНК-03.01. У-1».\nkind=None — формат источника ещё не нормализован (spike всех типов).",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "local_id": {
+          "title": "Local Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "знать",
+                "уметь",
+                "владеть"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        }
+      },
+      "required": [
+        "source_ref",
+        "local_id",
+        "text"
+      ],
+      "title": "LearningOutcome",
+      "type": "object"
+    },
+    "ParseIssue": {
+      "additionalProperties": false,
+      "description": "Проблема разбора — не бизнес-нарушение (те — Issue валидатора).",
+      "properties": {
+        "category": {
+          "enum": [
+            "not_found",
+            "unparsed_row",
+            "empty_cell",
+            "unexpected_format",
+            "ambiguous",
+            "manual_review"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "severity": {
+          "default": "warning",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "category",
+        "message"
+      ],
+      "title": "ParseIssue",
+      "type": "object"
+    },
+    "ParserMeta": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "doc_type": {
+          "enum": [
+            "RPD",
+            "RPP",
+            "CURRICULUM",
+            "MATRIX",
+            "CHARACTERISTIC",
+            "CKMV"
+          ],
+          "title": "Doc Type",
+          "type": "string"
+        },
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "file_hash": {
+          "title": "File Hash",
+          "type": "string"
+        },
+        "parser_config": {
+          "title": "Parser Config",
+          "type": "string"
+        },
+        "program_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Program Id"
+        }
+      },
+      "required": [
+        "doc_type",
+        "file_name",
+        "file_hash",
+        "parser_config"
+      ],
+      "title": "ParserMeta",
+      "type": "object"
+    },
+    "Program": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "enum": [
+                "бакалавриат",
+                "магистратура",
+                "специалитет",
+                "аспирантура"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "direction_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction Code"
+        },
+        "education_standard": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Education Standard"
+        },
+        "professional_standards": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Professional Standards",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_ref"
+      ],
+      "title": "Program",
+      "type": "object"
+    },
+    "Relation": {
+      "additionalProperties": false,
+      "description": "Связь между сущностями. Ссылка на сущность — по естественному ключу:\ndiscipline/curriculum_item/course_topic — название, остальные — код.\nМежфайловые связи (например, дисциплина РПД ↔ строка плана) допустимы:\nключи кодов глобальны в рамках программы.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "src_entity": {
+          "enum": [
+            "program",
+            "discipline",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "assessment_tool",
+            "curriculum_item",
+            "course_topic"
+          ],
+          "title": "Src Entity",
+          "type": "string"
+        },
+        "src_key": {
+          "title": "Src Key",
+          "type": "string"
+        },
+        "dst_entity": {
+          "enum": [
+            "program",
+            "discipline",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "assessment_tool",
+            "curriculum_item",
+            "course_topic"
+          ],
+          "title": "Dst Entity",
+          "type": "string"
+        },
+        "dst_key": {
+          "title": "Dst Key",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "формирует",
+            "имеет",
+            "проверяется",
+            "включает"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "src_entity",
+        "src_key",
+        "dst_entity",
+        "dst_key",
+        "kind"
+      ],
+      "title": "Relation",
+      "type": "object"
+    },
+    "ScoreScaleItem": {
+      "additionalProperties": false,
+      "description": "Балльная шкала: оценка СПбГУ × ECTS × критерии.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "grade_spbu": {
+          "title": "Grade Spbu",
+          "type": "string"
+        },
+        "grade_ects": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grade Ects"
+        },
+        "points": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Points"
+        },
+        "criterion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Criterion"
+        }
+      },
+      "required": [
+        "source_ref",
+        "grade_spbu"
+      ],
+      "title": "ScoreScaleItem",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "table": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        },
+        "col": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Весь JSON, который парсер отдаёт на один входной файл.",
+  "properties": {
+    "meta": {
+      "$ref": "#/$defs/ParserMeta"
+    },
+    "program": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Program"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "disciplines": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Discipline"
+      },
+      "title": "Disciplines",
+      "type": "array"
+    },
+    "competencies": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Competency"
+      },
+      "title": "Competencies",
+      "type": "array"
+    },
+    "indicators": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Indicator"
+      },
+      "title": "Indicators",
+      "type": "array"
+    },
+    "learning_outcomes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/LearningOutcome"
+      },
+      "title": "Learning Outcomes",
+      "type": "array"
+    },
+    "assessment_tools": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AssessmentTool"
+      },
+      "title": "Assessment Tools",
+      "type": "array"
+    },
+    "curriculum_items": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CurriculumItem"
+      },
+      "title": "Curriculum Items",
+      "type": "array"
+    },
+    "course_content": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CourseTopic"
+      },
+      "title": "Course Content",
+      "type": "array"
+    },
+    "score_scale": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ScoreScaleItem"
+      },
+      "title": "Score Scale",
+      "type": "array"
+    },
+    "relations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Relation"
+      },
+      "title": "Relations",
+      "type": "array"
+    },
+    "parse_issues": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ParseIssue"
+      },
+      "title": "Parse Issues",
+      "type": "array"
+    }
+  },
+  "required": [
+    "meta"
+  ],
+  "title": "ParserOutput",
+  "type": "object"
+}
