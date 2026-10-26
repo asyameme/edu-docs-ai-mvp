@@ -1,0 +1,186 @@
+# Черновая конфигурация rule engine.
+# YAML задаёт метаданные и параметры; каждый type должен иметь обработчик в коде.
+# Правила взяты из реестра issue #6; этот файл сам по себе их не исполняет.
+
+schema_version: 1
+
+rules:
+  - id: "R-03"
+    name: "Внутренняя сумма часов"
+    type: "sum_components_equals_total"
+    status: "draft"
+    scope:
+      document_types: ["rpd"]
+      records_path: "$.disciplines[*]"
+    inputs:
+      total_hours_field: "hours_total"
+      components_field: "hours_by_kind"
+      include_component_keys:
+        - "лекции"
+        - "консультации"
+        - "практические занятия"
+        - "контрольные работы"
+        - "коллоквиумы"
+        - "промежуточная аттестация"
+        - "сам.раб. с использованием методических материалов"
+        - "промежуточная аттестация (сам.раб.)"
+      exclude_component_keys:
+        - "объём активных и интерактивных форм учебных занятий"
+        - "трудоёмкость (ЗЕТ, дубль)"
+    basis:
+      kind: "project_consistency_rule"
+      issue: 6
+      rule_id: "R-03"
+      reference: "РПД/РПП, раздел 2.1"
+    notes: >-
+      Список компонентов соответствует имеющемуся примеру РПД и требует
+      сверки с остальными шаблонами документов перед включением правила.
+
+  - id: "R-05"
+    name: "Согласованность ЗЕТ между РПД и учебным планом"
+    type: "compare_fields_across_documents"
+    status: "draft"
+    inputs:
+      left:
+        document_type: "rpd"
+        records_path: "$.disciplines[*]"
+        name_field: "name"
+        semester_field: "semesters"
+        value_field: "credit_units"
+      right:
+        document_type: "curriculum"
+        records_path: "$.curriculum_items[*]"
+        name_field: "discipline_name"
+        semester_field: "semester"
+        value_field: "credit_units"
+      matching:
+        name: "equal"
+        semester: "right_value_in_left_list"
+      comparison: "equal"
+    basis:
+      kind: "project_consistency_rule"
+      issue: 6
+      rule_id: "R-05"
+      reference: "РПД, шапка и раздел 2.1; учебный план, раздел 2"
+    notes: >-
+      Это только междокументная часть R-05. Проверки согласованности ЗЕТ
+      внутри РПД и сумм по семестрам РПП в этот черновик не входят.
+
+  - id: "R-01-partial"
+    name: "Сверка связей дисциплины с компетенциями между РПД и учебным планом"
+    type: "compare_relation_sets"
+    status: "draft"
+    inputs:
+      left:
+        document_type: "rpd"
+        records_path: "$.disciplines[*]"
+        name_field: "name"
+        semester_field: "semesters"
+        relations_path: "$.relations[*]"
+        relation_filter:
+          src_entity: "discipline"
+          dst_entity: "competency"
+          kind: "формирует"
+        relation_value_field: "dst_key"
+      right:
+        document_type: "curriculum"
+        records_path: "$.curriculum_items[*]"
+        name_field: "discipline_name"
+        semester_field: "semester"
+        relations_path: "$.relations[*]"
+        relation_filter:
+          src_entity: "curriculum_item"
+          dst_entity: "competency"
+          kind: "формирует"
+        relation_value_field: "dst_key"
+      matching:
+        name: "equal"
+        semester: "right_value_in_left_list"
+      on_difference: "manual_review"
+    basis:
+      kind: "project_consistency_rule"
+      issue: 6
+      rule_id: "R-01 (частичная сверка)"
+      reference: "Связи дисциплины с компетенциями в РПД и учебном плане"
+    notes: >-
+      Для текущей пары документов правило выявляет расхождение между
+      ПКП-УНК-03 в РПД и УНК-03 в учебном плане. Результат только для проверки
+      человеком: эквивалентность кодов и правило их нормализации не установлены.
+      Это не полная проверка R-01 по матрице, ЦКМВ и всем документам программы.
+
+  - id: "R-07-partial"
+    name: "Сравнение формулировок компетенций между РПД и учебным планом"
+    type: "compare_values_by_key"
+    status: "draft"
+    inputs:
+      left:
+        document_type: "rpd"
+        records_path: "$.competencies[*]"
+        key_field: "code"
+        value_field: "formulation"
+      right:
+        document_type: "curriculum"
+        records_path: "$.competencies[*]"
+        key_field: "code"
+        value_field: "formulation"
+      comparison:
+        normalize: ["trim", "collapse_whitespace", "casefold"]
+        on_difference: "manual_review"
+        on_missing_key: "manual_review"
+    basis:
+      kind: "project_consistency_rule"
+      issue: 6
+      rule_id: "R-07 (частичная сверка)"
+      reference: "Формулировки компетенций в текущих JSON РПД и учебного плана"
+    notes: >-
+      Сравнение двух текущих документов может подсветить различающиеся тексты,
+      но учебный план не подтверждён как эталонный каталог. У трёх общих кодов
+      тексты совпадают после нормализации регистра и пробелов; наборы кодов
+      отличаются (ПКП-УНК-03 в РПД и УНК-03 в УП), это требует ручной проверки.
+      Совпадение или расхождение не доказывает нормативную корректность текста;
+      полная проверка требует ЦКМВ или утверждённого каталога компетенций.
+
+  - id: "R-08-local-reference"
+    name: "Ссылка индикатора на существующую компетенцию внутри РПД"
+    type: "reference_exists"
+    status: "draft"
+    scope:
+      document_types: ["rpd"]
+    inputs:
+      source_records_path: "$.indicators[*]"
+      source_value_field: "competency_code"
+      target_records_path: "$.competencies[*]"
+      target_key_field: "code"
+      on_missing: "report_integrity_error"
+    basis:
+      kind: "partial_structural_check"
+      issue: 6
+      rule_id: "R-08 (частичная проверка ссылок)"
+      reference: "Связь индикатора с компетенцией в JSON РПД"
+    notes: >-
+      Проверяет только наличие competency_code среди competencies[].code в том же
+      JSON. В текущем JSON РПД все такие ссылки находятся. Это не проверка
+      формулировок и кодов индикаторов относительно ЦКМВ.
+
+  - id: "R-06"
+    name: "Поиск дубликатов внутри списков сущностей"
+    type: "unique_by_fields"
+    status: "draft"
+    inputs:
+      collections:
+        - records_path: "$.competencies[*]"
+          key_fields: ["code"]
+        - records_path: "$.indicators[*]"
+          key_fields: ["code"]
+        - records_path: "$.relations[*]"
+          key_fields:
+            - "src_entity"
+            - "src_key"
+            - "dst_entity"
+            - "dst_key"
+            - "kind"
+    basis:
+      kind: "project_consistency_rule"
+      issue: 6
+      rule_id: "R-06"
+      reference: "РПД, раздел 1.3; матрица компетенций; ЦКМВ"
