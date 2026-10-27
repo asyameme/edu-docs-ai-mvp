@@ -10,10 +10,9 @@ from psycopg_pool import ConnectionPool, PoolTimeout
 from temporalio.client import Client
 
 from app.config import get_settings
-from app.demo import demo_program
 from app.errors import DomainError
 from app.health import Resources, check_dependencies
-from app.models import DemoProgram, LiveResponse, ReadyResponse
+from app.models import LiveResponse, ReadyResponse
 from app.program_api import router as program_router
 
 
@@ -56,7 +55,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 health = APIRouter(prefix="/health", tags=["Health"])
-demo = APIRouter(prefix="/api/v1/demo", tags=["Demo"])
 
 
 @health.get("/live")
@@ -72,13 +70,7 @@ async def ready(request: Request, response: Response) -> ReadyResponse:
     return result
 
 
-@demo.get("/program")
-def program() -> DemoProgram:
-    return demo_program()
-
-
 app.include_router(health)
-app.include_router(demo)
 app.include_router(program_router)
 
 

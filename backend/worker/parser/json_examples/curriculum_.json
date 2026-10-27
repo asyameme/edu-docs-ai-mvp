@@ -1,0 +1,119 @@
+{
+  "meta": {
+    "schema_version": 1,
+    "doc_type": "CURRICULUM",
+    "file_name": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+    "file_hash": "c564673063c1a866be20d1c6b8a9eac4743dca5db764073abcf31b51d20dcec0",
+    "parser_config": "curriculum_spbu_v1_manual",
+    "program_id": "26/5003/1"
+  },
+  "disciplines": [],
+  "competencies": [
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "1.1",
+        "row": 3
+      },
+      "code": "УК-1",
+      "formulation": "Способен осуществлять поиск, критический анализ и синтез информации, применять системный подход для решения поставленных задач"
+    },
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "1.1",
+        "row": 16
+      },
+      "code": "УНК-03",
+      "formulation": "Способен применять методы стратегического планирования в профессиональной деятельности"
+    },
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "1.1",
+        "row": 49
+      },
+      "code": "ОПК-1",
+      "formulation": "Способен применять фундаментальные знания, полученные в области математических и (или) естественных наук, и использовать их в профессиональной деятельности"
+    },
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "1.1",
+        "row": 55
+      },
+      "code": "ПКА-1",
+      "formulation": "Способен понимать и применять в исследовательской деятельности современный математический аппарат, фундаментальные концепции и системные методологии, международные и профессиональные стандарты в области информационных технологий, способен использовать современные инструментальные и вычислительные средства"
+    }
+  ],
+  "indicators": [],
+  "learning_outcomes": [],
+  "assessment_tools": [],
+  "curriculum_items": [
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "раздел 2",
+        "row": 92
+      },
+      "discipline_name": "Математический анализ I",
+      "semester": 1,
+      "credit_units": 6,
+      "hours_total": 62,
+      "block": "Блок.1.дисц"
+    }
+  ],
+  "course_content": [],
+  "score_scale": [],
+  "relations": [
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "раздел 2",
+        "row": 92
+      },
+      "src_entity": "curriculum_item",
+      "src_key": "Математический анализ I",
+      "dst_entity": "competency",
+      "dst_key": "УК-1",
+      "kind": "формирует"
+    },
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "раздел 2",
+        "row": 92
+      },
+      "src_entity": "curriculum_item",
+      "src_key": "Математический анализ I",
+      "dst_entity": "competency",
+      "dst_key": "УНК-03",
+      "kind": "формирует"
+    },
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "раздел 2",
+        "row": 92
+      },
+      "src_entity": "curriculum_item",
+      "src_key": "Математический анализ I",
+      "dst_entity": "competency",
+      "dst_key": "ОПК-1",
+      "kind": "формирует"
+    },
+    {
+      "source_ref": {
+        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
+        "section": "раздел 2",
+        "row": 92
+      },
+      "src_entity": "curriculum_item",
+      "src_key": "Математический анализ I",
+      "dst_entity": "competency",
+      "dst_key": "ПКА-1",
+      "kind": "формирует"
+    }
+  ],
+  "parse_issues": []
+}

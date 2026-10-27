@@ -1,48 +1,13 @@
 <!doctype html>
 <html lang="ru">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Учебные документы — этапы 1–2</title>
-<style>
-body{font:17px/1.6 system-ui,sans-serif;background:#f4f6fa;color:#202b40;margin:0}
-main{max-width:850px;margin:55px auto;padding:0 24px}h1{line-height:1.2}
-section{background:white;padding:24px;margin:20px 0;border:1px solid #dce3ed;border-radius:12px}
-button{background:#2456b8;color:white;border:0;border-radius:7px;padding:10px 18px;cursor:pointer}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;background:#f4f6fa;padding:16px}
-a{color:#2456b8}.note{color:#5a6475}.good{color:#17653c}.bad{color:#a32b2b}
-</style>
-</head>
-<body><main>
-<p class="note">Этапы 1–2 roadmap · техническая демонстрация</p>
-<h1>Каркас системы учебных документов</h1>
-<p>Здесь проверяем связь интерфейса, API и хранилищ. Программы, исходные файлы и версии доступны через API. Анализ документов появится на следующих этапах.</p>
-<section><h2>Состояние сервисов</h2><p id="status">Проверяем подключение…</p>
-<ul id="dependencies"></ul><button id="refresh">Проверить ещё раз</button>
-<p class="note">Процесс Temporal и Worker проверяются отдельной диагностической командой.</p></section>
-<section><h2>Пример программы</h2><p>Все данные ниже искусственные. Они не получены из документов заказчика.</p>
-<pre id="program">Загружаем пример…</pre></section>
-<p><a href="/docs">Открыть документацию API</a></p>
-</main><script>
-async function refresh(){
-  const status=document.getElementById('status');
-  const dependencies=document.getElementById('dependencies');
-  status.textContent='Проверяем подключение…'; status.className=''; dependencies.replaceChildren();
-  try{
-    const response=await fetch('/health/ready'); const data=await response.json();
-    status.textContent=response.ok?'API и хранилища доступны':'Есть недоступные хранилища';
-    status.className=response.ok?'good':'bad';
-    for(const [name,state] of Object.entries(data.dependencies)){
-      const item=document.createElement('li');
-      item.textContent=name+': '+(state==='available'?'доступен':'недоступен'); dependencies.append(item);
-    }
-  }catch{status.textContent='Не удалось связаться с API';status.className='bad';}
-}
-async function loadProgram(){
-  const target=document.getElementById('program');
-  try{const response=await fetch('/api/v1/demo/program');if(!response.ok)throw Error();
-    target.textContent=JSON.stringify(await response.json(),null,2);
-  }catch{target.textContent='Не удалось загрузить пример программы';}
-}
-document.getElementById('refresh').addEventListener('click',refresh);
-refresh();loadProgram();
-</script></body></html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f8fb" />
+    <title>Программа · Система проверки документов</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

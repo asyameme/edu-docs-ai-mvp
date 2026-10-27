@@ -8,3 +8,5 @@ __pycache__/
 .integration-results/
 
 .local-notes/
+frontend/node_modules/
+frontend/dist/

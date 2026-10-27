@@ -55,14 +55,9 @@ def test_dependency_failure_does_not_break_liveness_or_leak_credentials(
     assert client.get("/health/live").status_code == 200
 
 
-def test_demo_preserves_both_conflicting_values_with_sources(client):
-    data = client.get("/api/v1/demo/program").json()
-    assert data["is_demo"] is True
-    assert data["disciplines"][0]["hours"] is None
-    options = data["conflicts"][0]["options"]
-    assert {option["value"] for option in options} == {108, 144}
-    sources = {source["id"] for source in data["source_refs"]}
-    assert all(option["source_ref_id"] in sources for option in options)
+def test_artificial_demo_is_not_exposed(client):
+    assert client.get("/api/v1/demo/program").status_code == 404
+    assert "/api/v1/demo/program" not in client.get("/openapi.json").json()["paths"]
 
 
 @pytest.mark.parametrize("dependency", ["temporal", "chroma"])

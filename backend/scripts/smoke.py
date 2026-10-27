@@ -14,11 +14,11 @@ from app.workflows import DiagnosticInput, DiagnosticWorkflow
 async def main() -> None:
     settings = get_settings()
     async with httpx.AsyncClient(base_url="http://api:8000", timeout=10, trust_env=False) as http:
-        for path in ("/health/live", "/health/ready", "/api/v1/demo/program", "/openapi.json"):
+        for path in ("/health/live", "/health/ready", "/api/v1/programs", "/openapi.json"):
             response = await http.get(path)
             response.raise_for_status()
-            if path.endswith("program"):
-                assert response.json()["is_demo"] is True
+            if path.endswith("programs"):
+                assert isinstance(response.json(), list)
             if path.endswith("ready"):
                 assert response.json()["dependencies"]["temporal"] == "available"
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
