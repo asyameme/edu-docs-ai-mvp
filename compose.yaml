@@ -15,6 +15,7 @@ x-backend: &backend
     CHROMA_URL: http://chroma:8000
     ORIGINAL_FILES_PATH: /data/originals
     MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
+    PARSER_URL: ${PARSER_URL:-}
   restart: unless-stopped
 
 services:

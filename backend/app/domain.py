@@ -39,6 +39,10 @@ class Entity(Contract):
         "learning_outcome",
         "control_form",
         "assessment_tool",
+        "program",
+        "curriculum_item",
+        "course_topic",
+        "score_scale",
     ]
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source_ref_ids: list[UUID] = Field(default_factory=list)

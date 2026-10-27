@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     chroma_url: str = "http://chroma:8000"
     original_files_path: Path = Path("/data/originals")
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
+    parser_url: str = ""
 
 
 @lru_cache

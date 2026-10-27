@@ -1,0 +1,16 @@
+services:
+  worker:
+    environment:
+      PARSER_URL: http://parser-fixture:8090/parse
+    depends_on:
+      parser-fixture:
+        condition: service_healthy
+
+  parser-fixture:
+    image: education-backend:stage2
+    command: ["fastapi", "run", "tests/parser_fixture.py", "--host", "0.0.0.0", "--port", "8090"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/openapi.json', timeout=2)"]
+      interval: 2s
+      timeout: 4s
+      retries: 20

@@ -12,6 +12,7 @@ from temporalio.client import Client
 from app.config import get_settings
 from app.errors import DomainError
 from app.health import Resources, check_dependencies
+from app.import_api import router as import_router
 from app.models import LiveResponse, ReadyResponse
 from app.program_api import router as program_router
 
@@ -49,9 +50,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="Educational Documents — Stage 2",
-    version="0.3.0",
-    description="Хранение программ, версий и исходников. Анализ документов пока не реализован.",
+    title="Educational Documents",
+    version="0.4.0",
+    description="Хранение программ и версий, пакетный импорт с подключаемым внешним парсером.",
     lifespan=lifespan,
 )
 health = APIRouter(prefix="/health", tags=["Health"])
@@ -72,6 +73,7 @@ async def ready(request: Request, response: Response) -> ReadyResponse:
 
 app.include_router(health)
 app.include_router(program_router)
+app.include_router(import_router)
 
 
 @app.exception_handler(DomainError)
