@@ -1,4 +1,6 @@
 import { useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { ImportProgress } from "./ImportProgress";
+import { useImportJob } from "./useImportJob";
 
 type DocumentStatus = "Загружено";
 
@@ -49,21 +51,27 @@ function formatCount(count: number, forms: [string, string, string]) {
 }
 
 function App() {
+  const processing = useImportJob();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState("");
   const [parsedProgram, setParsedProgram] = useState<ParsedProgram | null>(null);
   const [selectedResolution, setSelectedResolution] = useState<string | null>(null);
-  const hasUploadedFiles = documents.length > 0;
+  const hasUploadedFiles = documents.length > 0 || processing.job !== null;
+  const uploadNotice = processing.notice || notice;
 
-  function addFiles(files: FileList | File[]) {
+  async function addFiles(files: FileList | File[]) {
+    if (processing.busy) return;
+    setNotice("");
+    processing.clearNotice();
     const selectedFiles = Array.from(files);
     const supportedFile = selectedFiles.find(isSupportedFile);
 
     if (selectedFiles.length > 1) {
       setNotice("Загрузите один ZIP-архив с пакетом документов.");
     } else if (supportedFile) {
+      if (!(await processing.upload(supportedFile))) return;
       setDocuments([{ name: supportedFile.name, status: "Загружено" }]);
       setParsedProgram(null);
       setSelectedResolution(null);
@@ -74,14 +82,14 @@ function App() {
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    if (event.target.files) addFiles(event.target.files);
+    if (event.target.files) void addFiles(event.target.files);
     event.target.value = "";
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDragging(false);
-    addFiles(event.dataTransfer.files);
+    void addFiles(event.dataTransfer.files);
   }
 
   return (
@@ -163,16 +171,18 @@ function App() {
                   type="file"
                   accept=".zip,application/zip,application/x-zip-compressed"
                   onChange={handleFileChange}
+                  disabled={processing.busy}
                   aria-label="Выбрать ZIP-архив с документами программы"
                 />
                 <button
                   type="button"
                   className="primary-button"
                   onClick={() => fileInputRef.current?.click()}
+                  disabled={processing.busy}
                 >
                   Выбрать файлы
                 </button>
-                {notice && <p className="upload-notice" role="status">{notice}</p>}
+                {uploadNotice && <p className="upload-notice" role="status">{uploadNotice}</p>}
               </div>
             </section>
 
@@ -240,6 +250,14 @@ function App() {
                         </li>
                       ))}
                     </ul>
+                    {processing.job && (
+                      <ImportProgress
+                        programId={processing.programId}
+                        job={processing.job}
+                        busy={processing.busy}
+                        onRetry={processing.retry}
+                      />
+                    )}
                     <p className="processing-caption">
                       Название программы и результаты сверки появятся после распаковки и парсинга архива.
                     </p>

@@ -1,0 +1,12 @@
+.env
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.py[cod]
+
+.integration-results/
+
+.local-notes/
+frontend/node_modules/
+frontend/dist/
