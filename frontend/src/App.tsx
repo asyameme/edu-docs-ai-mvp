@@ -1,130 +1,94 @@
-import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
-import { api, ApiError, loadSession, saveSession, type ImportJob } from "./api";
+import { useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { ImportProgress } from "./ImportProgress";
+import { useImportJob } from "./useImportJob";
 
-const labels = {
-  pending: "Ожидает обработки", processing: "Обрабатывается", completed: "Обработано",
-  partial: "Обработано частично", failed: "Ошибка обработки",
+type DocumentStatus = "Загружено";
+
+type ProgramDocument = {
+  name: string;
+  status: DocumentStatus;
 };
 
-function App() {
-  const initial = useRef(loadSession());
-  const input = useRef<HTMLInputElement>(null);
-  const busyRef = useRef(false);
-  const [programId, setProgramId] = useState(initial.current?.programId || "");
-  const [jobId, setJobId] = useState(initial.current?.jobId || "");
-  const [job, setJob] = useState<ImportJob | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const [notice, setNotice] = useState("");
+type ReconciliationFinding = {
+  title: string;
+  planValue: string;
+  rpdValue: string;
+  sources: string;
+  options: string[];
+};
 
-  useEffect(() => {
-    if (!programId || !jobId) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    let stream: EventSource | undefined;
-    const connect = async () => {
-      try {
-        const next = await api<ImportJob>(`/api/v1/programs/${programId}/imports/${jobId}`);
-        if (!active) return;
-        setJob(next);
-        setNotice("");
-        if (["pending", "processing"].includes(next.status)) {
-          stream = new EventSource(`/api/v1/programs/${programId}/imports/${jobId}/events`);
-          stream.addEventListener("status", event => {
-            if (!active) return;
-            const updated = JSON.parse((event as MessageEvent).data) as ImportJob;
-            setJob(updated);
-            setNotice("");
-            if (!["pending", "processing"].includes(updated.status)) stream?.close();
-          });
-          stream.onerror = () => {
-            if (active) setNotice("Связь с сервером прервалась. Восстанавливаем состояние…");
-          };
-        }
-      } catch (error) {
-        if (!active) return;
-        setNotice(error instanceof Error ? error.message : "Не удалось получить состояние задачи");
-        if (!(error instanceof ApiError && error.status === 404)) timer = setTimeout(connect, 5000);
-      }
-    };
-    void connect();
-    return () => { active = false; clearTimeout(timer); stream?.close(); };
-  }, [programId, jobId, job?.attempt]);
+type ParsedProgram = {
+  name: string;
+  summary: string;
+  documentCount: number;
+  errorCount: number;
+  warningCount: number;
+  finding: ReconciliationFinding | null;
+};
+
+const navigation = ["Программа", "Чат", "Выгрузка"];
+
+function isSupportedFile(file: File) {
+  return /\.zip$/i.test(file.name);
+}
+
+function formatFileCount(count: number) {
+  const lastTwoDigits = count % 100;
+  const lastDigit = count % 10;
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 14) return `${count} файлов`;
+  if (lastDigit === 1) return `${count} файл`;
+  if (lastDigit >= 2 && lastDigit <= 4) return `${count} файла`;
+  return `${count} файлов`;
+}
+
+function formatCount(count: number, forms: [string, string, string]) {
+  const lastTwoDigits = count % 100;
+  const lastDigit = count % 10;
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 14) return `${count} ${forms[2]}`;
+  if (lastDigit === 1) return `${count} ${forms[0]}`;
+  if (lastDigit >= 2 && lastDigit <= 4) return `${count} ${forms[1]}`;
+  return `${count} ${forms[2]}`;
+}
+
+function App() {
+  const processing = useImportJob();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [documents, setDocuments] = useState<ProgramDocument[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [parsedProgram, setParsedProgram] = useState<ParsedProgram | null>(null);
+  const [selectedResolution, setSelectedResolution] = useState<string | null>(null);
+  const hasUploadedFiles = documents.length > 0 || processing.job !== null;
+  const uploadNotice = processing.notice || notice;
 
   async function addFiles(files: FileList | File[]) {
-    if (busyRef.current) return;
-    const selected = Array.from(files);
-    if (selected.length !== 1 || !/\.zip$/i.test(selected[0].name)) {
-      setNotice("Выберите один ZIP-архив с документами DOCX/XLSX.");
-      return;
-    }
-    if (selected[0].size > 50 * 1024 * 1024) {
-      setNotice("Размер архива не должен превышать 50 МиБ.");
-      return;
-    }
-    busyRef.current = true;
-    setBusy(true);
-    setNotice("Отправляем архив на сервер…");
-    try {
-      let target = programId;
-      if (target) {
-        try { await api(`/api/v1/programs/${target}`); }
-        catch (error) {
-          if (error instanceof ApiError && error.status === 404) target = "";
-          else throw error;
-        }
-      }
-      if (!target) {
-        const created = await api<{ id: string }>("/api/v1/programs", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: selected[0].name.replace(/\.zip$/i, "") || "Программа" }),
-        });
-        target = created.id;
-        setProgramId(target);
-        saveSession(target, "");
-      }
-      const data = new FormData();
-      data.append("file", selected[0]);
-      const accepted = await api<ImportJob>(`/api/v1/programs/${target}/imports`, {
-        method: "POST", body: data, headers: { "Idempotency-Key": crypto.randomUUID() },
-      });
-      setJob(accepted);
-      setJobId(accepted.id);
-      setNotice("");
-      saveSession(target, accepted.id);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось загрузить архив");
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
+    if (processing.busy) return;
+    setNotice("");
+    processing.clearNotice();
+    const selectedFiles = Array.from(files);
+    const supportedFile = selectedFiles.find(isSupportedFile);
+
+    if (selectedFiles.length > 1) {
+      setNotice("Загрузите один ZIP-архив с пакетом документов.");
+    } else if (supportedFile) {
+      if (!(await processing.upload(supportedFile))) return;
+      setDocuments([{ name: supportedFile.name, status: "Загружено" }]);
+      setParsedProgram(null);
+      setSelectedResolution(null);
+      setNotice(`Загружен архив: ${supportedFile.name}.`);
+    } else if (selectedFiles.length > 0) {
+      setNotice("Поддерживается ZIP-архив.");
     }
   }
 
-  async function retry() {
-    if (!job || busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    try {
-      const next = await api<ImportJob>(`/api/v1/programs/${programId}/imports/${job.id}/retry`, {
-        method: "POST",
-      });
-      setJob(next);
-      setNotice("");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось повторить обработку");
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
-
-  function choose(event: ChangeEvent<HTMLInputElement>) {
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     if (event.target.files) void addFiles(event.target.files);
     event.target.value = "";
   }
 
-  function drop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault(); setDragging(false);
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsDragging(false);
     void addFiles(event.dataTransfer.files);
   }
 
@@ -132,69 +96,177 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">Система проверки документов</div>
-        <div className="user-avatar" aria-hidden="true">АК</div>
+        <div className="user-avatar" aria-hidden="true">
+          АК
+        </div>
       </header>
+
       <div className="workspace">
         <aside className="sidebar" aria-label="Разделы приложения">
           <nav className="side-nav">
-            {["Программа", "Чат", "Выгрузка"].map(item => (
-              <div key={item} className={`nav-item${item === "Программа" ? " is-active" : ""}`}
-                aria-current={item === "Программа" ? "page" : undefined}>{item}</div>
+            {navigation.map((item) => (
+              <div
+                key={item}
+                className={`nav-item${item === "Программа" ? " is-active" : ""}`}
+                aria-current={item === "Программа" ? "page" : undefined}
+              >
+                {item}
+              </div>
             ))}
           </nav>
         </aside>
-        <main className="main-content"><div className="content-column">
-          <section className="page-heading">
-            <div><h1>Программа</h1><p className="eyebrow">Пакет документов и состояние обработки</p></div>
-            <span className="status-pill status-pill--muted">
-              {busy ? "Отправка запроса" : job ? labels[job.status] : "Ожидает загрузки"}
-            </span>
-          </section>
-          <section className="documents-section" aria-labelledby="documents-title">
-            <div className="section-heading"><h2 id="documents-title">Документы программы</h2></div>
-            <div className={`upload-card card${dragging ? " is-dragging" : ""}`}
-              onDragEnter={event => { event.preventDefault(); setDragging(true); }}
-              onDragOver={event => event.preventDefault()}
-              onDragLeave={event => {
-                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
-              }} onDrop={drop}>
-              <div className="upload-copy"><strong>Перетащите сюда ZIP-архив</strong>
-                <span>Документы DOCX/XLSX, до 50 файлов. Архив — до 50 МиБ.</span></div>
-              <input ref={input} className="visually-hidden" type="file" accept=".zip,application/zip"
-                onChange={choose} disabled={busy} aria-label="Выбрать ZIP-архив с документами программы" />
-              <button className="primary-button" type="button" disabled={busy}
-                onClick={() => input.current?.click()}>{busy ? "Отправляем…" : "Выбрать файлы"}</button>
-            </div>
-            {notice && <p className="upload-notice" role="alert">{notice}</p>}
-          </section>
-          {job && <section className="processing-card card" aria-labelledby="processing-title">
-            <div className="processing-heading"><h2 id="processing-title">Обработка документов</h2>
-              <span className="status-pill status-pill--muted">{labels[job.status]}</span></div>
-            <p>Попытка {job.attempt} · {job.files.length} документов</p>
-            <progress max={100} value={job.progress} aria-label="Прогресс обработки" />
-            <span> {job.progress}%</span>
-            <ul className="document-list">{job.files.map(file => (
-              <li className="document-row" key={file.document_id}>
-                <div><a className="document-name"
-                  href={`/api/v1/programs/${programId}/documents/${file.document_id}/download`}>
-                  {file.member_name}</a>
-                  {file.error_message && <p role="status">{file.error_message}</p>}</div>
-                <span className="status-pill status-pill--muted">{labels[file.status]}</span>
-              </li>
-            ))}</ul>
-            {job.issues.length > 0 && <ul>{job.issues.map((issue, index) => (
-              <li key={index}>{issue.message}</li>
-            ))}</ul>}
-            {["completed", "partial"].includes(job.status) && <p>
-              <a href={`/api/v1/programs/${programId}/imports/${job.id}/result`} target="_blank"
-                rel="noreferrer">Открыть сохранённый результат разбора</a>
-              <br />Результат сохранён отдельно. Исторические версии программы не изменены.
-            </p>}
-            {["failed", "partial"].includes(job.status) && job.files.some(f => f.status === "failed") &&
-              <button className="primary-button" type="button" disabled={busy} onClick={() => void retry()}>
-                Повторить неудачные файлы</button>}
-          </section>}
-        </div></main>
+
+        <main className="main-content">
+          <div className="content-column">
+            <section className="page-heading">
+              <div>
+                <h1>Программа</h1>
+                <p className="eyebrow">Пакет документов, обработка и найденные расхождения</p>
+              </div>
+              <span
+                className={`status-pill ${hasUploadedFiles ? "status-pill--green" : "status-pill--muted"}`}
+              >
+                {hasUploadedFiles ? "Пакет загружен" : "Ожидает загрузки"}
+              </span>
+            </section>
+
+            {parsedProgram && (
+              <section className="program-card card" aria-label="Название программы">
+                <div>
+                  <h2>{parsedProgram.name}</h2>
+                  <p>{parsedProgram.summary}</p>
+                </div>
+              </section>
+            )}
+
+            <section className="documents-section" aria-labelledby="documents-title">
+              <div className="section-heading">
+                <h2 id="documents-title">Документы программы</h2>
+                <span className="file-count">
+                  {hasUploadedFiles ? "1 ZIP-архив" : "Архив не загружен"}
+                </span>
+              </div>
+
+              <div
+                className={`upload-card card${isDragging ? " is-dragging" : ""}`}
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragOver={(event) => event.preventDefault()}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    setIsDragging(false);
+                  }
+                }}
+                onDrop={handleDrop}
+              >
+                <div className="upload-copy">
+                  <strong>Перетащите сюда ZIP-архив</strong>
+                  <span>Загрузите архив со всем пакетом документов. Обработка начнётся после загрузки.</span>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  className="visually-hidden"
+                  type="file"
+                  accept=".zip,application/zip,application/x-zip-compressed"
+                  onChange={handleFileChange}
+                  disabled={processing.busy}
+                  aria-label="Выбрать ZIP-архив с документами программы"
+                />
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={processing.busy}
+                >
+                  Выбрать файлы
+                </button>
+                {uploadNotice && <p className="upload-notice" role="status">{uploadNotice}</p>}
+              </div>
+            </section>
+
+            {hasUploadedFiles && (
+              <section className="processing-card card" aria-labelledby="processing-title">
+                <div className="processing-heading">
+                  <h2 id="processing-title">Обработка и сверка</h2>
+                  {parsedProgram ? (
+                    <span className="issue-count-pill">
+                      {formatCount(parsedProgram.errorCount, ["ошибка", "ошибки", "ошибок"])}
+                      {" · "}
+                      {formatCount(parsedProgram.warningCount, [
+                        "предупреждение",
+                        "предупреждения",
+                        "предупреждений",
+                      ])}
+                    </span>
+                  ) : (
+                    <span className="status-pill status-pill--muted">Архив загружен</span>
+                  )}
+                </div>
+
+                {parsedProgram ? (
+                  <>
+                    <p className="finding-summary">
+                      Все {formatFileCount(parsedProgram.documentCount)} обработаны. Проверьте
+                      расхождения перед подтверждением.
+                    </p>
+                    {parsedProgram.finding && (
+                      <article className="finding-card">
+                        <span className="finding-label">Нужно решить</span>
+                        <h3>{parsedProgram.finding.title}</h3>
+                        <p className="finding-values">
+                          План: {parsedProgram.finding.planValue}
+                          <span aria-hidden="true"> · </span>
+                          РПД: {parsedProgram.finding.rpdValue}
+                        </p>
+                        <p className="finding-sources">
+                          Источники: {parsedProgram.finding.sources}
+                        </p>
+                        <div className="resolution-actions" role="group" aria-label="Решение по расхождению">
+                          {parsedProgram.finding.options.map((option) => (
+                            <button
+                              className={`resolution-button${selectedResolution === option ? " is-selected" : ""}`}
+                              key={option}
+                              onClick={() => setSelectedResolution(option)}
+                              type="button"
+                            >
+                              {option}
+                            </button>
+                          ))}
+                        </div>
+                      </article>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <ul className="document-list">
+                      {documents.map((document) => (
+                        <li className="document-row" key={document.name}>
+                          <span className="document-name">{document.name}</span>
+                          <span className="status-pill status-pill--green document-status">
+                            {document.status}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {processing.job && (
+                      <ImportProgress
+                        programId={processing.programId}
+                        job={processing.job}
+                        busy={processing.busy}
+                        onRetry={processing.retry}
+                      />
+                    )}
+                    <p className="processing-caption">
+                      Название программы и результаты сверки появятся после распаковки и парсинга архива.
+                    </p>
+                  </>
+                )}
+              </section>
+            )}
+          </div>
+        </main>
       </div>
     </div>
   );
