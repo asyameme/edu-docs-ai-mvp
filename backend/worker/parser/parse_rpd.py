@@ -215,7 +215,7 @@ def parse_rpd(file_path):
 
     found_table = False
 
-    #читаем содержимое найденного раздела.
+    #читаем содержимое найденного раздела
     for block in blocks[start + 1:]:
         if isinstance(block, Paragraph):
             level = heading_level(block)
@@ -249,7 +249,13 @@ def parse_rpd(file_path):
                 indicator_columns = [
                     index
                     for index, header in enumerate(headers)
-                    if "код индикатора" in header
+                    if any(
+                        phrase in header
+                        for phrase in (
+                            "код индикатора",
+                            "код и наименование индикатора",
+                        )
+                    )
                 ]
 
                 if len(indicator_columns) == 1:
