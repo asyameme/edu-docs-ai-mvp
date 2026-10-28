@@ -1,8 +1,8 @@
-"""Начальное хранилище приложения; остальные таблицы и базы Temporal не меняются."""
+"""Начальная схема приложения: оригиналы, версии программ и бизнес-задачи."""
 
 from alembic import op
 
-revision = "0001_program_storage"
+revision = "0001_initial_schema"
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -71,15 +71,48 @@ def upgrade():
             FOR EACH ROW EXECUTE FUNCTION reject_original_mutation();
         CREATE TRIGGER immutable_version_documents BEFORE UPDATE OR DELETE ON version_documents
             FOR EACH ROW EXECUTE FUNCTION reject_original_mutation();
-    """)
+    
+        CREATE TABLE processing_jobs (
+            id uuid PRIMARY KEY,
+            program_id uuid NOT NULL REFERENCES programs(id),
+            input_version_id uuid NOT NULL,
+            output_version_id uuid,
+            operation_key text NOT NULL,
+            request_hash text NOT NULL,
+            type text NOT NULL CHECK (type IN ('import','validate','generate','build_graph')),
+            temporal_namespace text NOT NULL,
+            workflow_id text NOT NULL,
+            parameters jsonb NOT NULL DEFAULT '{}'::jsonb
+                CHECK (jsonb_typeof(parameters)='object'),
+            report jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(report)='object'),
+            created_at timestamptz NOT NULL DEFAULT now(),
+            UNIQUE (program_id,id), UNIQUE (program_id,operation_key),
+            UNIQUE (temporal_namespace,workflow_id),
+            FOREIGN KEY (program_id,input_version_id)
+                REFERENCES program_versions(program_id,id),
+            FOREIGN KEY (program_id,output_version_id)
+                REFERENCES program_versions(program_id,id)
+        );
+        CREATE INDEX processing_jobs_input_idx ON processing_jobs(program_id,input_version_id);
+        CREATE INDEX processing_jobs_output_idx ON processing_jobs(program_id,output_version_id);
+        CREATE INDEX processing_jobs_created_idx ON processing_jobs(program_id,created_at);
+        CREATE UNIQUE INDEX processing_import_fingerprint_idx
+            ON processing_jobs(program_id,(parameters->>'fingerprint')) WHERE type='import';
+        CREATE INDEX processing_import_keys_idx ON processing_jobs
+            USING gin ((parameters->'request_keys')) WHERE type='import';
+        CREATE INDEX version_documents_version_idx ON version_documents(program_id,version_id);
+        CREATE INDEX documents_program_hash_idx ON source_documents(program_id,sha256);
+        """)
 
 
 def downgrade():
     op.execute("""
+        DROP TABLE processing_jobs;
+
         DROP TABLE version_documents;
         DROP TABLE source_documents;
         ALTER TABLE programs DROP CONSTRAINT programs_current_version_fk;
         DROP TABLE program_versions;
         DROP TABLE programs;
         DROP FUNCTION reject_original_mutation();
-    """)
+        """)

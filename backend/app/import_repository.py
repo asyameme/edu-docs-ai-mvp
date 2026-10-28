@@ -1,65 +1,68 @@
-"""Задача одновременно является записью доставки в Temporal; результаты не теряются при retry."""
+"""Бизнес-запросы и результаты импорта; состояние выполнения хранит Temporal."""
 
-from uuid import uuid4
+from datetime import datetime
+from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from app.config import get_settings
 from app.errors import DomainError
 from app.repository import Repository
 
-JOB_COLUMNS = "id, program_id, attempt, status, progress, issues, created_at, updated_at"
+
+def workflow_identity(job_id, attempt):
+    return f"import-{job_id}-{attempt}"
+
+
+def workflow_attempt(workflow_id):
+    return int(workflow_id.rsplit("-", 1)[1])
 
 
 class ImportRepository:
-    def __init__(self, pool):
+    def __init__(self, pool, namespace=None):
         self.pool = pool
+        self.namespace = namespace or get_settings().temporal_namespace
 
     def create(self, program_id, fingerprint, key, stored):
         used = set()
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
             cur.execute("SET LOCAL statement_timeout = '5s'")
-            cur.execute("SELECT id FROM programs WHERE id=%s FOR UPDATE", (program_id,))
-            Repository.require(cur.fetchone())
             cur.execute(
-                """SELECT j.id, j.fingerprint FROM import_requests r
-                   JOIN import_jobs j ON j.id=r.job_id
-                   WHERE r.program_id=%s AND r.operation_key=%s""",
-                (program_id, key),
+                "SELECT current_version_id FROM programs WHERE id=%s FOR UPDATE", (program_id,)
             )
-            previous = cur.fetchone()
+            program = Repository.require(cur.fetchone())
+            previous = cur.execute(
+                """SELECT id,request_hash FROM processing_jobs
+                   WHERE program_id=%s AND type='import'
+                   AND (operation_key=%s OR parameters->'request_keys' ? %s)""",
+                (program_id, key, key),
+            ).fetchone()
             if previous:
-                if previous["fingerprint"] != fingerprint:
+                if previous["request_hash"] != fingerprint:
                     raise DomainError(409, "Ключ операции уже использован для другого пакета")
                 return previous["id"], used
-            cur.execute(
-                "SELECT id FROM import_jobs WHERE program_id=%s AND fingerprint=%s",
+            previous = cur.execute(
+                """SELECT id FROM processing_jobs WHERE program_id=%s AND type='import'
+                   AND parameters->>'fingerprint'=%s""",
                 (program_id, fingerprint),
-            )
-            previous = cur.fetchone()
+            ).fetchone()
             if previous:
                 cur.execute(
-                    "INSERT INTO import_requests(program_id,operation_key,job_id) "
-                    "VALUES (%s,%s,%s)",
-                    (program_id, key, previous["id"]),
+                    """UPDATE processing_jobs SET parameters=jsonb_set(
+                       parameters,'{request_keys}',parameters->'request_keys'||to_jsonb(%s::text))
+                       WHERE id=%s""",
+                    (key, previous["id"]),
                 )
                 return previous["id"], used
             job_id = uuid4()
-            cur.execute(
-                "INSERT INTO import_jobs(id,program_id,fingerprint) VALUES (%s,%s,%s)",
-                (job_id, program_id, fingerprint),
-            )
-            cur.execute(
-                "INSERT INTO import_requests(program_id,operation_key,job_id) VALUES (%s,%s,%s)",
-                (program_id, key, job_id),
-            )
+            documents = []
             for member_name, item in stored:
-                cur.execute(
+                previous = cur.execute(
                     """SELECT id FROM source_documents WHERE program_id=%s AND sha256=%s
                        ORDER BY created_at,id LIMIT 1""",
                     (program_id, item["sha256"]),
-                )
-                previous = cur.fetchone()
+                ).fetchone()
                 if previous:
                     document_id = previous["id"]
                 else:
@@ -80,137 +83,153 @@ class ImportRepository:
                         ),
                     )
                     used.add(document_id)
-                cur.execute(
-                    """INSERT INTO import_files(job_id,program_id,document_id,member_name)
-                       VALUES (%s,%s,%s,%s)""",
-                    (job_id, program_id, document_id, member_name),
-                )
+                documents.append({"document_id": str(document_id), "member_name": member_name})
+            cur.execute(
+                """INSERT INTO processing_jobs (
+                   id,program_id,input_version_id,operation_key,request_hash,type,
+                   temporal_namespace,workflow_id,parameters)
+                   VALUES (%s,%s,%s,%s,%s,'import',%s,%s,%s)""",
+                (
+                    job_id,
+                    program_id,
+                    program["current_version_id"],
+                    key,
+                    fingerprint,
+                    self.namespace,
+                    workflow_identity(job_id, 1),
+                    Jsonb(
+                        {"fingerprint": fingerprint, "request_keys": [key], "documents": documents}
+                    ),
+                ),
+            )
             return job_id, used
 
     def read(self, program_id, job_id, *, include_output=False):
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT "
-                + JOB_COLUMNS
-                + (", snapshot" if include_output else "")
-                + " FROM import_jobs WHERE program_id=%s AND id=%s",
-                (program_id, job_id),
+            row = Repository.require(
+                cur.execute(
+                    "SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s AND type='import'",
+                    (program_id, job_id),
+                ).fetchone()
             )
-            job = Repository.require(cur.fetchone())
-            cur.execute(
-                "SELECT f.document_id, f.member_name, f.status, f.error_code, f.error_message, "
-                "d.sha256"
-                + (", d.storage_key, f.output" if include_output else "")
-                + " FROM import_files f JOIN source_documents d ON d.id=f.document_id "
-                "WHERE f.job_id=%s ORDER BY f.member_name,f.document_id",
-                (job_id,),
-            )
-            job["files"] = cur.fetchall()
+            parameters, report = row["parameters"], row["report"]
+            ids = [UUID(d["document_id"]) for d in parameters["documents"]]
+            originals = {
+                str(d["id"]): d
+                for d in cur.execute(
+                    "SELECT id,sha256,storage_key FROM source_documents WHERE program_id=%s "
+                    "AND id=ANY(%s)",
+                    (program_id, ids),
+                ).fetchall()
+            }
+        files = []
+        for member in parameters["documents"]:
+            identity = member["document_id"]
+            result = report.get("files", {}).get(identity, {})
+            original = originals[identity]
+            item = {
+                "document_id": identity,
+                "member_name": member["member_name"],
+                "sha256": original["sha256"],
+                "status": "failed"
+                if result.get("error_code")
+                else ("completed" if result.get("output") else "pending"),
+                "error_code": result.get("error_code"),
+                "error_message": result.get("error_message"),
+            }
+            if include_output:
+                item.update(output=result.get("output"), storage_key=original["storage_key"])
+            files.append(item)
+        outcome = report.get("outcome")
+        updated_at = report.get("completed_at")
+        job = {
+            "id": row["id"],
+            "program_id": row["program_id"],
+            "attempt": workflow_attempt(row["workflow_id"]),
+            "status": outcome or "pending",
+            "progress": (95 if outcome == "failed" else 100) if outcome else 0,
+            "issues": report.get("issues", []),
+            "files": files,
+            "created_at": row["created_at"],
+            "updated_at": datetime.fromisoformat(updated_at) if updated_at else row["created_at"],
+            "_workflow_id": row["workflow_id"],
+            "_namespace": row["temporal_namespace"],
+            "_terminal": outcome is not None,
+            "_legacy": report.get("legacy_import", False),
+        }
+        if include_output:
+            job["snapshot"] = report.get("snapshot")
         return job
+
+    def job(self, job_id, *, include_output=False):
+        with self.pool.connection() as connection:
+            row = Repository.require(
+                connection.execute(
+                    "SELECT program_id FROM processing_jobs WHERE id=%s AND type='import'",
+                    (job_id,),
+                ).fetchone()
+            )
+        return self.read(row[0], job_id, include_output=include_output)
 
     def pending(self):
         with self.pool.connection() as connection:
             return connection.execute(
-                """SELECT id,attempt FROM import_jobs
-                   WHERE NOT workflow_started AND status='pending'
-                   ORDER BY created_at,id LIMIT 100"""
+                """SELECT id,workflow_id,report->>'legacy_import'='true'
+                   FROM processing_jobs WHERE type='import' AND NOT report ? 'outcome'
+                   ORDER BY created_at,id"""
             ).fetchall()
-
-    def dispatched(self, job_id, attempt):
-        with self.pool.connection() as connection:
-            connection.execute(
-                "UPDATE import_jobs SET workflow_started=true WHERE id=%s AND attempt=%s",
-                (job_id, attempt),
-            )
-
-    def begin(self, job_id, attempt):
-        with self.pool.connection() as connection:
-            row = connection.execute(
-                """UPDATE import_jobs SET status='processing',progress=greatest(progress,1),
-                   updated_at=now() WHERE id=%s AND attempt=%s
-                   AND status IN ('pending','processing') RETURNING program_id""",
-                (job_id, attempt),
-            ).fetchone()
-            return str(row[0]) if row else None
-
-    def file_started(self, job_id, document_id, attempt):
-        with self.pool.connection() as connection:
-            if not self.lock_attempt(connection, job_id, attempt):
-                return
-            connection.execute(
-                """UPDATE import_files SET status='processing'
-                   WHERE job_id=%s AND document_id=%s AND status='pending'
-                   AND EXISTS (SELECT 1 FROM import_jobs WHERE id=%s AND attempt=%s)""",
-                (job_id, document_id, job_id, attempt),
-            )
 
     def file_finished(self, job_id, document_id, attempt, output=None, code=None, message=None):
         with self.pool.connection() as connection:
-            if not self.lock_attempt(connection, job_id, attempt):
-                return
+            result = {"output": output, "error_code": code, "error_message": message}
             connection.execute(
-                """UPDATE import_files SET status=%s,output=%s,error_code=%s,error_message=%s
-                   WHERE job_id=%s AND document_id=%s AND status NOT IN ('completed','failed')
-                   AND EXISTS (SELECT 1 FROM import_jobs WHERE id=%s AND attempt=%s)""",
+                """UPDATE processing_jobs SET report=jsonb_set(
+                   report,'{files}',COALESCE(report->'files','{}'::jsonb)||%s)
+                   WHERE id=%s AND workflow_id=%s AND NOT report ? 'outcome'""",
                 (
-                    "failed" if code else "completed",
-                    Jsonb(output) if output else None,
-                    code,
-                    message,
+                    Jsonb({str(document_id): result}),
                     job_id,
-                    document_id,
-                    job_id,
-                    attempt,
+                    workflow_identity(job_id, attempt),
                 ),
-            )
-            connection.execute(
-                """UPDATE import_jobs SET progress=greatest(progress,
-                   (SELECT 5+90*count(*) FILTER (WHERE status IN ('completed','failed'))::integer
-                    /greatest(count(*)::integer,1) FROM import_files WHERE job_id=%s)),
-                   updated_at=now() WHERE id=%s AND attempt=%s AND status='processing'""",
-                (job_id, job_id, attempt),
             )
 
     def finish(self, job_id, attempt, status, snapshot, issues):
         with self.pool.connection() as connection:
             connection.execute(
-                """UPDATE import_jobs SET status=%s,progress=%s,snapshot=%s,
-                   issues=%s,updated_at=now() WHERE id=%s AND attempt=%s AND status='processing'""",
+                """UPDATE processing_jobs SET report=report||jsonb_build_object(
+                   'outcome',%s::text,'snapshot',%s::jsonb,'issues',%s::jsonb,'completed_at',now())
+                   WHERE id=%s AND workflow_id=%s AND NOT report ? 'outcome'""",
                 (
                     status,
-                    95 if status == "failed" else 100,
-                    Jsonb(snapshot) if snapshot else None,
+                    Jsonb(snapshot),
                     Jsonb(issues),
                     job_id,
-                    attempt,
+                    workflow_identity(job_id, attempt),
                 ),
             )
 
-    def retry(self, program_id, job_id):
-        with self.pool.connection() as connection:
-            row = connection.execute(
-                "SELECT status FROM import_jobs WHERE id=%s AND program_id=%s FOR UPDATE",
-                (job_id, program_id),
-            ).fetchone()
-            Repository.require(row)
-            if row[0] not in {"partial", "failed"}:
+    def retry(self, program_id, job_id, expected_workflow_id):
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            row = Repository.require(
+                cur.execute(
+                    """SELECT workflow_id,report FROM processing_jobs
+                   WHERE id=%s AND program_id=%s AND type='import' FOR UPDATE""",
+                    (job_id, program_id),
+                ).fetchone()
+            )
+            if row["workflow_id"] != expected_workflow_id:
                 return
-            connection.execute(
-                """UPDATE import_jobs SET status='pending',progress=0,attempt=attempt+1,
-                   workflow_started=false,snapshot=NULL,issues='[]'::jsonb,updated_at=now()
-                   WHERE id=%s""",
-                (job_id,),
+            # Сохраняем успешные наблюдения; новый workflow разбирает только оставшиеся документы.
+            successful = {
+                identity: result
+                for identity, result in row["report"].get("files", {}).items()
+                if result.get("output") and not result.get("error_code")
+            }
+            cur.execute(
+                "UPDATE processing_jobs SET workflow_id=%s,report=%s WHERE id=%s",
+                (
+                    workflow_identity(job_id, workflow_attempt(expected_workflow_id) + 1),
+                    Jsonb({"files": successful}),
+                    job_id,
+                ),
             )
-            connection.execute(
-                """UPDATE import_files SET status='pending',error_code=NULL,error_message=NULL
-                   WHERE job_id=%s AND status='failed'""",
-                (job_id,),
-            )
-
-    @staticmethod
-    def lock_attempt(connection, job_id, attempt):
-        row = connection.execute(
-            "SELECT attempt,status FROM import_jobs WHERE id=%s FOR UPDATE",
-            (job_id,),
-        ).fetchone()
-        return row is not None and row[0] == attempt and row[1] == "processing"

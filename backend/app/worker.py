@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.import_activities import ImportActivities
 from app.import_dispatcher import dispatch_imports
 from app.import_repository import ImportRepository
-from app.workflows import DiagnosticWorkflow, ImportWorkflow
+from app.workflows import DiagnosticWorkflow, ImportWorkflow, LegacyImportWorkflow
 
 
 async def main() -> None:
@@ -42,8 +42,17 @@ async def main() -> None:
         client,
         task_queue=settings.temporal_task_queue,
         identity=f"education-worker@{socket.gethostname()}",
-        workflows=[DiagnosticWorkflow, ImportWorkflow],
-        activities=[diagnostic_echo, imports.begin, imports.parse, imports.failed, imports.finish],
+        workflows=[DiagnosticWorkflow, LegacyImportWorkflow, ImportWorkflow],
+        activities=[
+            diagnostic_echo,
+            imports.begin,
+            imports.parse,
+            imports.failed,
+            imports.finish,
+            imports.prepare_v2,
+            imports.parse_v2,
+            imports.finish_v2,
+        ],
         activity_executor=executor,
         max_concurrent_activities=2,
         graceful_shutdown_timeout=timedelta(seconds=5),

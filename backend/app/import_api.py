@@ -20,6 +20,7 @@ from app.domain import Snapshot
 from app.errors import DomainError
 from app.import_archive import read_package
 from app.import_repository import ImportRepository
+from app.import_status import read_status
 from app.program_api import OperationKey, RepoDep, StorageDep
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/imports", tags=["Imports"])
@@ -79,8 +80,12 @@ def upload_package(
 
 
 @router.get("/{job_id}")
-def read_import(program_id: UUID, job_id: UUID, repo: RepoDep) -> ImportRead:
-    return ImportRepository(repo.pool).read(program_id, job_id)
+async def read_import(
+    program_id: UUID, job_id: UUID, repo: RepoDep, request: Request
+) -> ImportRead:
+    return await read_status(
+        ImportRepository(repo.pool), request.app.state.resources.temporal, program_id, job_id
+    )
 
 
 @router.get("/{job_id}/events", response_class=EventSourceResponse)
@@ -103,20 +108,34 @@ async def import_events(
             return
         await asyncio.sleep(1)
         try:
-            state = await asyncio.to_thread(imports.read, program_id, job_id)
+            state = await read_status(
+                imports, request.app.state.resources.temporal, program_id, job_id
+            )
         except (psycopg.Error, PoolTimeout, OSError):
             yield ServerSentEvent(
                 data={"message": "Состояние временно недоступно; соединение будет восстановлено"},
                 event="unavailable",
             )
             return
+        except DomainError as error:
+            if error.status != 503:
+                raise
+            yield ServerSentEvent(data={"message": error.detail}, event="unavailable")
+            return
 
 
 @router.post("/{job_id}/retry", status_code=202)
-def retry_import(program_id: UUID, job_id: UUID, repo: RepoDep) -> ImportRead:
+async def retry_import(
+    program_id: UUID,
+    job_id: UUID,
+    repo: RepoDep,
+    request: Request,
+) -> ImportRead:
     imports = ImportRepository(repo.pool)
-    imports.retry(program_id, job_id)
-    return imports.read(program_id, job_id)
+    state = await read_status(imports, request.app.state.resources.temporal, program_id, job_id)
+    if state["status"] in {"partial", "failed"}:
+        await asyncio.to_thread(imports.retry, program_id, job_id, state["_workflow_id"])
+    return await asyncio.to_thread(imports.read, program_id, job_id)
 
 
 @router.get("/{job_id}/result")

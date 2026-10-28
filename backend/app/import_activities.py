@@ -20,19 +20,15 @@ class ImportActivities:
         self.settings = settings
 
     def job(self, job_id):
-        with self.repo.pool.connection() as connection:
-            program_id = connection.execute(
-                "SELECT program_id FROM import_jobs WHERE id=%s",
-                (UUID(job_id),),
-            ).fetchone()[0]
-        return self.repo.read(program_id, UUID(job_id), include_output=True)
+        return self.repo.job(UUID(job_id), include_output=True)
 
     @activity.defn(name="import_begin")
     def begin(self, request: dict) -> list[str]:
         job_id = request["job_id"]
-        if not self.repo.begin(UUID(job_id), request["attempt"]):
+        job = self.job(job_id)
+        if job["attempt"] != request["attempt"] or job["_terminal"]:
             return []
-        return [str(item["document_id"]) for item in self.job(job_id)["files"]]
+        return [str(item["document_id"]) for item in job["files"]]
 
     @activity.defn(name="import_parse_file")
     def parse(self, request: dict) -> None:
@@ -44,7 +40,6 @@ class ImportActivities:
         item = next(f for f in job["files"] if str(f["document_id"]) == document_id)
         if item["status"] in {"completed", "failed"}:
             return
-        self.repo.file_started(UUID(job_id), UUID(document_id), attempt)
         if not self.settings.parser_url:
             self.repo.file_finished(
                 UUID(job_id),
@@ -147,3 +142,25 @@ class ImportActivities:
             snapshot if successful else None,
             issues,
         )
+
+    @activity.defn(name="import_prepare_v2")
+    def prepare_v2(self, request: dict) -> list[dict]:
+        job = self.job(request["job_id"])
+        if job["attempt"] != request["attempt"]:
+            return []
+        return [
+            {"document_id": str(item["document_id"]), "status": item["status"]}
+            for item in job["files"]
+        ]
+
+    @activity.defn(name="import_parse_file_v2")
+    def parse_v2(self, request: dict) -> dict:
+        self.parse(request)
+        job = self.job(request["job_id"])
+        item = next(f for f in job["files"] if str(f["document_id"]) == request["document_id"])
+        return {"document_id": str(item["document_id"]), "status": item["status"]}
+
+    @activity.defn(name="import_finish_v2")
+    def finish_v2(self, request: dict) -> str:
+        self.finish(request)
+        return self.job(request["job_id"])["status"]
