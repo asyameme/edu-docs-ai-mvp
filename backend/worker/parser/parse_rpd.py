@@ -73,7 +73,7 @@ def extract_indicators(text, competency_code, source_ref):
     pattern = re.compile(
         r"(?<!\S)"
         r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)"
-        r"\.?(?=\s|$)"
+        r"(?:\.(?!\d)|(?=\s|$))"
     )
     matches = list(pattern.finditer(text))
 
@@ -446,7 +446,6 @@ def main():
     print(
         f"Компетенций: {len(result.competencies)}. "
         f"Индикаторов: {len(result.indicators)}. "
-        f"JSON: {args.output}"
     )
 
 
