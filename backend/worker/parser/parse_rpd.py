@@ -10,6 +10,8 @@ from docx.text.paragraph import Paragraph
 
 from .models import (
     Competency,
+    Indicator,
+    Relation,
     ParseIssue,
     ParserMeta,
     ParserOutput,
@@ -64,6 +66,56 @@ def is_results_heading(paragraph):
         "перечень результатов обучения (learningoutcomes)",
     }
 
+def extract_indicators(text, competency_code, source_ref):
+    """Разобрать индикаторы одной ячейки."""
+    indicators = []
+    issues = []
+    pattern = re.compile(
+        r"(?<!\S)"
+        r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)"
+        r"\.?(?=\s|$)"
+    )
+    matches = list(pattern.finditer(text))
+
+    if not matches:
+        issues.append(ParseIssue(
+            category="empty_cell" if not text.strip() else "unparsed_row",
+            message="В ячейке не найден код индикатора",
+            source_ref=source_ref,
+        ))
+        return indicators, issues
+
+    if text[:matches[0].start()].strip():
+        issues.append(ParseIssue(
+            category="unparsed_row",
+            message="Есть неразобранный текст перед первым индикатором",
+            source_ref=source_ref,
+        ))
+
+    for index, match in enumerate(matches):
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+        description = " ".join(text[match.end():end].split())
+
+        if not description:
+            issues.append(ParseIssue(
+                category="empty_cell",
+                message=f"Нет описания индикатора {match.group(1)}",
+                source_ref=source_ref,
+            ))
+            continue
+
+        indicators.append(Indicator(
+            code=match.group(1),
+            text=description,
+            competency_code=competency_code,
+            source_ref=source_ref,
+        ))
+
+    return indicators, issues
 
 def parse_rpd(file_path):
     file_path = Path(file_path)
@@ -113,7 +165,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_competencies_v1",
+            parser_config="rpd_competencies_indicators_v1",
         )
     )
 
@@ -123,7 +175,7 @@ def parse_rpd(file_path):
             severity="info",
             message=(
                 "Частичный разбор: "
-                "извлекаются только компетенции."
+                "извлекаются только компетенции и индикаторы."
             ),
             source_ref=SourceRef(file=file_path.name),
         )
@@ -178,7 +230,9 @@ def parse_rpd(file_path):
 
         table_number += 1
         column = None
+        indicator_column = None
         seen_cells = set()
+        seen_indicator_cells = set()
 
         for row_number, row in enumerate(block.rows, 1):
             headers = [
@@ -191,6 +245,36 @@ def parse_rpd(file_path):
                     "код и наименование компетенции"
                 )
                 found_table = True
+
+                indicator_columns = [
+                    index
+                    for index, header in enumerate(headers)
+                    if "код индикатора" in header
+                ]
+
+                if len(indicator_columns) == 1:
+                    indicator_column = indicator_columns[0]
+                else:
+                    indicator_column = None
+
+                    output.parse_issues.append(ParseIssue(
+                        category=(
+                            "not_found"
+                            if not indicator_columns
+                            else "ambiguous"
+                        ),
+                        message=(
+                            "Не удалось однозначно найти "
+                            "колонку индикаторов"
+                        ),
+                        source_ref=SourceRef(
+                            file=file_path.name,
+                            section=section,
+                            table=table_number,
+                            row=row_number,
+                        ),
+                    ))
+
                 continue
 
             if column is None:
@@ -219,12 +303,6 @@ def parse_rpd(file_path):
 
             cell = row.cells[column]
 
-            #объединенная ячейка может повторяться в row.cells
-            if cell._tc in seen_cells:
-                continue
-
-            seen_cells.add(cell._tc)
-
             text = " ".join(cell.text.split())
 
             if not any(
@@ -242,14 +320,60 @@ def parse_rpd(file_path):
             )
 
             if match and match.group(2):
-                output.competencies.append(
-                    Competency(
-                        code=match.group(1),
+                competency_code = match.group(1)
+
+                if cell._tc not in seen_cells:
+                    output.competencies.append(Competency(
+                        code=competency_code,
                         formulation=match.group(2),
                         source_ref=ref,
-                    )
+                    ))
+                    seen_cells.add(cell._tc)
+
+                if indicator_column is None:
+                    continue
+
+                indicator_ref = SourceRef(
+                    file=file_path.name,
+                    section=section,
+                    table=table_number,
+                    row=row_number,
+                    col=indicator_column + 1,
                 )
 
+                if indicator_column >= len(row.cells):
+                    output.parse_issues.append(ParseIssue(
+                        category="unexpected_format",
+                        message="В строке отсутствует ячейка индикаторов",
+                        source_ref=indicator_ref,
+                    ))
+                    continue
+
+                indicator_cell = row.cells[indicator_column]
+
+                if indicator_cell._tc in seen_indicator_cells:
+                    continue
+
+                seen_indicator_cells.add(indicator_cell._tc)
+
+                indicators, issues = extract_indicators(
+                    indicator_cell.text,
+                    competency_code,
+                    indicator_ref,
+                )
+
+                output.indicators.extend(indicators)
+                output.parse_issues.extend(issues)
+
+                for indicator in indicators:
+                    output.relations.append(Relation(
+                        src_entity="competency",
+                        src_key=competency_code,
+                        dst_entity="indicator",
+                        dst_key=indicator.code,
+                        kind="имеет",
+                        source_ref=indicator_ref,
+                    ))
             else:
                 category = (
                     "empty_cell"
@@ -321,6 +445,7 @@ def main():
 
     print(
         f"Компетенций: {len(result.competencies)}. "
+        f"Индикаторов: {len(result.indicators)}. "
         f"JSON: {args.output}"
     )
 
