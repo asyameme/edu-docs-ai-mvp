@@ -134,7 +134,7 @@ def extract_indicators(text, competency_code, source_ref):
             line = f"{suffix.group(2)} {suffix.group(1).strip()}"
 
         lines.append(line)
-        
+
     text = "\n".join(lines)
     matches = list(pattern.finditer(text))
 
@@ -381,10 +381,36 @@ def parse_rpd(file_path):
             # Примеры: УК-1, ОПК-1, ПКП-УНК-03
             parsed = split_competency(text)
 
-            if parsed and parsed[1]:
+            if parsed:
                 competency_code, formulation = parsed
 
-                if cell._tc not in seen_cells:
+                if not formulation:
+                    known_formulations = {
+                        competency.formulation
+                        for competency in output.competencies
+                        if competency.code == competency_code
+                        and competency.source_ref.table == table_number
+                    }
+
+                    if len(known_formulations) != 1:
+                        output.parse_issues.append(ParseIssue(
+                            category=(
+                                "manual_review"
+                                if not known_formulations
+                                else "ambiguous"
+                            ),
+                            message=(
+                                f"Для кода {competency_code} выше в таблице "
+                                "не найдено полного описания"
+                                if not known_formulations
+                                else f"У кода {competency_code} выше в таблице "
+                                "есть разные описания"
+                            ),
+                            source_ref=ref,
+                        ))
+                        continue
+
+                if formulation and cell._tc not in seen_cells:
                     output.competencies.append(Competency(
                         code=competency_code,
                         formulation=formulation,
