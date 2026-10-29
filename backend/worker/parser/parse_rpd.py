@@ -66,6 +66,31 @@ def is_results_heading(paragraph):
         "перечень результатов обучения (learningoutcomes)",
     }
 
+
+def split_competency(text):
+    """Выделить код и описание компетенции."""
+    text = " ".join(text.split())
+    code_pattern = r"[А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+"
+
+    match = re.fullmatch(
+        rf"({code_pattern})[.,:]?(?:\s+(.*))?",
+        text,
+    )
+
+    if match:
+        return match.group(1), match.group(2) or ""
+
+    match = re.fullmatch(
+        rf"(.+?)\s*\(({code_pattern})\)\.?",
+        text,
+    )
+
+    if match:
+        return match.group(2), match.group(1).strip()
+
+    return None
+
+
 def extract_indicators(text, competency_code, source_ref):
     """Разобрать индикаторы одной ячейки."""
     indicators = []
@@ -318,20 +343,15 @@ def parse_rpd(file_path):
                 continue
 
             # Примеры: УК-1, ОПК-1, ПКП-УНК-03
-            match = re.fullmatch(
-                r"([А-ЯA-Z][А-ЯA-Z0-9]*"
-                r"(?:-[А-ЯA-Z0-9]+)+)"
-                r"\.?(?:\s+(.*))?",
-                text,
-            )
+            parsed = split_competency(text)
 
-            if match and match.group(2):
-                competency_code = match.group(1)
+            if parsed and parsed[1]:
+                competency_code, formulation = parsed
 
                 if cell._tc not in seen_cells:
                     output.competencies.append(Competency(
                         code=competency_code,
-                        formulation=match.group(2),
+                        formulation=formulation,
                         source_ref=ref,
                     ))
                     seen_cells.add(cell._tc)
@@ -383,7 +403,7 @@ def parse_rpd(file_path):
             else:
                 category = (
                     "empty_cell"
-                    if not text or match
+                    if not text or parsed
                     else "unparsed_row"
                 )
 
