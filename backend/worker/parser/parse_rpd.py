@@ -16,6 +16,7 @@ from .models import (
     ParserMeta,
     ParserOutput,
     SourceRef,
+    LearningOutcome,
 )
 
 
@@ -216,6 +217,154 @@ def extract_indicators(text, competency_code, source_ref):
 
     return indicators, issues
 
+def extract_learning_outcomes(text, source_ref, start_index=1):
+    """Разобрать результаты обучения одной ячейки."""
+    outcomes = []
+    issues = []
+    buffer = []
+    current_kind = None
+
+    kinds = {
+        "знает": "знать", "знать": "знать",
+        "умеет": "уметь", "уметь": "уметь",
+        "владеет": "владеть", "владеть": "владеть",
+    }
+    code_kinds = {
+        "З": "знать",
+        "У": "уметь",
+        "В": "владеть",
+    }
+
+    heading_pattern = re.compile(
+        r"^(знает|знать|умеет|уметь|владеет|владеть)\b\s*:?\s*",
+        re.IGNORECASE,
+    )
+    code_pattern = (
+        r"(?P<code>[А-ЯA-Z][А-ЯA-Z0-9]*"
+        r"(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+\.?\s*"
+        r"(?P<kind>[ЗУВ3])-\d+)"
+    )
+    prefix_pattern = re.compile(
+        rf"^{code_pattern}[.:\s\u2013\u2014-]*(?P<text>.*)$"
+    )
+    suffix_pattern = re.compile(
+        rf"^(?P<text>.+?)\s*\({code_pattern}\)[.;]?$"
+    )
+
+    def add_outcome(value, kind, code=None, message=None):
+        value = " ".join(value.split())
+
+        if not value:
+            issues.append(ParseIssue(
+                category="empty_cell",
+                message=(
+                    f"Нет описания результата обучения {code or ''}"
+                ).strip(),
+                source_ref=source_ref,
+            ))
+            return
+
+        outcomes.append(LearningOutcome(
+            local_id=f"LO-{start_index + len(outcomes):03d}",
+            text=value,
+            kind=kind,
+            code=code,
+            source_ref=source_ref,
+        ))
+
+        if message or kind is None:
+            issues.append(ParseIssue(
+                category="manual_review",
+                message=message or (
+                    "Не удалось определить вид результата обучения; "
+                    "текст сохранен"
+                ),
+                source_ref=source_ref,
+            ))
+
+    def flush():
+        if buffer:
+            add_outcome(" ".join(buffer), current_kind)
+            buffer.clear()
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("•●▪").strip()
+
+        if not line:
+            continue
+
+        heading = heading_pattern.match(line)
+
+        if heading:
+            flush()
+            current_kind = kinds[heading.group(1).casefold()]
+            line = line[heading.end():].strip()
+
+            if not line:
+                continue
+
+        codes = list(re.finditer(code_pattern, line))
+        short_codes = re.findall(r"\b[ЗУВ3]-\d+\b", line)
+
+        if not codes and not short_codes:
+            buffer.append(line)
+            continue
+
+        flush()
+
+        match = (
+            prefix_pattern.fullmatch(line)
+            or suffix_pattern.fullmatch(line)
+        )
+
+        if len(codes) != 1 or len(short_codes) != 1 or match is None:
+            add_outcome(
+                raw_line.strip(),
+                None,
+                message=(
+                    "Неоднозначная запись результата обучения; "
+                    "исходный текст сохранен"
+                ),
+            )
+            continue
+
+        kind = code_kinds.get(match.group("kind"))
+        body_heading = heading_pattern.match(match.group("text"))
+
+        if kind is None:
+            kind = (
+                kinds[body_heading.group(1).casefold()]
+                if body_heading
+                else current_kind
+            )
+
+        message = None
+
+        if current_kind is not None and current_kind != kind:
+            kind = None
+            message = (
+                "Вид результата в заголовке и коде различается; "
+                "нужна проверка"
+            )
+
+        add_outcome(
+            match.group("text"),
+            kind,
+            match.group("code"),
+            message,
+        )
+
+    flush()
+
+    if not outcomes and not issues:
+        issues.append(ParseIssue(
+            category="empty_cell",
+            message="В ячейке нет непустых результатов обучения",
+            source_ref=source_ref,
+        ))
+
+    return outcomes, issues
+
 def parse_rpd(file_path):
     file_path = Path(file_path)
 
@@ -264,7 +413,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_competencies_indicators_v2",
+            parser_config="rpd_competencies_indicators_outcomes_v1",
         )
     )
 
@@ -274,7 +423,7 @@ def parse_rpd(file_path):
             severity="info",
             message=(
                 "Частичный разбор: "
-                "извлекаются только компетенции и индикаторы."
+                "извлекаются только компетенции и индикаторы и результаты обучения."
             ),
             source_ref=SourceRef(file=file_path.name),
         )
@@ -333,6 +482,9 @@ def parse_rpd(file_path):
         indicator_column = None
         seen_cells = set()
         seen_indicator_cells = set()
+        outcome_column = None
+        outcomes_by_cell = {}
+        seen_outcome_relations = set()
 
         for row_number, row in enumerate(block.rows, 1):
             headers = [
@@ -346,6 +498,36 @@ def parse_rpd(file_path):
                 )
                 found_table = True
                 header_row = row_number
+                outcome_columns = [
+                    index
+                    for index, header in enumerate(headers)
+                    if "результат" in header and "обучен" in header
+                ]
+
+                outcome_column = (
+                    outcome_columns[0]
+                    if len(outcome_columns) == 1
+                    else None
+                )
+
+                if outcome_column is None:
+                    output.parse_issues.append(ParseIssue(
+                        category=(
+                            "not_found"
+                            if not outcome_columns
+                            else "ambiguous"
+                        ),
+                        message=(
+                            "Не удалось однозначно найти "
+                            "колонку результатов обучения"
+                        ),
+                        source_ref=SourceRef(
+                            file=file_path.name,
+                            section=section,
+                            table=table_number,
+                            row=row_number,
+                        ),
+                    ))
                 indicator_columns = [
                     index
                     for index, header in enumerate(headers)
@@ -428,6 +610,42 @@ def parse_rpd(file_path):
                 continue
 
             # Примеры: УК-1, ОПК-1, ПКП-УНК-03
+            row_outcomes = []
+
+            if outcome_column is not None:
+                outcome_ref = SourceRef(
+                    file=file_path.name,
+                    section=section,
+                    table=table_number,
+                    row=row_number,
+                    col=outcome_column + 1,
+                )
+
+                if outcome_column >= len(row.cells):
+                    output.parse_issues.append(ParseIssue(
+                        category="unexpected_format",
+                        message=(
+                            "В строке отсутствует "
+                            "ячейка результатов обучения"
+                        ),
+                        source_ref=outcome_ref,
+                    ))
+                else:
+                    outcome_cell = row.cells[outcome_column]
+
+                    if outcome_cell._tc not in outcomes_by_cell:
+                        values, issues = extract_learning_outcomes(
+                            outcome_cell.text,
+                            outcome_ref,
+                            start_index=len(output.learning_outcomes) + 1,
+                        )
+
+                        outcomes_by_cell[outcome_cell._tc] = values
+                        output.learning_outcomes.extend(values)
+                        output.parse_issues.extend(issues)
+
+                    row_outcomes = outcomes_by_cell[outcome_cell._tc]
+
             parsed_items = split_competencies(cell.text)
             row_codes = []
             new_cell = cell._tc not in seen_cells
@@ -491,6 +709,46 @@ def parse_rpd(file_path):
 
             seen_cells.add(cell._tc)
             row_codes = list(dict.fromkeys(row_codes))
+            for outcome in row_outcomes:
+                if not row_codes:
+                    continue
+
+                parents = row_codes
+
+                if len(parsed_items) > 1:
+                    parents = [
+                        code
+                        for code in row_codes
+                        if outcome.code
+                        and outcome.code.startswith(code + ".")
+                    ]
+
+                if len(parents) != 1:
+                    output.parse_issues.append(ParseIssue(
+                        category="ambiguous",
+                        message=(
+                            "Не удалось определить компетенцию "
+                            f"результата {outcome.local_id}"
+                        ),
+                        source_ref=outcome.source_ref,
+                    ))
+                    continue
+
+                relation_key = (parents[0], outcome.local_id)
+
+                if relation_key in seen_outcome_relations:
+                    continue
+
+                seen_outcome_relations.add(relation_key)
+
+                output.relations.append(Relation(
+                    src_entity="competency",
+                    src_key=parents[0],
+                    dst_entity="learning_outcome",
+                    dst_key=outcome.local_id,
+                    kind="включает",
+                    source_ref=outcome.source_ref,
+                ))
 
             if not row_codes or indicator_column is None:
                 continue
@@ -613,6 +871,7 @@ def main():
     print(
         f"Компетенций: {len(result.competencies)}. "
         f"Индикаторов: {len(result.indicators)}. "
+        f"Результатов обучения: {len(result.learning_outcomes)}. "
     )
 
 
