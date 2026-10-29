@@ -59,7 +59,7 @@ def is_results_heading(paragraph):
         "",
         normalize(paragraph.text),
     )
-
+    text = re.sub(r"\bперечен\s+ь\b", "перечень", text)
     return text in {
         "перечень результатов обучения",
         "перечень результатов обучения (learning outcomes)",
@@ -90,6 +90,27 @@ def split_competency(text):
 
     return None
 
+def split_competencies(text):
+    """Разделить несколько записей компетенций в одной ячейке."""
+    parts = []
+    current = []
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if current and split_competency(line) is not None:
+            parts.append(" ".join(current))
+            current = []
+
+        current.append(line)
+
+    if current:
+        parts.append(" ".join(current))
+
+    return [split_competency(part) for part in parts]
 
 def extract_indicators(text, competency_code, source_ref):
     """Разобрать индикаторы одной ячейки."""
@@ -139,13 +160,30 @@ def extract_indicators(text, competency_code, source_ref):
     matches = list(pattern.finditer(text))
 
     if not matches:
-        issues.append(ParseIssue(
-            category="empty_cell" if not text.strip() else "unparsed_row",
-            message="В ячейке не найден код индикатора",
-            source_ref=source_ref,
-        ))
-        return indicators, issues
+        repeated_competency = split_competency(text)
 
+        if repeated_competency:
+            issues.append(ParseIssue(
+                category="manual_review",
+                message=(
+                    "В колонке индикаторов указан код компетенции "
+                    f"{repeated_competency[0]}, а не код индикатора"
+                ),
+                source_ref=source_ref,
+            ))
+        else:
+            issues.append(ParseIssue(
+                category=(
+                    "empty_cell"
+                    if not text.strip()
+                    else "unparsed_row"
+                ),
+                message="В ячейке не найден код индикатора",
+                source_ref=source_ref,
+            ))
+
+        return indicators, issues
+    
     if text[:matches[0].start()].strip():
         issues.append(ParseIssue(
             category="unparsed_row",
@@ -226,7 +264,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_competencies_indicators_v1",
+            parser_config="rpd_competencies_indicators_v2",
         )
     )
 
@@ -291,6 +329,7 @@ def parse_rpd(file_path):
 
         table_number += 1
         column = None
+        header_row = None
         indicator_column = None
         seen_cells = set()
         seen_indicator_cells = set()
@@ -306,7 +345,7 @@ def parse_rpd(file_path):
                     "код и наименование компетенции"
                 )
                 found_table = True
-
+                header_row = row_number
                 indicator_columns = [
                     index
                     for index, header in enumerate(headers)
@@ -346,7 +385,17 @@ def parse_rpd(file_path):
 
             if column is None:
                 continue
+            labels = [cell.text.strip() for cell in row.cells]
 
+            if (
+                row_number == header_row + 1
+                and sum(bool(label) for label in labels) >= 2
+                and all(
+                    not label or label == str(index)
+                    for index, label in enumerate(labels, 1)
+                )
+            ):
+                continue
             ref = SourceRef(
                 file=file_path.name,
                 section=section,
@@ -379,9 +428,30 @@ def parse_rpd(file_path):
                 continue
 
             # Примеры: УК-1, ОПК-1, ПКП-УНК-03
-            parsed = split_competency(text)
+            parsed_items = split_competencies(cell.text)
+            row_codes = []
+            new_cell = cell._tc not in seen_cells
 
-            if parsed:
+            if not parsed_items:
+                output.parse_issues.append(ParseIssue(
+                    category="manual_review",
+                    message=(
+                        "В строке есть данные, но не указана компетенция; "
+                        "нужно проверить принадлежность этих данных"
+                    ),
+                    source_ref=ref,
+                ))
+                continue
+
+            for parsed in parsed_items:
+                if parsed is None:
+                    output.parse_issues.append(ParseIssue(
+                        category="unparsed_row",
+                        message="Не удалось разобрать запись компетенции",
+                        source_ref=ref,
+                    ))
+                    continue
+
                 competency_code, formulation = parsed
 
                 if not formulation:
@@ -410,76 +480,85 @@ def parse_rpd(file_path):
                         ))
                         continue
 
-                if formulation and cell._tc not in seen_cells:
+                if formulation and new_cell:
                     output.competencies.append(Competency(
                         code=competency_code,
                         formulation=formulation,
                         source_ref=ref,
                     ))
-                    seen_cells.add(cell._tc)
 
-                if indicator_column is None:
-                    continue
+                row_codes.append(competency_code)
 
-                indicator_ref = SourceRef(
-                    file=file_path.name,
-                    section=section,
-                    table=table_number,
-                    row=row_number,
-                    col=indicator_column + 1,
-                )
+            seen_cells.add(cell._tc)
+            row_codes = list(dict.fromkeys(row_codes))
 
-                if indicator_column >= len(row.cells):
-                    output.parse_issues.append(ParseIssue(
-                        category="unexpected_format",
-                        message="В строке отсутствует ячейка индикаторов",
+            if not row_codes or indicator_column is None:
+                continue
+
+            indicator_ref = SourceRef(
+                file=file_path.name,
+                section=section,
+                table=table_number,
+                row=row_number,
+                col=indicator_column + 1,
+            )
+
+            if indicator_column >= len(row.cells):
+                output.parse_issues.append(ParseIssue(
+                    category="unexpected_format",
+                    message="В строке отсутствует ячейка индикаторов",
+                    source_ref=indicator_ref,
+                ))
+                continue
+
+            indicator_cell = row.cells[indicator_column]
+
+            if indicator_cell._tc in seen_indicator_cells:
+                continue
+
+            seen_indicator_cells.add(indicator_cell._tc)
+
+            indicators, issues = extract_indicators(
+                indicator_cell.text,
+                row_codes[0],
+                indicator_ref,
+            )
+            output.parse_issues.extend(issues)
+
+            for indicator in indicators:
+                if len(parsed_items) > 1:
+                    parents = [
+                        code for code in row_codes
+                        if indicator.code.startswith(code + ".")
+                    ]
+
+                    if len(parents) != 1:
+                        output.parse_issues.append(ParseIssue(
+                            category="ambiguous",
+                            message=(
+                                "Не удалось определить компетенцию "
+                                f"индикатора {indicator.code} в этой строке"
+                            ),
+                            source_ref=indicator_ref,
+                        ))
+                        continue
+
+                    indicator = Indicator(
+                        code=indicator.code,
+                        text=indicator.text,
+                        competency_code=parents[0],
                         source_ref=indicator_ref,
-                    ))
-                    continue
-
-                indicator_cell = row.cells[indicator_column]
-
-                if indicator_cell._tc in seen_indicator_cells:
-                    continue
-
-                seen_indicator_cells.add(indicator_cell._tc)
-
-                indicators, issues = extract_indicators(
-                    indicator_cell.text,
-                    competency_code,
-                    indicator_ref,
-                )
-
-                output.indicators.extend(indicators)
-                output.parse_issues.extend(issues)
-
-                for indicator in indicators:
-                    output.relations.append(Relation(
-                        src_entity="competency",
-                        src_key=competency_code,
-                        dst_entity="indicator",
-                        dst_key=indicator.code,
-                        kind="имеет",
-                        source_ref=indicator_ref,
-                    ))
-            else:
-                category = (
-                    "empty_cell"
-                    if not text or parsed
-                    else "unparsed_row"
-                )
-
-                output.parse_issues.append(
-                    ParseIssue(
-                        category=category,
-                        message=(
-                            "Не удалось получить код "
-                            "и формулировку компетенции"
-                        ),
-                        source_ref=ref,
                     )
-                )
 
+                output.indicators.append(indicator)
+                output.relations.append(Relation(
+                    src_entity="competency",
+                    src_key=indicator.competency_code,
+                    dst_entity="indicator",
+                    dst_key=indicator.code,
+                    kind="имеет",
+                    source_ref=indicator_ref,
+                ))
     if not found_table or not output.competencies:
         output.parse_issues.append(
             ParseIssue(
