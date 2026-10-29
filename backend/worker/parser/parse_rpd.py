@@ -98,23 +98,43 @@ def extract_indicators(text, competency_code, source_ref):
     pattern = re.compile(
         r"(?<!\S)"
         r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)"
-        r"(?:\.(?!\d)|(?=\s|$))"
+        r"(?:\.(?!\d)|:|(?=\s|$))"
     )
     suffix_pattern = re.compile(
         r"(.+?)\s*\("
         r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)"
         r"\)\.?"
     )
+    indicator_code = (
+        r"[А-ЯA-Z][А-ЯA-Z0-9]*"
+        r"(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+"
+    )
+    group_pattern = re.compile(
+        rf"({indicator_code}(?:\s*;\s*{indicator_code})+)"
+        r"\s*:\s*(.+)"
+    )
     lines = []
 
     for line in text.splitlines():
+        group = group_pattern.fullmatch(line.strip())
+
+        if group:
+            codes = re.split(r"\s*;\s*", group.group(1))
+            description = group.group(2)
+
+            lines.extend(
+                f"{code} {description}"
+                for code in codes
+            )
+            continue
+
         suffix = suffix_pattern.fullmatch(line.strip())
 
         if suffix and not pattern.match(line.strip()):
             line = f"{suffix.group(2)} {suffix.group(1).strip()}"
 
         lines.append(line)
-
+        
     text = "\n".join(lines)
     matches = list(pattern.finditer(text))
 
