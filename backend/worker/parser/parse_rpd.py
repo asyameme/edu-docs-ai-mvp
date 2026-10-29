@@ -100,6 +100,22 @@ def extract_indicators(text, competency_code, source_ref):
         r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)"
         r"(?:\.(?!\d)|(?=\s|$))"
     )
+    suffix_pattern = re.compile(
+        r"(.+?)\s*\("
+        r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)"
+        r"\)\.?"
+    )
+    lines = []
+
+    for line in text.splitlines():
+        suffix = suffix_pattern.fullmatch(line.strip())
+
+        if suffix and not pattern.match(line.strip()):
+            line = f"{suffix.group(2)} {suffix.group(1).strip()}"
+
+        lines.append(line)
+
+    text = "\n".join(lines)
     matches = list(pattern.finditer(text))
 
     if not matches:
