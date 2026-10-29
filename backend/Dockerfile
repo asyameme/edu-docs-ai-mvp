@@ -4,11 +4,12 @@ WORKDIR /workspace
 COPY requirements*.txt ./
 RUN pip install -r requirements.txt -r requirements-dev.txt
 RUN useradd --create-home --uid 10001 appuser
-RUN mkdir -p /data/originals && chown appuser:appuser /workspace /data/originals
+RUN mkdir -p /data/originals /data/artifacts && chown appuser:appuser /workspace /data/originals /data/artifacts
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser contracts ./contracts
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser tests ./tests
+COPY --chown=appuser:appuser examples ./examples
 COPY --chown=appuser:appuser pyproject.toml alembic.ini ./
 COPY --chown=appuser:appuser migrations ./migrations
 USER appuser

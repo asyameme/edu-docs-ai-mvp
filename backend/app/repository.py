@@ -7,7 +7,7 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from app.domain import Snapshot
+from app.domain import Snapshot, SnapshotV2
 from app.errors import DomainError
 
 PROGRAM_COLUMNS = "id, name, current_version_id, created_at"
@@ -119,6 +119,12 @@ class Repository:
                 "SELECT current_version_id FROM programs WHERE id=%s FOR UPDATE", (program_id,)
             )
             current = self.require(cursor.fetchone())["current_version_id"]
+            if cursor.execute(
+                """SELECT id FROM processing_jobs WHERE program_id=%s AND
+                   (operation_key=%s OR parameters->'request_keys' ? %s)""",
+                (program_id, key, key),
+            ).fetchone():
+                raise DomainError(409, "Ключ использован для фоновой задачи")
             cursor.execute(
                 "SELECT "
                 + VERSION_COLUMNS
@@ -137,7 +143,26 @@ class Repository:
                     "SELECT snapshot FROM program_versions WHERE program_id=%s AND id=%s",
                     (program_id, restore_id),
                 )
-                snapshot = Snapshot.model_validate(self.require(cursor.fetchone())["snapshot"])
+                restored = self.require(cursor.fetchone())["snapshot"]
+                if restored.get("schema_version") == 2:
+                    from app.review_logic import copy_sources
+                    from app.review_storage import insert_version
+
+                    restored = {**restored, "review": None}
+                    version_id = uuid4()
+                    snapshot = copy_sources(SnapshotV2.model_validate(restored), version_id)
+                    return insert_version(
+                        cursor,
+                        program_id,
+                        current,
+                        version_id,
+                        snapshot,
+                        key=key,
+                        fingerprint=fingerprint,
+                        origin="restore",
+                        restore_id=restore_id,
+                    )
+                snapshot = Snapshot.model_validate(restored)
             cursor.execute(
                 "SELECT number FROM program_versions WHERE program_id=%s AND id=%s",
                 (program_id, current),

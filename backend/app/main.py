@@ -15,6 +15,7 @@ from app.health import Resources, check_dependencies
 from app.import_api import router as import_router
 from app.models import LiveResponse, ReadyResponse
 from app.program_api import router as program_router
+from app.review_api import router as review_router
 
 
 @asynccontextmanager
@@ -51,7 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="Educational Documents",
-    version="0.4.0",
+    version="0.5.0",
     description="Хранение программ и версий, пакетный импорт с подключаемым внешним парсером.",
     lifespan=lifespan,
 )
@@ -74,6 +75,7 @@ async def ready(request: Request, response: Response) -> ReadyResponse:
 app.include_router(health)
 app.include_router(program_router)
 app.include_router(import_router)
+app.include_router(review_router)
 
 
 @app.exception_handler(DomainError)

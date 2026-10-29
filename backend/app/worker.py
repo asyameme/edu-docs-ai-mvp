@@ -14,6 +14,10 @@ from app.config import get_settings
 from app.import_activities import ImportActivities
 from app.import_dispatcher import dispatch_imports
 from app.import_repository import ImportRepository
+from app.review_activities import ReviewActivities
+from app.review_dispatcher import dispatch_reviews
+from app.review_repository import ReviewRepository
+from app.review_workflow import ReviewWorkflow
 from app.workflows import DiagnosticWorkflow, ImportWorkflow, LegacyImportWorkflow
 
 
@@ -37,12 +41,13 @@ async def main() -> None:
         timeout=5,
     )
     imports = ImportActivities(pool, settings)
+    reviews = ReviewActivities(pool, settings)
     executor = ThreadPoolExecutor(max_workers=4)
     async with Worker(
         client,
         task_queue=settings.temporal_task_queue,
         identity=f"education-worker@{socket.gethostname()}",
-        workflows=[DiagnosticWorkflow, LegacyImportWorkflow, ImportWorkflow],
+        workflows=[DiagnosticWorkflow, LegacyImportWorkflow, ImportWorkflow, ReviewWorkflow],
         activities=[
             diagnostic_echo,
             imports.begin,
@@ -52,6 +57,8 @@ async def main() -> None:
             imports.prepare_v2,
             imports.parse_v2,
             imports.finish_v2,
+            reviews.execute,
+            reviews.failed,
         ],
         activity_executor=executor,
         max_concurrent_activities=2,
@@ -70,11 +77,15 @@ async def main() -> None:
                 stop,
             )
         )
+        review_dispatcher = asyncio.create_task(
+            dispatch_reviews(client, ReviewRepository(pool), settings.temporal_task_queue, stop)
+        )
         try:
             await stop.wait()
         finally:
             stop.set()
             await dispatcher
+            await review_dispatcher
     executor.shutdown(wait=True)
     pool.close()
 

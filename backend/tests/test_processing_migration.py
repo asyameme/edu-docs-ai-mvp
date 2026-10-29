@@ -57,11 +57,14 @@ def schema_definition(connection, schema):
     return json.dumps(result, sort_keys=True).replace(schema + ".", "")
 
 
-def test_single_initial_migration_matches_working_schema_and_can_be_recreated():
+def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema():
     path = ROOT / "versions" / "0001_initial_schema.py"
     assert path.exists(), "Нужна одна начальная миграция итоговой схемы"
     script = ScriptDirectory(str(ROOT))
-    assert [revision.revision for revision in script.walk_revisions()] == ["0001_initial_schema"]
+    assert [revision.revision for revision in script.walk_revisions()] == [
+        "0002_stage4_review",
+        "0001_initial_schema",
+    ]
     spec = importlib.util.spec_from_file_location("initial_schema", path)
     change = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(change)
@@ -87,11 +90,75 @@ def test_single_initial_migration_matches_working_schema_and_can_be_recreated():
                     tables = set(sa.inspect(connection).get_table_names(schema=schema))
                     assert tables == TABLES
                     initial = schema_definition(connection, schema)
-                    assert initial == schema_definition(connection, "public")
                     change.downgrade()
                     assert sa.inspect(connection).get_table_names(schema=schema) == []
                     change.upgrade()
                     assert schema_definition(connection, schema) == initial
+                    connection.exec_driver_sql("""
+                        INSERT INTO programs(id,name) VALUES
+                            ('11111111-1111-4111-8111-111111111111','Keep program');
+                        INSERT INTO program_versions(id,program_id,number,snapshot,origin) VALUES
+                            ('22222222-2222-4222-8222-222222222222',
+                             '11111111-1111-4111-8111-111111111111',1,
+                             '{"schema_version":1,"metadata":{"keep":"history"}}','initial');
+                        UPDATE programs SET
+                            current_version_id='22222222-2222-4222-8222-222222222222';
+                        INSERT INTO source_documents(
+                            id,program_id,original_name,format,media_type,size_bytes,sha256,storage_key)
+                        VALUES('33333333-3333-4333-8333-333333333333',
+                            '11111111-1111-4111-8111-111111111111','original.docx','docx',
+                            'application/octet-stream',12,repeat('a',64),'unchanged-original');
+                        INSERT INTO version_documents VALUES(
+                            '11111111-1111-4111-8111-111111111111',
+                            '22222222-2222-4222-8222-222222222222',
+                            '33333333-3333-4333-8333-333333333333');
+                    """)
+                    spec2 = importlib.util.spec_from_file_location(
+                        "stage4", ROOT / "versions" / "0002_stage4_review.py"
+                    )
+                    stage4 = importlib.util.module_from_spec(spec2)
+                    spec2.loader.exec_module(stage4)
+                    stage4.upgrade()
+                    assert set(sa.inspect(connection).get_table_names(schema=schema)) == TABLES | {
+                        "document_artifacts",
+                        "source_refs",
+                        "source_links",
+                        "validation_issues",
+                    }
+                    assert schema_definition(connection, schema) == schema_definition(
+                        connection, "public"
+                    )
+                    assert connection.exec_driver_sql(
+                        "SELECT snapshot FROM program_versions"
+                    ).scalar()["metadata"] == {"keep": "history"}
+                    assert (
+                        connection.exec_driver_sql(
+                            "SELECT storage_key FROM source_documents"
+                        ).scalar()
+                        == "unchanged-original"
+                    )
+                    stage4.downgrade()
+                    assert schema_definition(connection, schema) == initial
+                    stage4.upgrade()
+                    assert schema_definition(connection, schema) == schema_definition(
+                        connection, "public"
+                    )
+                    with pytest.raises(sa.exc.DBAPIError), connection.begin_nested():
+                        connection.exec_driver_sql("""
+                            INSERT INTO processing_jobs(id,program_id,input_version_id,
+                                operation_key,request_hash,type,temporal_namespace,workflow_id)
+                            VALUES('44444444-4444-4444-8444-444444444444',
+                                '11111111-1111-4111-8111-111111111111',
+                                '22222222-2222-4222-8222-222222222222',
+                                'keep-validation-job','keep-hash','validate','education','keep-workflow');
+                        """)
+                        stage4.downgrade()
+                    assert set(sa.inspect(connection).get_table_names(schema=schema)) == TABLES | {
+                        "document_artifacts",
+                        "source_refs",
+                        "source_links",
+                        "validation_issues",
+                    }
             finally:
                 # Тестовые таблицы и все изменения откатываются одной транзакцией.
                 transaction.rollback()

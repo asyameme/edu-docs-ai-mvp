@@ -1,0 +1,1897 @@
+{
+  "$defs": {
+    "AnalysisDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "parsed": {
+          "$ref": "#/$defs/ParserOutput"
+        },
+        "original_url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Original Url"
+        }
+      },
+      "required": [
+        "document_id",
+        "sha256",
+        "parsed"
+      ],
+      "title": "AnalysisDocument",
+      "type": "object"
+    },
+    "AnalysisV1": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "ruleset": {
+          "$ref": "#/$defs/Ruleset"
+        },
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/RuleCoverage"
+          },
+          "title": "Coverage",
+          "type": "array"
+        },
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/ReviewIssue"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "candidate": {
+          "$ref": "#/$defs/SnapshotV2"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/MarkdownArtifact"
+          },
+          "title": "Artifacts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "ruleset",
+        "coverage",
+        "candidate"
+      ],
+      "title": "AnalysisV1",
+      "type": "object"
+    },
+    "AssessmentTool": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "name"
+      ],
+      "title": "AssessmentTool",
+      "type": "object"
+    },
+    "CheckRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "operation": {
+          "const": "check",
+          "default": "check",
+          "title": "Operation",
+          "type": "string"
+        },
+        "job_id": {
+          "format": "uuid",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "program_id": {
+          "format": "uuid",
+          "title": "Program Id",
+          "type": "string"
+        },
+        "version_id": {
+          "format": "uuid",
+          "title": "Version Id",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SnapshotV2"
+        },
+        "ruleset": {
+          "$ref": "#/$defs/Ruleset"
+        },
+        "documents": {
+          "items": {
+            "$ref": "#/$defs/AnalysisDocument"
+          },
+          "title": "Documents",
+          "type": "array"
+        }
+      },
+      "required": [
+        "job_id",
+        "program_id",
+        "version_id",
+        "snapshot",
+        "ruleset"
+      ],
+      "title": "CheckRequest",
+      "type": "object"
+    },
+    "CheckResult": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "ruleset": {
+          "$ref": "#/$defs/Ruleset"
+        },
+        "coverage": {
+          "items": {
+            "$ref": "#/$defs/RuleCoverage"
+          },
+          "title": "Coverage",
+          "type": "array"
+        },
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/ReviewIssue"
+          },
+          "title": "Issues",
+          "type": "array"
+        }
+      },
+      "required": [
+        "ruleset",
+        "coverage"
+      ],
+      "title": "CheckResult",
+      "type": "object"
+    },
+    "Competency": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "formulation": {
+          "title": "Formulation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "code",
+        "formulation"
+      ],
+      "title": "Competency",
+      "type": "object"
+    },
+    "CourseTopic": {
+      "additionalProperties": false,
+      "description": "Строка таблицы «Структура и содержание»: тема × вид занятий × часы.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        },
+        "activity": {
+          "title": "Activity",
+          "type": "string"
+        },
+        "hours": {
+          "minimum": 0,
+          "title": "Hours",
+          "type": "integer"
+        },
+        "module": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module"
+        }
+      },
+      "required": [
+        "source_ref",
+        "topic",
+        "activity",
+        "hours"
+      ],
+      "title": "CourseTopic",
+      "type": "object"
+    },
+    "CurriculumItem": {
+      "additionalProperties": false,
+      "description": "Строка учебного плана (xlsx).",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "discipline_name": {
+          "title": "Discipline Name",
+          "type": "string"
+        },
+        "semester": {
+          "maximum": 8,
+          "minimum": 1,
+          "title": "Semester",
+          "type": "integer"
+        },
+        "credit_units": {
+          "minimum": 1,
+          "title": "Credit Units",
+          "type": "integer"
+        },
+        "hours_total": {
+          "minimum": 0,
+          "title": "Hours Total",
+          "type": "integer"
+        },
+        "block": {
+          "title": "Block",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "discipline_name",
+        "semester",
+        "credit_units",
+        "hours_total",
+        "block"
+      ],
+      "title": "CurriculumItem",
+      "type": "object"
+    },
+    "Discipline": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "semesters": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Semesters",
+          "type": "array"
+        },
+        "credit_units": {
+          "minimum": 1,
+          "title": "Credit Units",
+          "type": "integer"
+        },
+        "hours_total": {
+          "minimum": 0,
+          "title": "Hours Total",
+          "type": "integer"
+        },
+        "hours_by_kind": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Hours By Kind",
+          "type": "object"
+        },
+        "control_forms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Control Forms",
+          "type": "array"
+        },
+        "prerequisites": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Prerequisites",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_ref",
+        "name",
+        "semesters",
+        "credit_units",
+        "hours_total",
+        "hours_by_kind"
+      ],
+      "title": "Discipline",
+      "type": "object"
+    },
+    "Entity": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "discipline",
+            "semester_load",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "control_form",
+            "assessment_tool",
+            "program",
+            "curriculum_item",
+            "course_topic",
+            "score_scale"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Attributes",
+          "type": "object"
+        },
+        "source_ref_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Source Ref Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "Entity",
+      "type": "object"
+    },
+    "Indicator": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "competency_code": {
+          "title": "Competency Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "code",
+        "text",
+        "competency_code"
+      ],
+      "title": "Indicator",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "LearningOutcome": {
+      "additionalProperties": false,
+      "description": "Результат обучения «знать/уметь/владеть».\n\nlocal_id назначает парсер (уникален в файле, «LO-001») — ключ для связей:\nв источнике у результатов кода нет, кроме вариантов вида «ПКП-УНК-03.01. У-1».\nkind=None — тип результата не удалось определить по данным источника.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "local_id": {
+          "title": "Local Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "знать",
+                "уметь",
+                "владеть"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        }
+      },
+      "required": [
+        "source_ref",
+        "local_id",
+        "text"
+      ],
+      "title": "LearningOutcome",
+      "type": "object"
+    },
+    "MarkdownArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "parser_revision": {
+          "minLength": 1,
+          "title": "Parser Revision",
+          "type": "string"
+        },
+        "parser_config_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Parser Config Hash",
+          "type": "string"
+        },
+        "parser_config": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Parser Config",
+          "type": "object"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "document_id",
+        "parser_revision",
+        "parser_config_hash",
+        "parser_config",
+        "markdown"
+      ],
+      "title": "MarkdownArtifact",
+      "type": "object"
+    },
+    "Mutation": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "enum": [
+            "set_attribute",
+            "add_entity",
+            "remove_entity",
+            "add_relation",
+            "update_relation",
+            "remove_relation"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "entity",
+            "relation"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_id": {
+          "format": "uuid",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "field_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field Path"
+        },
+        "value": {
+          "$ref": "#/$defs/JsonValue",
+          "default": null
+        },
+        "entity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Entity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "relation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelationV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "op",
+        "target_kind",
+        "target_id"
+      ],
+      "title": "Mutation",
+      "type": "object"
+    },
+    "ParseIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "not_found",
+            "unparsed_row",
+            "empty_cell",
+            "unexpected_format",
+            "ambiguous",
+            "manual_review"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "severity": {
+          "default": "warning",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "category",
+        "message"
+      ],
+      "title": "ParseIssue",
+      "type": "object"
+    },
+    "ParserMeta": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "doc_type": {
+          "enum": [
+            "RPD",
+            "RPP",
+            "CURRICULUM",
+            "MATRIX",
+            "CHARACTERISTIC",
+            "CKMV"
+          ],
+          "title": "Doc Type",
+          "type": "string"
+        },
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "file_hash": {
+          "title": "File Hash",
+          "type": "string"
+        },
+        "parser_config": {
+          "title": "Parser Config",
+          "type": "string"
+        },
+        "program_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Program Id"
+        }
+      },
+      "required": [
+        "doc_type",
+        "file_name",
+        "file_hash",
+        "parser_config"
+      ],
+      "title": "ParserMeta",
+      "type": "object"
+    },
+    "ParserOutput": {
+      "additionalProperties": false,
+      "description": "Весь JSON, который парсер отдаёт на один входной файл.",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/ParserMeta"
+        },
+        "program": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Program"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "disciplines": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Discipline"
+          },
+          "title": "Disciplines",
+          "type": "array"
+        },
+        "competencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Competency"
+          },
+          "title": "Competencies",
+          "type": "array"
+        },
+        "indicators": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Indicator"
+          },
+          "title": "Indicators",
+          "type": "array"
+        },
+        "learning_outcomes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LearningOutcome"
+          },
+          "title": "Learning Outcomes",
+          "type": "array"
+        },
+        "assessment_tools": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AssessmentTool"
+          },
+          "title": "Assessment Tools",
+          "type": "array"
+        },
+        "curriculum_items": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CurriculumItem"
+          },
+          "title": "Curriculum Items",
+          "type": "array"
+        },
+        "course_content": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CourseTopic"
+          },
+          "title": "Course Content",
+          "type": "array"
+        },
+        "score_scale": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ScoreScaleItem"
+          },
+          "title": "Score Scale",
+          "type": "array"
+        },
+        "relations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/contracts__parser_output__Relation"
+          },
+          "title": "Relations",
+          "type": "array"
+        },
+        "parse_issues": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParseIssue"
+          },
+          "title": "Parse Issues",
+          "type": "array"
+        }
+      },
+      "required": [
+        "meta"
+      ],
+      "title": "ParserOutput",
+      "type": "object"
+    },
+    "PrepareRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "operation": {
+          "const": "prepare",
+          "default": "prepare",
+          "title": "Operation",
+          "type": "string"
+        },
+        "job_id": {
+          "format": "uuid",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "program_id": {
+          "format": "uuid",
+          "title": "Program Id",
+          "type": "string"
+        },
+        "version_id": {
+          "format": "uuid",
+          "title": "Version Id",
+          "type": "string"
+        },
+        "base_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Snapshot"
+            },
+            {
+              "$ref": "#/$defs/SnapshotV2"
+            }
+          ],
+          "title": "Base Snapshot"
+        },
+        "documents": {
+          "items": {
+            "$ref": "#/$defs/AnalysisDocument"
+          },
+          "minItems": 1,
+          "title": "Documents",
+          "type": "array"
+        }
+      },
+      "required": [
+        "job_id",
+        "program_id",
+        "version_id",
+        "base_snapshot",
+        "documents"
+      ],
+      "title": "PrepareRequest",
+      "type": "object"
+    },
+    "Program": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "enum": [
+                "бакалавриат",
+                "магистратура",
+                "специалитет",
+                "аспирантура"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "direction_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction Code"
+        },
+        "education_standard": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Education Standard"
+        },
+        "professional_standards": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Professional Standards",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_ref"
+      ],
+      "title": "Program",
+      "type": "object"
+    },
+    "RelationV2": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "source_id": {
+          "format": "uuid",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "target_id": {
+          "format": "uuid",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "source_ref_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Source Ref Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Attributes",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "source_id",
+        "target_id",
+        "type"
+      ],
+      "title": "RelationV2",
+      "type": "object"
+    },
+    "ReviewConfirmation": {
+      "additionalProperties": false,
+      "properties": {
+        "checked_version_id": {
+          "format": "uuid",
+          "title": "Checked Version Id",
+          "type": "string"
+        },
+        "check_job_id": {
+          "format": "uuid",
+          "title": "Check Job Id",
+          "type": "string"
+        },
+        "content_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "accepted_warning_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Accepted Warning Ids",
+          "type": "array"
+        },
+        "confirmed_at": {
+          "format": "date-time",
+          "title": "Confirmed At",
+          "type": "string"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        }
+      },
+      "required": [
+        "checked_version_id",
+        "check_job_id",
+        "content_hash",
+        "accepted_warning_ids",
+        "confirmed_at"
+      ],
+      "title": "ReviewConfirmation",
+      "type": "object"
+    },
+    "ReviewDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "conflict_id": {
+          "format": "uuid",
+          "title": "Conflict Id",
+          "type": "string"
+        },
+        "variant_id": {
+          "format": "uuid",
+          "title": "Variant Id",
+          "type": "string"
+        },
+        "check_job_id": {
+          "format": "uuid",
+          "title": "Check Job Id",
+          "type": "string"
+        },
+        "changes": {
+          "items": {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          "title": "Changes",
+          "type": "array"
+        },
+        "decided_at": {
+          "format": "date-time",
+          "title": "Decided At",
+          "type": "string"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        }
+      },
+      "required": [
+        "conflict_id",
+        "variant_id",
+        "check_job_id",
+        "changes",
+        "decided_at"
+      ],
+      "title": "ReviewDecision",
+      "type": "object"
+    },
+    "ReviewIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "rule_code": {
+          "minLength": 1,
+          "title": "Rule Code",
+          "type": "string"
+        },
+        "rule_revision": {
+          "minLength": 1,
+          "title": "Rule Revision",
+          "type": "string"
+        },
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "warning",
+            "blocking"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "status": {
+          "default": "open",
+          "enum": [
+            "open",
+            "needs_review"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "source_ref_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Source Ref Ids",
+          "type": "array"
+        },
+        "requires_decision": {
+          "default": false,
+          "title": "Requires Decision",
+          "type": "boolean"
+        },
+        "variants": {
+          "items": {
+            "$ref": "#/$defs/Variant"
+          },
+          "title": "Variants",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "rule_code",
+        "rule_revision",
+        "type",
+        "severity",
+        "message"
+      ],
+      "title": "ReviewIssue",
+      "type": "object"
+    },
+    "ReviewState": {
+      "additionalProperties": false,
+      "properties": {
+        "review_id": {
+          "format": "uuid",
+          "title": "Review Id",
+          "type": "string"
+        },
+        "import_job_id": {
+          "format": "uuid",
+          "title": "Import Job Id",
+          "type": "string"
+        },
+        "analysis_version_id": {
+          "format": "uuid",
+          "title": "Analysis Version Id",
+          "type": "string"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/ReviewDecision"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewConfirmation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "review_id",
+        "import_job_id",
+        "analysis_version_id"
+      ],
+      "title": "ReviewState",
+      "type": "object"
+    },
+    "RuleCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_code": {
+          "minLength": 1,
+          "title": "Rule Code",
+          "type": "string"
+        },
+        "rule_revision": {
+          "minLength": 1,
+          "title": "Rule Revision",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "skipped",
+            "not_applicable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "rule_code",
+        "rule_revision",
+        "status"
+      ],
+      "title": "RuleCoverage",
+      "type": "object"
+    },
+    "Ruleset": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "revision": {
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        },
+        "config": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Config",
+          "type": "object"
+        },
+        "required_rules": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Required Rules",
+          "type": "array"
+        },
+        "required_document_types": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Required Document Types",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "config",
+        "required_rules",
+        "required_document_types"
+      ],
+      "title": "Ruleset",
+      "type": "object"
+    },
+    "ScoreScaleItem": {
+      "additionalProperties": false,
+      "description": "Балльная шкала: оценка СПбГУ × ECTS × критерии.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "grade_spbu": {
+          "title": "Grade Spbu",
+          "type": "string"
+        },
+        "grade_ects": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grade Ects"
+        },
+        "points": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Points"
+        },
+        "criterion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Criterion"
+        }
+      },
+      "required": [
+        "source_ref",
+        "grade_spbu"
+      ],
+      "title": "ScoreScaleItem",
+      "type": "object"
+    },
+    "Snapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/Entity"
+          },
+          "title": "Entities",
+          "type": "array"
+        },
+        "relations": {
+          "items": {
+            "$ref": "#/$defs/app__domain__Relation"
+          },
+          "title": "Relations",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/SnapshotSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "document_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Document Ids",
+          "type": "array"
+        }
+      },
+      "title": "Snapshot",
+      "type": "object"
+    },
+    "SnapshotSourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "locator": {
+          "minLength": 1,
+          "title": "Locator",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "document_id",
+        "locator"
+      ],
+      "title": "SnapshotSourceRef",
+      "type": "object"
+    },
+    "SnapshotV2": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 2,
+          "default": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/Entity"
+          },
+          "title": "Entities",
+          "type": "array"
+        },
+        "relations": {
+          "items": {
+            "$ref": "#/$defs/RelationV2"
+          },
+          "title": "Relations",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/SourceRefV2"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "document_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Document Ids",
+          "type": "array"
+        },
+        "source_links": {
+          "items": {
+            "$ref": "#/$defs/SourceLink"
+          },
+          "title": "Source Links",
+          "type": "array"
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SnapshotV2",
+      "type": "object"
+    },
+    "SourceLink": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "entity",
+            "relation"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_id": {
+          "format": "uuid",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "field_path": {
+          "minLength": 1,
+          "title": "Field Path",
+          "type": "string"
+        },
+        "source_ref_id": {
+          "format": "uuid",
+          "title": "Source Ref Id",
+          "type": "string"
+        },
+        "observed_value": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Observed Value",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "target_kind",
+        "target_id",
+        "field_path",
+        "source_ref_id",
+        "observed_value"
+      ],
+      "title": "SourceLink",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "table": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        },
+        "col": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "SourceRefV2": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "locator": {
+          "minLength": 1,
+          "title": "Locator",
+          "type": "string"
+        },
+        "artifact_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Id"
+        },
+        "artifact_locator": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Locator"
+        }
+      },
+      "required": [
+        "id",
+        "document_id",
+        "locator"
+      ],
+      "title": "SourceRefV2",
+      "type": "object"
+    },
+    "Variant": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/Mutation"
+          },
+          "minItems": 1,
+          "title": "Changes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "changes"
+      ],
+      "title": "Variant",
+      "type": "object"
+    },
+    "app__domain__Relation": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "source_id": {
+          "format": "uuid",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "target_id": {
+          "format": "uuid",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "source_ref_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Source Ref Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        }
+      },
+      "required": [
+        "id",
+        "source_id",
+        "target_id",
+        "type"
+      ],
+      "title": "Relation",
+      "type": "object"
+    },
+    "contracts__parser_output__Relation": {
+      "additionalProperties": false,
+      "description": "Связь между сущностями. Ссылка на сущность — по естественному ключу:\ndiscipline/curriculum_item/course_topic — название, остальные — код.",
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "src_entity": {
+          "enum": [
+            "program",
+            "discipline",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "assessment_tool",
+            "curriculum_item",
+            "course_topic"
+          ],
+          "title": "Src Entity",
+          "type": "string"
+        },
+        "src_key": {
+          "title": "Src Key",
+          "type": "string"
+        },
+        "dst_entity": {
+          "enum": [
+            "program",
+            "discipline",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "assessment_tool",
+            "curriculum_item",
+            "course_topic"
+          ],
+          "title": "Dst Entity",
+          "type": "string"
+        },
+        "dst_key": {
+          "title": "Dst Key",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "формирует",
+            "имеет",
+            "проверяется",
+            "включает"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "src_entity",
+        "src_key",
+        "dst_entity",
+        "dst_key",
+        "kind"
+      ],
+      "title": "Relation",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Backend ML review exchange v1 (proposal)",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/PrepareRequest"
+    },
+    {
+      "$ref": "#/$defs/AnalysisV1"
+    },
+    {
+      "$ref": "#/$defs/CheckRequest"
+    },
+    {
+      "$ref": "#/$defs/CheckResult"
+    }
+  ]
+}

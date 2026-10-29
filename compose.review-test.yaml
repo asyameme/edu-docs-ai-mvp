@@ -1,0 +1,19 @@
+# Только изолированная проверка Backend; оба ML-сервиса возвращают искусственные данные.
+services:
+  api:
+    environment:
+      PARSER_URL: http://parser-fixture:8090/parse
+      ANALYSIS_URL: http://review-fixture:8091
+      REVIEW_FIXTURE_TESTS: "1"
+  worker:
+    environment:
+      PARSER_URL: http://parser-fixture:8090/parse
+      ANALYSIS_URL: http://review-fixture:8091
+  parser-fixture:
+    image: education-backend:stage2
+    command: ["fastapi", "run", "tests/parser_fixture.py", "--host", "0.0.0.0", "--port", "8090"]
+  review-fixture:
+    image: education-backend:stage2
+    environment:
+      PYTHONPATH: /workspace
+    command: ["fastapi", "run", "tests/review_fixture.py", "--host", "0.0.0.0", "--port", "8091"]

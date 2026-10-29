@@ -32,6 +32,18 @@ class ImportRepository:
                 "SELECT current_version_id FROM programs WHERE id=%s FOR UPDATE", (program_id,)
             )
             program = Repository.require(cur.fetchone())
+            if (
+                cur.execute(
+                    "SELECT id FROM program_versions WHERE program_id=%s AND operation_key=%s",
+                    (program_id, key),
+                ).fetchone()
+                or cur.execute(
+                    "SELECT id FROM processing_jobs WHERE program_id=%s "
+                    "AND type<>'import' AND operation_key=%s",
+                    (program_id, key),
+                ).fetchone()
+            ):
+                raise DomainError(409, "Ключ уже использован для другой операции")
             previous = cur.execute(
                 """SELECT id,request_hash FROM processing_jobs
                    WHERE program_id=%s AND type='import'
