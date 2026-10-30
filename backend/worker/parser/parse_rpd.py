@@ -3,6 +3,7 @@ import re
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
+from decimal import Decimal
 
 from docx import Document
 from docx.table import Table
@@ -17,6 +18,7 @@ from .models import (
     ParserOutput,
     SourceRef,
     LearningOutcome,
+    Discipline,
 )
 
 
@@ -112,6 +114,491 @@ def split_competencies(text):
         parts.append(" ".join(current))
 
     return [split_competency(part) for part in parts]
+
+def organization_tables(document, file_name):
+    """Найти таблицы раздела организации занятий и его подразделов."""
+    tables = []
+    active = False
+    depth = None
+    section = None
+    table_number = 0
+
+    for block in document.iter_inner_content():
+        if isinstance(block, Paragraph):
+            if block.style.name.casefold().startswith("toc"):
+                continue
+
+            if re.search(r"\t\s*\d+\s*$", block.text):
+                continue
+
+            title = re.sub(
+                r"^\d+(?:\.\d+)*\.?\s*",
+                "",
+                normalize(block.text).replace("\u0451", "е"),
+            )
+            level = heading_level(block)
+
+            if title == "организация учебных занятий":
+                active = True
+                depth = level or 2
+                section = block.text.strip()
+
+            elif active and level is not None:
+                if level <= depth:
+                    break
+
+                section = block.text.strip()
+
+        elif isinstance(block, Table):
+            table_number += 1
+
+            if active:
+                tables.append((
+                    block,
+                    SourceRef(
+                        file=file_name,
+                        section=section,
+                        table=table_number,
+                    ),
+                ))
+
+    return tables
+def extract_control_forms(document, file_name):
+    """Прочитать формы аттестации из соответствующих колонок."""
+    forms = []
+    issues = []
+    found_columns = False
+
+    pattern = re.compile(
+        r"\b(?:дифференцированный\s+зачет|"
+        r"зачет\s+с\s+оценкой|зачет|экзамен)\b"
+    )
+
+    for table, table_ref in organization_tables(document, file_name):
+        rows = list(table.rows)
+        columns = []
+        seen = set()
+
+        for row_index, row in enumerate(rows):
+            labels = [
+                normalize(cell.text).replace("\u0451", "е")
+                for cell in row.cells
+            ]
+
+            candidates = [
+                col
+                for col, label in enumerate(labels)
+                if label.startswith("виды промежуточной аттестации")
+                or label.startswith("виды итоговой аттестации")
+            ]
+
+            if candidates:
+                found_columns = True
+                columns = candidates
+
+                if row_index + 1 < len(rows):
+                    lower = rows[row_index + 1].cells
+                    columns = [
+                        col
+                        for col in columns
+                        if col < len(lower)
+                        and not normalize(
+                            lower[col].text
+                        ).startswith("срок")
+                    ]
+
+                continue
+
+            if not columns or not re.fullmatch(
+                r"семестр\s+\d+",
+                labels[0],
+            ):
+                continue
+
+            for col in columns:
+                if col >= len(row.cells):
+                    continue
+
+                cell = row.cells[col]
+
+                if cell._tc in seen:
+                    continue
+
+                seen.add(cell._tc)
+                text = normalize(cell.text).replace("\u0451", "е")
+
+                if not text or text in {"-", "\u2013", "\u2014"}:
+                    continue
+
+                ref = table_ref.model_copy(update={
+                    "row": row_index + 1,
+                    "col": col + 1,
+                })
+
+                matches = list(pattern.finditer(text))
+                negative = re.search(
+                    r"\bне\s+(?:предусмотрен\w*|проводится|проводятся)\b",
+                    text,
+                )
+
+                if not matches or negative:
+                    issues.append(ParseIssue(
+                        category="manual_review",
+                        message=(
+                            "Не удалось однозначно разобрать "
+                            f"форму контроля: {cell.text}"
+                        ),
+                        source_ref=ref,
+                    ))
+                    continue
+
+                for match in matches:
+                    form = match.group()
+
+                    if form not in forms:
+                        forms.append(form)
+
+    if not found_columns or not forms and not issues:
+        issues.append(ParseIssue(
+            category="not_found",
+            message=(
+                "Не найдены формы промежуточной "
+                "или итоговой аттестации"
+            ),
+            source_ref=SourceRef(file=file_name),
+        ))
+
+    return forms, issues
+
+def build_discipline(document, file_name, title_parts):
+    """Собрать одну дисциплину из титула и таблиц нагрузки."""
+    values, issues = extract_workload(document, file_name)
+    name = extract_discipline_name(title_parts)
+
+    def problem(message, ref, category="manual_review"):
+        issues.append(ParseIssue(
+            category=category,
+            message=message,
+            source_ref=ref,
+        ))
+
+    if not name:
+        problem(
+            "Не удалось однозначно прочитать название дисциплины с титула",
+            SourceRef(file=file_name, section="титул"),
+        )
+
+    data = [
+        item
+        for item in values
+        if item["kind"] in {"hours", "hours_total", "credit_units"}
+    ]
+
+    if not name or not data:
+        return None, issues
+
+    if len({
+        item["source_ref"].table
+        for item in data
+    }) != 1:
+        problem(
+            "Найдено несколько таблиц нагрузки; "
+            "их нельзя автоматически объединить",
+            SourceRef(file=file_name),
+        )
+        return None, issues
+
+    tracks = set()
+    modes = set()
+
+    for table, table_ref in organization_tables(document, file_name):
+        for row in table.rows:
+            cells = list(row.cells)
+
+            if len({cell._tc for cell in cells}) != 1:
+                continue
+
+            text = normalize(cells[0].text)
+
+            if text.startswith((
+                "основная траектория",
+                "траектория",
+            )):
+                tracks.add(text)
+
+            mode = re.fullmatch(
+                r"(?:форма обучения\s*:\s*)?"
+                r"(очная|заочная|очно-заочная)"
+                r"(?: форма обучения)?",
+                text,
+            )
+
+            if mode:
+                modes.add(mode.group(1))
+
+    if len(tracks) > 1 or len(modes) > 1:
+        problem(
+            "Найдено несколько траекторий или форм обучения; "
+            "для Discipline нужно выбрать соответствующий блок",
+            data[0]["source_ref"],
+            "ambiguous",
+        )
+        return None, issues
+
+    semesters = set()
+    total_labels = {"итого", "всего"}
+
+    for item in data:
+        for period in item["periods"]:
+            text = normalize(period)
+
+            if text in total_labels:
+                continue
+
+            match = re.fullmatch(r"семестр\s+([1-8])", text)
+
+            if not match:
+                problem(
+                    f"Не удалось прочитать семестр из {period!r}",
+                    item["source_ref"],
+                    "unexpected_format",
+                )
+                return None, issues
+
+            semesters.add(int(match.group(1)))
+
+    if not semesters:
+        problem(
+            "Не найдены семестры дисциплины",
+            data[0]["source_ref"],
+        )
+        return None, issues
+
+    totals = [
+        item
+        for item in data
+        if any(
+            normalize(period) in total_labels
+            for period in item["periods"]
+        )
+    ]
+    selected = totals or data
+
+    if totals and len({
+        item["source_ref"].row
+        for item in totals
+    }) != 1:
+        problem(
+            "Найдено несколько итоговых строк нагрузки",
+            totals[0]["source_ref"],
+            "ambiguous",
+        )
+        return None, issues
+
+    first_ref = selected[0]["source_ref"]
+    primary_ref = first_ref.model_copy(update={"col": None})
+
+    canonical_hours = {
+        text.replace(" ", ""): text
+        for text in (
+            "лекции",
+            "семинары",
+            "консультации",
+            "практические занятия",
+            "лабораторные работы",
+            "контрольные работы",
+            "коллоквиумы",
+            "текущий контроль",
+            "промежуточная аттестация",
+            "итоговая аттестация",
+            "под руководством преподавателя",
+            "в присутствии преподавателя",
+            "сам.раб. с использованием методических материалов",
+            "текущий контроль (сам.раб.)",
+            "промежуточная аттестация (сам.раб.)",
+            "итоговая аттестация (сам.раб.)",
+            "в т. ч. с использованием учебно-методич. материалов",
+        )
+    }
+
+    hours_by_kind = {}
+    credits = 0
+    credit_found = False
+    declared_hours = []
+    seen = set()
+
+    for item in selected:
+        value = item["value"]
+        ref = item["source_ref"]
+
+        if (
+            value is None
+            or value < 0
+            or value != value.to_integral_value()
+        ):
+            problem(
+                f"Значение {item['raw']!r} нельзя перенести "
+                "в целочисленное поле модели",
+                ref,
+                "unexpected_format",
+            )
+            return None, issues
+
+        periods = {
+            normalize(period)
+            for period in item["periods"]
+            if normalize(period) not in total_labels
+        }
+
+        if not totals and len(periods) != 1:
+            problem(
+                "Значение объединено для нескольких семестров; "
+                "его объем неоднозначен",
+                ref,
+                "ambiguous",
+            )
+            return None, issues
+
+        key = normalize(item["label"]).replace("\u0451", "е")
+        key = re.sub(r"сам\.\s*раб\.", "сам.раб.", key)
+        group = normalize(item["group"])
+
+        if item["kind"] == "hours":
+            canonical = canonical_hours.get(
+                key.replace(" ", "")
+            )
+
+            if canonical is None:
+                problem(
+                    f"Колонка {item['label']!r} не входит "
+                    "в правила суммирования часов",
+                    ref,
+                )
+                return None, issues
+
+            key = canonical
+
+            if not group.startswith((
+                "контактная работа",
+                "аудиторная работа",
+                "самостоятельная работа",
+            )):
+                problem(
+                    "Неизвестная группа часов в шапке",
+                    ref,
+                )
+                return None, issues
+
+            if group.startswith("самостоятельная работа") and (
+                "сам.раб." not in key
+                and "самостоятельн" not in key
+            ):
+                key += " (сам.раб.)"
+
+        else:
+            key = item["kind"]
+
+        scope = (
+            ("итого",)
+            if totals
+            else tuple(sorted(periods))
+        )
+        signature = (key, scope)
+
+        if signature in seen:
+            problem(
+                f"Показатель {key!r} повторяется в одном периоде",
+                ref,
+                "ambiguous",
+            )
+            return None, issues
+
+        seen.add(signature)
+        number = int(value)
+
+        if item["kind"] == "credit_units":
+            credits += number
+            credit_found = True
+
+        elif item["kind"] == "hours_total":
+            declared_hours.append((number, periods))
+
+        else:
+            hours_by_kind[key] = (
+                hours_by_kind.get(key, 0) + number
+            )
+
+    if not credit_found or credits < 1 or not hours_by_kind:
+        problem(
+            "Недостаточно данных о ЗЕТ или часах "
+            "для создания Discipline",
+            primary_ref,
+            "empty_cell",
+        )
+        return None, issues
+
+    if declared_hours:
+        covered = set().union(*(
+            periods
+            for number, periods in declared_hours
+        ))
+
+        if not totals and covered != {
+            f"семестр {semester}"
+            for semester in semesters
+        }:
+            problem(
+                "Общие часы указаны не для всех семестров",
+                primary_ref,
+            )
+            return None, issues
+
+        hours_total = sum(
+            number
+            for number, periods in declared_hours
+        )
+
+    else:
+        hours_total = sum(hours_by_kind.values())
+
+        issues.append(ParseIssue(
+            category="manual_review",
+            severity="info",
+            message=(
+                "hours_total вычислен как сумма извлеченных "
+                "компонентов нагрузки; отдельного значения "
+                "общих часов в таблице нет"
+            ),
+            source_ref=primary_ref,
+        ))
+
+    if len(semesters) > 1:
+        problem(
+            "В Discipline сохранена общая нагрузка. "
+            "Текущая модель не передает часы и ЗЕТ "
+            "отдельно для каждого семестра",
+            primary_ref,
+        )
+
+    forms, form_issues = extract_control_forms(
+        document,
+        file_name,
+    )
+    issues.extend(form_issues)
+
+    discipline = Discipline(
+        name=name,
+        semesters=sorted(semesters),
+        credit_units=credits,
+        hours_total=hours_total,
+        hours_by_kind=hours_by_kind,
+        control_forms=forms,
+        source_ref=primary_ref.model_copy(update={
+            "section": f"титул; {primary_ref.section}",
+        }),
+    )
+
+    return discipline, issues
 
 def extract_indicators(text, competency_code, source_ref):
     """Разобрать индикаторы одной ячейки."""
@@ -365,6 +852,347 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
 
     return outcomes, issues
 
+def parse_workload_number(raw):
+    """Прочитать число без округления."""
+    text = raw.strip().replace("\u00a0", " ").replace("\u202f", " ")
+
+    if not re.fullmatch(
+        r"(?:\d+|\d{1,3}(?: \d{3})+)(?:[.,]\d+)?", text,
+    ):
+        raise ValueError(f"Неподдерживаемое число: {raw!r}")
+
+    return Decimal(text.replace(" ", "").replace(",", "."))
+
+
+def extract_workload(document, file_name):
+    """Прочитать значения нагрузки, сохранив их назначение и координаты."""
+    blocks = list(document.iter_inner_content())
+    values, issues, starts = [], [], []
+    section = None
+    table_number = None
+
+    def report(category, message, row=None, col=None, ref=None):
+        issues.append(ParseIssue(
+            category=category,
+            message=message,
+            source_ref=ref or SourceRef(
+                file=file_name,
+                section=section,
+                table=table_number,
+                row=row,
+                col=col,
+            ),
+        ))
+
+    for index, block in enumerate(blocks):
+        if not isinstance(block, Paragraph):
+            continue
+
+        if block.style.name.casefold().startswith("toc"):
+            continue
+
+        if re.search(r"\t\s*\d+\s*$", block.text):
+            continue
+
+        title = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*",
+            "",
+            normalize(block.text).replace("\u0451", "е"),
+        )
+
+        if title == "организация учебных занятий":
+            starts.append(index)
+
+    if len(starts) != 1:
+        report(
+            "not_found" if not starts else "ambiguous",
+            "Не удалось однозначно найти раздел организации занятий",
+        )
+        return values, issues
+
+    start = starts[0]
+    section = blocks[start].text.strip()
+    depth = heading_level(blocks[start]) or 2
+
+    table_number = sum(
+        isinstance(block, Table)
+        for block in blocks[:start]
+    )
+
+    root_ref = SourceRef(file=file_name, section=section)
+    found_table = False
+    workload_ref = root_ref
+
+    for block in blocks[start + 1:]:
+        if isinstance(block, Paragraph):
+            level = heading_level(block)
+
+            if level is not None:
+                if level <= depth:
+                    break
+
+                section = block.text.strip()
+
+            continue
+
+        if not isinstance(block, Table):
+            continue
+
+        table_number += 1
+        rows = list(block.rows)
+        header_rows = []
+
+        for index, row in enumerate(rows):
+            labels = [
+                normalize(cell.text).replace("\u0451", "е")
+                for cell in row.cells
+            ]
+
+            if "лекции" in labels and any(
+                label.startswith("трудоемк")
+                for label in labels
+            ):
+                header_rows.append(index)
+
+        if not header_rows:
+            continue
+
+        found_table = True
+        workload_ref = SourceRef(
+            file=file_name,
+            section=section,
+            table=table_number,
+        )
+
+        if len(header_rows) != 1 or header_rows[0] == 0:
+            report(
+                "unexpected_format",
+                "Не удалось однозначно прочитать шапку нагрузки",
+            )
+            continue
+
+        header_index = header_rows[0]
+        header_cells = list(rows[header_index].cells)
+
+        headers = [
+            " ".join(cell.text.split())
+            for cell in header_cells
+        ]
+        groups = [
+            " ".join(cell.text.split())
+            for cell in rows[header_index - 1].cells
+        ]
+
+        cells_by_id = {}
+        seen_periods = set()
+
+        for row_number, row in enumerate(
+            rows[header_index + 1:],
+            header_index + 2,
+        ):
+            cells = list(row.cells)
+            period = " ".join(cells[0].text.split())
+
+            # В одном Word-объекте могут идти две разные таблицы.
+            if "текущего контроля" in normalize(period):
+                break
+
+            if not re.match(
+                r"^(семестр\b|итого\b|всего\b)",
+                period,
+                re.IGNORECASE,
+            ):
+                if any(
+                    re.fullmatch(
+                        r"\d+(?:[.,]\d+)?",
+                        cell.text.strip(),
+                    )
+                    for cell in cells[1:]
+                ):
+                    report(
+                        "manual_review",
+                        f"Не распознан период нагрузки {period!r}",
+                        row_number,
+                    )
+                continue
+
+            if (
+                len(cells) != len(headers)
+                or len(groups) != len(headers)
+            ):
+                report(
+                    "unexpected_format",
+                    "Число ячеек не соответствует шапке нагрузки",
+                    row_number,
+                )
+                continue
+
+            covered_headers = {}
+
+            for col, cell in enumerate(cells):
+                if cell.text.strip():
+                    covered_headers.setdefault(
+                        cell._tc, set()
+                    ).add(header_cells[col]._tc)
+
+            if any(
+                len(items) > 1
+                for items in covered_headers.values()
+            ):
+                report(
+                    "manual_review",
+                    "Разметка ячеек строки не совпадает с шапкой нагрузки",
+                    row_number,
+                )
+                continue
+
+            new_hour_values = [
+                cell.text.strip()
+                for col, cell in enumerate(cells[1:], 1)
+                if cell.text.strip()
+                and cell._tc not in cells_by_id
+                and "трудо" not in normalize(headers[col])
+                and "активн" not in normalize(headers[col])
+                and "интерактивн" not in normalize(headers[col])
+            ]
+
+            capacity_row = (
+                cells[0]._tc in seen_periods
+                and bool(new_hour_values)
+                and all(
+                    re.fullmatch(
+                        r"\d+\s*[-\u2013\u2014]\s*\d+",
+                        value,
+                    )
+                    for value in new_hour_values
+                )
+                and "наполняемость" in normalize(
+                    rows[0].cells[0].text
+                )
+            )
+
+            seen_periods.add(cells[0]._tc)
+
+            for col, cell in enumerate(cells[1:], 1):
+                raw = cell.text.strip()
+                label = headers[col]
+                key = normalize(label).replace("\u0451", "е")
+
+                kind = (
+                    "credit_units"
+                    if key.startswith("трудоемк") and "час" not in key
+                    else "hours_total"
+                    if key.startswith("трудоемк")
+                    else "reference"
+                    if "активн" in key or "интерактивн" in key
+                    else "capacity"
+                    if capacity_row
+                    else "hours"
+                )
+
+                if not raw:
+                    if kind == "credit_units":
+                        report(
+                            "empty_cell",
+                            "Не указана трудоемкость в ЗЕТ",
+                            row_number,
+                            col + 1,
+                        )
+                    continue
+
+                if cell._tc in cells_by_id:
+                    previous = cells_by_id[cell._tc]
+
+                    if period not in previous["periods"]:
+                        previous["periods"].append(period)
+
+                    continue
+
+                value = None
+
+                if kind != "capacity":
+                    try:
+                        value = parse_workload_number(raw)
+                    except ValueError:
+                        report(
+                            "unexpected_format",
+                            f"Не удалось прочитать число {raw!r}",
+                            row_number,
+                            col + 1,
+                        )
+
+                item = {
+                    "periods": [period],
+                    "group": groups[col],
+                    "label": label,
+                    "kind": kind,
+                    "raw": raw,
+                    "value": value,
+                    "source_ref": SourceRef(
+                        file=file_name,
+                        section=section,
+                        table=table_number,
+                        row=row_number,
+                        col=col + 1,
+                    ),
+                }
+
+                cells_by_id[cell._tc] = item
+                values.append(item)
+
+    if not found_table:
+        report(
+            "not_found",
+            "Не найдена таблица нагрузки с колонками лекций и трудоемкости",
+            ref=root_ref,
+        )
+    elif not values and not issues:
+        report(
+            "unparsed_row",
+            "В таблице нагрузки не найдены распознаваемые значения",
+            ref=workload_ref,
+        )
+
+    return values, issues
+
+def extract_discipline_name(title_parts):
+    """Прочитать название после слов 'учебной дисциплины'."""
+    parts = [
+        " ".join(text.split())
+        for text in title_parts
+        if text.strip()
+    ]
+    markers = []
+
+    for index, text in enumerate(parts):
+        match = re.search(
+            r"\bучебной\s+дисциплины\b\s*:?\s*",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            markers.append((index, match.end()))
+
+    if len(markers) != 1:
+        return None
+
+    index, end = markers[0]
+    name = parts[index][end:].strip()
+
+    if not name and index + 1 < len(parts):
+        name = parts[index + 1]
+
+    if normalize(name).replace("\u0451", "е").startswith((
+        "язык(и) обучения",
+        "языки обучения",
+        "трудоемкость",
+        "регистрационный номер",
+        "санкт-петербург",
+    )):
+        return None
+
+    return name.strip(' «»"') or None
+
 def parse_rpd(file_path):
     file_path = Path(file_path)
 
@@ -413,7 +1241,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_competencies_indicators_outcomes_v1",
+            parser_config="rpd_discipline_v1",
         )
     )
 
@@ -430,6 +1258,16 @@ def parse_rpd(file_path):
     )
 
     # 3. Ищем раздел по заголовку, независимо от номера.
+    discipline, discipline_issues = build_discipline(
+        document,
+        file_path.name,
+        title_parts,
+    )
+    output.parse_issues.extend(discipline_issues)
+
+    if discipline is not None:
+        output.disciplines.append(discipline)
+
     starts = [
         index
         for index, block in enumerate(blocks)
@@ -836,6 +1674,18 @@ def parse_rpd(file_path):
                 ),
             )
         )
+    if output.disciplines:
+        discipline = output.disciplines[0]
+
+        for competency in output.competencies:
+            output.relations.append(Relation(
+                src_entity="discipline",
+                src_key=discipline.name,
+                dst_entity="competency",
+                dst_key=competency.code,
+                kind="формирует",
+                source_ref=competency.source_ref,
+            ))
 
     return ParserOutput.model_validate(output.model_dump())
 
@@ -869,11 +1719,11 @@ def main():
     args.output.write_text(json_text, encoding="utf-8")
 
     print(
+        f"Дисциплин: {len(result.disciplines)}. "
         f"Компетенций: {len(result.competencies)}. "
         f"Индикаторов: {len(result.indicators)}. "
         f"Результатов обучения: {len(result.learning_outcomes)}. "
     )
-
 
 if __name__ == "__main__":
     main()
