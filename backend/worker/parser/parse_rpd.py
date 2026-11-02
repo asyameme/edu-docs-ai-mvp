@@ -1193,6 +1193,347 @@ def extract_discipline_name(title_parts):
 
     return name.strip(' «»"') or None
 
+def read_section(document, file_name, is_heading, section_name):
+    """Прочитать раздел в исходном порядке вместе с координатами."""
+    blocks = list(document.iter_inner_content())
+
+    starts = [
+        index
+        for index, block in enumerate(blocks)
+        if isinstance(block, Paragraph)
+        and not block.style.name.casefold().startswith((
+            "toc", "оглавление",
+        ))
+        and not re.search(r"\t\s*\d+\s*$", block.text)
+        and is_heading(block)
+    ]
+
+    if len(starts) != 1:
+        return [], [ParseIssue(
+            category="not_found" if not starts else "ambiguous",
+            message=(
+                "Не удалось однозначно найти "
+                f"раздел: {section_name}"
+            ),
+            source_ref=SourceRef(file=file_name),
+        )]
+
+    def level(paragraph):
+        number = heading_level(paragraph)
+        style = re.fullmatch(
+            r"(?:heading|заголовок)\s*(\d+)",
+            paragraph.style.name,
+            re.IGNORECASE,
+        )
+
+        return number if number is not None else (
+            int(style.group(1)) if style else None
+        )
+
+    start = starts[0]
+    section = blocks[start].text.strip()
+    depth = level(blocks[start]) or 2
+
+    table_number = sum(
+        isinstance(block, Table)
+        for block in blocks[:start]
+    )
+    result = []
+
+    for block in blocks[start + 1:]:
+        if isinstance(block, Paragraph):
+            current_level = level(block)
+
+            if current_level is not None:
+                if current_level <= depth:
+                    break
+
+                section = block.text.strip()
+                continue
+
+            if block.text.strip():
+                result.append((
+                    block,
+                    SourceRef(
+                        file=file_name,
+                        section=section,
+                    ),
+                ))
+
+        elif isinstance(block, Table):
+            table_number += 1
+            result.append((
+                block,
+                SourceRef(
+                    file=file_name,
+                    section=section,
+                    table=table_number,
+                ),
+            ))
+
+    if not result:
+        return [], [ParseIssue(
+            category="empty_cell",
+            message=f"Раздел пуст: {section_name}",
+            source_ref=SourceRef(
+                file=file_name,
+                section=blocks[start].text.strip(),
+            ),
+        )]
+
+    return result, []
+
+def extract_prerequisites(document, file_name):
+    """Извлечь явно перечисленные названия дисциплин."""
+    def is_heading(paragraph):
+        title = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*",
+            "",
+            normalize(paragraph.text).replace("\u0451", "е"),
+        )
+
+        return title == "пререквизиты" or re.fullmatch(
+            r"требования (?:к )?подготовленности обучающегося "
+            r"к освоению содержания учебных занятий"
+            r"(?: \(пререквизиты\))?",
+            title,
+        ) is not None
+
+    blocks, issues = read_section(
+        document,
+        file_name,
+        is_heading,
+        "пререквизиты",
+    )
+
+    records = []
+    found_marker = False
+
+    absence = re.compile(
+        r"\b(?:пререквизиты|предшествующие дисциплины)\s*:?\s*"
+        r"(?:не требуются|не предусмотрены|отсутствуют)\b"
+        r"|\bпредшествующих дисциплин нет\b",
+        re.IGNORECASE,
+    )
+
+    absence_ref = next((
+        ref
+        for block, ref in blocks
+        if isinstance(block, Paragraph)
+        and absence.search(" ".join(block.text.split()))
+    ), None)
+
+    quote = r'(?:«[^«»]+»|"[^"]+")'
+    separator = (
+        r"(?:\s*[,;]\s*(?:(?:и|или|либо)\s+)?"
+        r"|\s+(?:и|или|либо)\s+)"
+    )
+    quoted_list = re.compile(
+        rf"{quote}(?:{separator}{quote})*"
+    )
+
+    markers = re.compile(
+        r"(?:^|(?<=[.!?])\s+)освоение\s+дисциплин(?:ы)?\b\s*:?\s*"
+        r"|\bпри\s+изучении\s+(?:учебн(?:ых|ой)\s+)?"
+        r"дисциплин(?:ы)?\b\s*:?\s*"
+        r"|\bизучени[яи]\s+предшествующ[а-я]+\s+"
+        r"(?:учебн(?:ых|ой)\s+)?дисциплин(?:ы)?\b"
+        r"(?:\s+ООП)?(?:\s+таких,\s*как)?\s*:?\s*"
+        r"|\bпо\s+(?:дисциплинам|курсам|курсу)\s*"
+        r"(?::\s*|(?=[«\"]))"
+        r"|\b(?:рекомендуемые\s+)?предшествующие\s+"
+        r"дисциплины\s*:\s*",
+        re.IGNORECASE,
+    )
+
+    for block, ref in blocks:
+        if isinstance(block, Table):
+            issues.append(ParseIssue(
+                category="manual_review",
+                message=(
+                    "Табличный формат пререквизитов "
+                    "пока не поддержан"
+                ),
+                source_ref=ref,
+            ))
+            continue
+
+        text = " ".join(block.text.split())
+
+        for marker in markers.finditer(text):
+            if any(
+                marker.start() < item.end()
+                and item.start() < marker.end()
+                for item in absence.finditer(text)
+            ):
+                continue
+
+            found_marker = True
+            body = text[marker.end():].strip()
+            names = []
+            rest = ""
+
+            if body.startswith(("«", '"')):
+                if (
+                    body.count("«") != body.count("»")
+                    or body.count('"') % 2
+                ):
+                    issues.append(ParseIssue(
+                        category="unexpected_format",
+                        message=(
+                            "В перечне дисциплин "
+                            "нарушены парные кавычки"
+                        ),
+                        source_ref=ref,
+                    ))
+                    continue
+
+                match = quoted_list.match(body)
+
+                if match:
+                    names = [
+                        part.group()[1:-1].strip()
+                        for part in re.finditer(
+                            quote, match.group()
+                        )
+                    ]
+                    rest = body[match.end():].strip()
+
+                continuation = re.sub(
+                    r"^[,;]\s*", "", rest
+                )
+                unclear_tail = (
+                    bool(rest)
+                    and not re.match(
+                        r"^(?:[.!?]|котор[а-я]*\b|"
+                        r"(?:или|либо)\s+эквивалентн)",
+                        continuation,
+                        re.IGNORECASE,
+                    )
+                )
+
+                if unclear_tail:
+                    issues.append(ParseIssue(
+                        category="manual_review",
+                        message=(
+                            "Не удалось полностью разобрать "
+                            "перечень дисциплин"
+                        ),
+                        source_ref=ref,
+                    ))
+
+            else:
+                if not re.fullmatch(
+                    r"\s*(?:освоение дисциплин(?:ы)?|"
+                    r"(?:рекомендуемые )?"
+                    r"предшествующие дисциплины)\s*:\s*",
+                    marker.group(),
+                    re.IGNORECASE,
+                ):
+                    issues.append(ParseIssue(
+                        category="manual_review",
+                        message=(
+                            "Названия в описании подготовки "
+                            "не выделены кавычками "
+                            "или явным списком"
+                        ),
+                        source_ref=ref,
+                    ))
+                    continue
+
+                sentence = re.split(
+                    r"\.(?=\s|$)",
+                    body,
+                    maxsplit=1,
+                )[0].strip(" ;")
+
+                if not re.search(
+                    r'[«»"“”„:]|\b(?:должен|необходимо|'
+                    r'требуется|которые|обучающийся|студент)\b',
+                    sentence,
+                    re.IGNORECASE,
+                ) and not re.match(
+                    r"^(?:не\b|нет\b|отсутствуют\b)",
+                    sentence,
+                    re.IGNORECASE,
+                ):
+                    names = [
+                        name.strip()
+                        for name in re.split(
+                            r"[,;]", sentence
+                        )
+                    ]
+
+            if not names or any(not name for name in names):
+                issues.append(ParseIssue(
+                    category="manual_review",
+                    message=(
+                        "Не удалось выделить названия "
+                        "после указания пререквизитов"
+                    ),
+                    source_ref=ref,
+                ))
+                continue
+
+            for name in names:
+                records.append({
+                    "name": " ".join(name.split()),
+                    "source_ref": ref,
+                })
+
+            if (
+                "рекомендуемые" in normalize(marker.group())
+                or re.search(
+                    r"\b(?:или|либо)\s+эквивалентн",
+                    rest,
+                    re.IGNORECASE,
+                )
+                or re.search(
+                    r'(?:»|")\s+(?:или|либо)\s+(?:«|")',
+                    body,
+                    re.IGNORECASE,
+                )
+            ):
+                issues.append(ParseIssue(
+                    category="manual_review",
+                    severity="info",
+                    message=(
+                        "В источнике список рекомендован "
+                        "или допускает альтернативы; prerequisites "
+                        "сохраняет названия без признака обязательности"
+                    ),
+                    source_ref=ref,
+                ))
+
+    if absence_ref is not None and found_marker:
+        issues.append(ParseIssue(
+            category="ambiguous",
+            message=(
+                "В разделе одновременно есть перечень "
+                "и указание отсутствия пререквизитов"
+            ),
+            source_ref=absence_ref,
+        ))
+
+    if (
+        blocks
+        and not found_marker
+        and not issues
+        and absence_ref is None
+    ):
+        issues.append(ParseIssue(
+            category="manual_review",
+            severity="info",
+            message=(
+                "Раздел подготовки прочитан, но явный перечень "
+                "дисциплин не распознан; требования к знаниям "
+                "не преобразованы в названия"
+            ),
+            source_ref=blocks[0][1],
+        ))
+
+    return records, issues
+
 def parse_rpd(file_path):
     file_path = Path(file_path)
 
@@ -1241,7 +1582,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_discipline_v1",
+            parser_config="rpd_prerequisites_v1",
         )
     )
 
@@ -1251,7 +1592,9 @@ def parse_rpd(file_path):
             severity="info",
             message=(
                 "Частичный разбор: "
-                "извлекаются только компетенции и индикаторы и результаты обучения."
+                "извлекаются дисциплина, нагрузка, компетенции, "
+                "индикаторы, результаты обучения и явные перечни "
+                "пререквизитов"
             ),
             source_ref=SourceRef(file=file_path.name),
         )
@@ -1267,7 +1610,49 @@ def parse_rpd(file_path):
 
     if discipline is not None:
         output.disciplines.append(discipline)
+    prerequisite_records, prerequisite_issues = extract_prerequisites(
+        document,
+        file_path.name,
+    )
+    output.parse_issues.extend(prerequisite_issues)
 
+    if output.disciplines:
+        discipline = output.disciplines[0]
+
+        discipline.prerequisites = [
+            record["name"]
+            for record in prerequisite_records
+        ]
+
+        sections = [
+            part.strip()
+            for part in (
+                discipline.source_ref.section or ""
+            ).split(";")
+            if part.strip()
+        ]
+
+        for record in prerequisite_records:
+            section = record["source_ref"].section
+
+            if section and section not in sections:
+                sections.append(section)
+
+        discipline.source_ref.section = "; ".join(
+            section
+            for section in sections
+            if section
+        )
+
+    elif prerequisite_records:
+        output.parse_issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                "Пререквизиты найдены, но Discipline не создан; "
+                "перечень не передан в JSON"
+            ),
+            source_ref=prerequisite_records[0]["source_ref"],
+        ))
     starts = [
         index
         for index, block in enumerate(blocks)
