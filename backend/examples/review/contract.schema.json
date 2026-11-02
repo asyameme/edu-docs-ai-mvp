@@ -380,6 +380,7 @@
             "program",
             "curriculum_item",
             "course_topic",
+            "course_content",
             "score_scale"
           ],
           "title": "Kind",

@@ -10,7 +10,8 @@ if ($ResumeProject) {
 }
 $composeArgs = @('--project-directory', $projectRoot, '-p', $testProject,
                  '-f', (Join-Path $projectRoot 'compose.yaml'),
-                 '-f', (Join-Path $projectRoot 'compose.test.yaml'))
+                 '-f', (Join-Path $projectRoot 'compose.test.yaml'),
+                 '-f', (Join-Path $projectRoot 'compose.graph-test.yaml'))
 function DC {
     param([string[]]$DockerArgs)
     & docker compose @composeArgs @DockerArgs
@@ -41,11 +42,13 @@ try {
     DC @('exec','-T','-e','RUN_INTEGRATION=1','api','pytest','-q','-m','integration')
     DC @('exec','-T','api','python','-m','scripts.smoke')
     $domain = DC @('exec','-T','api','python','-m','scripts.stage2_checkpoint','prepare')
+    $graph = DC @('exec','-T','api','python','-m','scripts.graph_checkpoint','prepare')
     $schemas = DC @('exec','-T','api','python','-m','scripts.schema_checkpoint','prepare')
     DC @('restart','api')
     Wait-Ready
     Verify-Checkpoint ($domain -join [Environment]::NewLine) 'scripts.stage2_checkpoint'
-    foreach ($dependency in @('temporal','chroma','postgres')) {
+    Verify-Checkpoint ($graph -join [Environment]::NewLine) 'scripts.graph_checkpoint'
+    foreach ($dependency in @('temporal','chroma','neo4j','postgres')) {
         try {
             DC @('stop',$dependency)
             DC @('exec','-T','api','python','-m','scripts.check_dependency_failure',$dependency)
@@ -64,6 +67,7 @@ try {
     Wait-Ready
     Verify-Checkpoint ($recovery -join [Environment]::NewLine) 'scripts.recovery'
     Verify-Checkpoint ($domain -join [Environment]::NewLine) 'scripts.stage2_checkpoint'
+    Verify-Checkpoint ($graph -join [Environment]::NewLine) 'scripts.graph_checkpoint'
     Verify-Checkpoint ($storage -join [Environment]::NewLine) 'scripts.persistence'
     DC @('run','--rm','--no-deps','app-migrate')
     Verify-Checkpoint ($schemas -join [Environment]::NewLine) 'scripts.schema_checkpoint'

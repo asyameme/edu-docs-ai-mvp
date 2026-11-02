@@ -17,7 +17,7 @@ def resources():
     temporal.workflow_service.describe_namespace = AsyncMock()
     http = MagicMock()
     http.get = AsyncMock(return_value=MagicMock())
-    return Resources(MagicMock(), temporal, http, "http://chroma:8000")
+    return Resources(MagicMock(), temporal, http, "http://chroma:8000", MagicMock())
 
 
 @pytest.fixture
@@ -34,10 +34,11 @@ def test_ready_with_available_dependencies(client):
         "postgres": "available",
         "temporal": "available",
         "chroma": "available",
+        "neo4j": "available",
     }
 
 
-@pytest.mark.parametrize("dependency", ["postgres", "temporal", "chroma"])
+@pytest.mark.parametrize("dependency", ["postgres", "temporal", "chroma", "neo4j"])
 def test_dependency_failure_does_not_break_liveness_or_leak_credentials(
     client, resources, dependency
 ):
@@ -46,6 +47,8 @@ def test_dependency_failure_does_not_break_liveness_or_leak_credentials(
         resources.postgres.connection.side_effect = error
     elif dependency == "temporal":
         resources.temporal.workflow_service.describe_namespace.side_effect = error
+    elif dependency == "neo4j":
+        resources.graph.ping.side_effect = error
     else:
         resources.http.get.side_effect = error
     response = client.get("/health/ready")

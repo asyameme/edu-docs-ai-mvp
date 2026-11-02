@@ -43,6 +43,7 @@ class Entity(Contract):
         "program",
         "curriculum_item",
         "course_topic",
+        "course_content",
         "score_scale",
     ]
     attributes: dict[str, JsonValue] = Field(default_factory=dict)

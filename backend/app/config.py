@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     analysis_timeout_seconds: float = Field(default=300, gt=0, le=300)
     analysis_max_response_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     artifact_files_path: Path = Path("/data/artifacts")
+    neo4j_uri: str = "bolt://neo4j:7687"
+    neo4j_database: str = "neo4j"
+    neo4j_user: str = "neo4j"
+    neo4j_password: SecretStr = SecretStr("")
+    graph_auto_build: bool = True
+    graph_max_objects: int = Field(default=50000, gt=0)
+    graph_max_snapshot_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
 
 
 @lru_cache

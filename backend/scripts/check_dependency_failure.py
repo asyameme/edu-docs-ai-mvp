@@ -12,7 +12,7 @@ def main():
         assert response.status_code == 503, response.text
         states = response.json()["dependencies"]
         assert states[dependency] == "unavailable"
-        assert set(states) == {"postgres", "temporal", "chroma"}
+        assert set(states) == {"postgres", "temporal", "chroma", "neo4j"}
         if dependency == "postgres":
             # Temporal использует тот же PostgreSQL и тоже может стать недоступным.
             assert states["chroma"] == "available"
