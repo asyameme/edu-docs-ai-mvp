@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 import httpx
 from pydantic import ValidationError
@@ -33,19 +33,33 @@ class ReviewActivities:
                 raise ValueError("Markdown artifact exceeds configured limit")
             identity = str(UUID(artifact["id"]))
             root.mkdir(parents=True, exist_ok=True)
-            final, temporary = root / identity, root / (".upload-" + identity)
+            final = root / identity
+            temporary = root / (".upload-" + identity + "-" + uuid4().hex)
             if final.is_file():
                 if final.read_bytes() != raw:
                     raise ValueError("Immutable artifact content changed on retry")
             else:
                 try:
-                    with temporary.open("wb") as target:
+                    with temporary.open("xb") as target:
                         target.write(raw)
                         target.flush()
                         os.fsync(target.fileno())
-                    os.replace(temporary, final)
+                    # Жёсткая ссылка создаёт итоговый путь только при его отсутствии.
+                    # Конкурирующая попытка не может перезаписать уже опубликованные байты.
+                    try:
+                        os.link(temporary, final)
+                    except FileExistsError:
+                        if final.read_bytes() != raw:
+                            raise ValueError(
+                                "Immutable artifact content changed on retry"
+                            ) from None
                 finally:
                     temporary.unlink(missing_ok=True)
+            directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
             artifacts.append(
                 {
                     **{k: v for k, v in artifact.items() if k != "markdown"},

@@ -95,21 +95,21 @@ def apply_changes(snapshot, changes):
     removals = set()
     for change in changes:
         key = (change.target_kind, str(change.target_id), change.field_path or "$")
-        payload = change.model_dump(mode="json")
-        for previous_key, previous_payload in touched.items():
+        signature = digest(change.model_dump(mode="json"))
+        for previous_key, previous_signature in touched.items():
             if previous_key[:2] == key[:2] and previous_key != key:
                 first, second = previous_key[2], key[2]
                 if (
                     "$" in (first, second)
                     or first.startswith(second + "/")
                     or second.startswith(first + "/")
-                ) and previous_payload != payload:
+                ) and previous_signature != signature:
                     raise DomainError(409, "Выбранные варианты изменяют перекрывающиеся поля")
         if key in touched:
-            if touched[key] != payload:
+            if touched[key] != signature:
                 raise DomainError(409, "Выбранные варианты противоречат друг другу")
             continue
-        touched[key] = payload
+        touched[key] = signature
         collection = data["entities" if change.target_kind == "entity" else "relations"]
         found = next((item for item in collection if item["id"] == str(change.target_id)), None)
         if change.op.startswith("add_"):
