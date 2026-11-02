@@ -19,6 +19,7 @@ from .models import (
     SourceRef,
     LearningOutcome,
     Discipline,
+    CourseTopic,
 )
 
 
@@ -1193,7 +1194,10 @@ def extract_discipline_name(title_parts):
 
     return name.strip(' «»"') or None
 
-def read_section(document, file_name, is_heading, section_name):
+def read_section(
+    document, file_name, is_heading, section_name,
+    keep_numbered_items=False,
+):
     """Прочитать раздел в исходном порядке вместе с координатами."""
     blocks = list(document.iter_inner_content())
 
@@ -1243,6 +1247,17 @@ def read_section(document, file_name, is_heading, section_name):
     for block in blocks[start + 1:]:
         if isinstance(block, Paragraph):
             current_level = level(block)
+            if (
+                keep_numbered_items
+                and current_level == 1
+                and not normalize(block.text).startswith("раздел ")
+                and not re.fullmatch(
+                    r"(?:heading|заголовок)\s*\d+",
+                    block.style.name,
+                    re.IGNORECASE,
+                )
+            ):
+                current_level = None
 
             if current_level is not None:
                 if current_level <= depth:
@@ -1534,6 +1549,271 @@ def extract_prerequisites(document, file_name):
 
     return records, issues
 
+def course_content_columns(cells):
+    """Найти колонки темы, вида занятий и часов по шапке."""
+    patterns = {
+        "topic": r"^(?:(?:наименование|название)\s+темы\b.*|тема)$",
+        "activity": r"^вид(?:ы)?\s+(?:учебных\s+)?занятий$",
+        "hours": r"^(?:количество\s+часов|часы)$",
+    }
+    columns = {}
+
+    for field, pattern in patterns.items():
+        matches = [
+            index
+            for index, cell in enumerate(cells)
+            if re.fullmatch(pattern, normalize(cell.text))
+        ]
+
+        if len(matches) != 1:
+            return None
+
+        columns[field] = matches[0]
+
+    return columns
+
+def extract_course_content(document, file_name):
+    """Прочитать таблицы: тема - вид занятий - часы."""
+    def is_heading(paragraph):
+        title = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*",
+            "",
+            normalize(paragraph.text),
+        ).rstrip(".:")
+
+        return title in {
+            "структура и содержание учебных занятий",
+            "структура и содержание дисциплины",
+        }
+
+    blocks, issues = read_section(
+        document,
+        file_name,
+        is_heading,
+        "содержание дисциплины",
+        keep_numbered_items=True,
+    )
+
+    for issue in issues:
+        if issue.category == "empty_cell":
+            issue.category = "manual_review"
+            issue.message = (
+                "Содержание: не удалось выделить содержимое раздела; "
+                "нужно проверить его границы и формат"
+            )
+
+    topics = []
+    table_found = False
+    text_ref = None
+
+    def report(category, message, ref, severity="warning"):
+        issues.append(ParseIssue(
+            category=category,
+            message=f"Содержание: {message}",
+            severity=severity,
+            source_ref=ref,
+        ))
+
+    for block, table_ref in blocks:
+        if isinstance(block, Paragraph):
+            text = normalize(block.text)
+
+            if not text.startswith("период обучения"):
+                text_ref = text_ref or table_ref
+
+            continue
+
+        table_found = True
+        rows = block.rows
+        header = None
+
+        for index, row in enumerate(rows[:5]):
+            columns = course_content_columns(row.cells)
+
+            if columns is not None:
+                header = (index, columns, len(row.cells))
+                break
+
+        if header is None:
+            report(
+                "unexpected_format",
+                "нет однозначной шапки с темой, видом занятий "
+                "и количеством часов; таблица пока не разобрана",
+                table_ref,
+            )
+            continue
+
+        header_index, columns, width = header
+        topic_start, issue_start = len(topics), len(issues)
+        seen_cells = set()
+        hour_owners = {}
+
+        # Объединенные часы не распределяем между разными занятиями.
+        for row in rows[header_index + 1:]:
+            if len(row.cells) != width:
+                continue
+
+            cells = row.cells
+            owner = (
+                cells[columns["topic"]]._tc,
+                cells[columns["activity"]]._tc,
+            )
+            hour_cell = cells[columns["hours"]]._tc
+            hour_owners.setdefault(hour_cell, set()).add(owner)
+
+        for row_number, row in enumerate(
+            rows[header_index + 1:],
+            start=header_index + 2,
+        ):
+            cells = row.cells
+            row_ref = table_ref.model_copy(
+                update={"row": row_number},
+            )
+
+            if not any(cell.text.strip() for cell in cells):
+                continue
+
+            repeated_header = course_content_columns(cells)
+
+            if repeated_header is not None:
+                if repeated_header != columns:
+                    report(
+                        "unexpected_format",
+                        "внутри таблицы изменился порядок колонок; "
+                        "оставшаяся часть требует проверки",
+                        row_ref,
+                    )
+                    break
+
+                continue
+
+            if (
+                len(cells) != width
+                or row.grid_cols_before
+                or row.grid_cols_after
+            ):
+                report(
+                    "unexpected_format",
+                    "строка не совпадает с сеткой шапки",
+                    row_ref,
+                )
+                continue
+
+            selected = {
+                field: cells[index]
+                for field, index in columns.items()
+            }
+            values = {
+                field: " ".join(cell.text.split())
+                for field, cell in selected.items()
+            }
+
+            if re.fullmatch(
+                r"(?:итого|всего)(?:\s+по\b.*|\s*[:.]?)",
+                normalize(values["topic"]),
+            ):
+                continue
+
+            cell_key = tuple(
+                selected[field]._tc
+                for field in ("topic", "activity", "hours")
+            )
+
+            if cell_key in seen_cells:
+                continue
+
+            seen_cells.add(cell_key)
+
+            if (
+                len(set(cell_key)) != 3
+                or len(hour_owners[selected["hours"]._tc]) > 1
+            ):
+                report(
+                    "ambiguous",
+                    "объединенная ячейка не позволяет однозначно "
+                    "связать тему, вид занятия и часы",
+                    row_ref,
+                )
+                continue
+
+            if any(cell.tables for cell in selected.values()):
+                report(
+                    "unexpected_format",
+                    "в ячейке обнаружена вложенная таблица",
+                    row_ref,
+                )
+                continue
+
+            missing = [
+                field
+                for field, value in values.items()
+                if not value
+            ]
+
+            if missing:
+                field = missing[0]
+
+                report(
+                    "empty_cell",
+                    f"пустое поле {field}; строка {values!r} пропущена",
+                    row_ref.model_copy(
+                        update={"col": columns[field] + 1},
+                    ),
+                )
+                continue
+
+            try:
+                hours = parse_workload_number(values["hours"])
+            except ValueError:
+                hours = None
+
+            if hours is None or hours != hours.to_integral_value():
+                report(
+                    "unexpected_format",
+                    f"часы {values['hours']!r} нельзя записать целым "
+                    f"числом; тема {values['topic']!r}, "
+                    f"вид занятия {values['activity']!r}",
+                    row_ref.model_copy(
+                        update={"col": columns["hours"] + 1},
+                    ),
+                )
+                continue
+
+            topics.append(CourseTopic(
+                topic=values["topic"],
+                activity=values["activity"],
+                hours=int(hours),
+                source_ref=row_ref.model_copy(
+                    update={"col": columns["topic"] + 1},
+                ),
+            ))
+
+        if len(topics) == topic_start and len(issues) == issue_start:
+            report(
+                "empty_cell",
+                "в таблице нет строк тем с видом занятия и часами",
+                table_ref,
+            )
+
+    if blocks and not table_found:
+        report(
+            "manual_review",
+            "раздел содержит текст без поддержанной таблицы; "
+            "темы с часами пока не извлечены",
+            blocks[0][1],
+        )
+
+    elif table_found and text_ref is not None:
+        report(
+            "manual_review",
+            "текстовые описания вне таблиц пока не перенесены "
+            "в course_content",
+            text_ref,
+            severity="info",
+        )
+
+    return topics, issues
+
 def parse_rpd(file_path):
     file_path = Path(file_path)
 
@@ -1582,7 +1862,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_prerequisites_v1",
+            parser_config="rpd_course_content_v1",
         )
     )
 
@@ -1594,7 +1874,7 @@ def parse_rpd(file_path):
                 "Частичный разбор: "
                 "извлекаются дисциплина, нагрузка, компетенции, "
                 "индикаторы, результаты обучения и явные перечни "
-                "пререквизитов"
+                "пререквизитов и табличное содержание дисциплины"
             ),
             source_ref=SourceRef(file=file_path.name),
         )
@@ -1653,6 +1933,26 @@ def parse_rpd(file_path):
             ),
             source_ref=prerequisite_records[0]["source_ref"],
         ))
+
+    course_topics, content_issues = extract_course_content(
+        document,
+        file_path.name,
+    )
+    output.parse_issues.extend(content_issues)
+
+    if output.disciplines:
+        output.course_content.extend(course_topics)
+
+    elif course_topics:
+        output.parse_issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                "Содержание прочитано, но Discipline не создан; "
+                "темы не переданы в JSON"
+            ),
+            source_ref=course_topics[0].source_ref,
+        ))
+
     starts = [
         index
         for index, block in enumerate(blocks)
