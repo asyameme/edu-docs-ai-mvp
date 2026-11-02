@@ -79,21 +79,7 @@ class ImportRepository:
                     document_id = previous["id"]
                 else:
                     document_id = item["id"]
-                    cur.execute(
-                        """INSERT INTO source_documents
-                           (id,program_id,original_name,format,media_type,size_bytes,sha256,storage_key)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (
-                            document_id,
-                            program_id,
-                            item["original_name"],
-                            item["format"],
-                            item["media_type"],
-                            item["size_bytes"],
-                            item["sha256"],
-                            item["storage_key"],
-                        ),
-                    )
+                    Repository.insert_document(cur, program_id, item)
                     used.add(document_id)
                 documents.append({"document_id": str(document_id), "member_name": member_name})
             cur.execute(
@@ -129,8 +115,7 @@ class ImportRepository:
             originals = {
                 str(d["id"]): d
                 for d in cur.execute(
-                    "SELECT id,sha256,storage_key FROM source_documents WHERE program_id=%s "
-                    "AND id=ANY(%s)",
+                    "SELECT id,sha256 FROM source_documents WHERE program_id=%s AND id=ANY(%s)",
                     (program_id, ids),
                 ).fetchall()
             }
@@ -150,7 +135,7 @@ class ImportRepository:
                 "error_message": result.get("error_message"),
             }
             if include_output:
-                item.update(output=result.get("output"), storage_key=original["storage_key"])
+                item.update(output=result.get("output"))
             files.append(item)
         outcome = report.get("outcome")
         updated_at = report.get("completed_at")

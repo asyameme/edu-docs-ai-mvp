@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -57,17 +58,27 @@ def schema_definition(connection, schema):
     return json.dumps(result, sort_keys=True).replace(schema + ".", "")
 
 
-def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema():
+def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_path, monkeypatch):
     path = ROOT / "versions" / "0001_initial_schema.py"
     assert path.exists(), "Нужна одна начальная миграция итоговой схемы"
     script = ScriptDirectory(str(ROOT))
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0003_originals_bytea",
         "0002_stage4_review",
         "0001_initial_schema",
     ]
     spec = importlib.util.spec_from_file_location("initial_schema", path)
     change = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(change)
+    spec3 = importlib.util.spec_from_file_location(
+        "originals_bytea", ROOT / "versions" / "0003_originals_bytea.py"
+    )
+    binary = importlib.util.module_from_spec(spec3)
+    spec3.loader.exec_module(binary)
+    monkeypatch.setattr(
+        binary, "get_settings", lambda: SimpleNamespace(original_files_path=tmp_path)
+    )
+    (tmp_path / "55555555-5555-4555-8555-555555555555").write_bytes(b"original-raw")
     settings = get_settings()
     engine = sa.create_engine(
         sa.URL.create(
@@ -107,7 +118,9 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema():
                             id,program_id,original_name,format,media_type,size_bytes,sha256,storage_key)
                         VALUES('33333333-3333-4333-8333-333333333333',
                             '11111111-1111-4111-8111-111111111111','original.docx','docx',
-                            'application/octet-stream',12,repeat('a',64),'unchanged-original');
+                            'application/octet-stream',12,
+                            encode(sha256(convert_to('original-raw','UTF8')),'hex'),
+                            '55555555-5555-4555-8555-555555555555');
                         INSERT INTO version_documents VALUES(
                             '11111111-1111-4111-8111-111111111111',
                             '22222222-2222-4222-8222-222222222222',
@@ -125,9 +138,22 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema():
                         "source_links",
                         "validation_issues",
                     }
-                    assert schema_definition(connection, schema) == schema_definition(
-                        connection, "public"
-                    )
+                    with connection.begin_nested() as trial:
+                        binary.upgrade()
+                        assert schema_definition(connection, schema) == schema_definition(
+                            connection, "public"
+                        )
+                        assert (
+                            bytes(
+                                connection.exec_driver_sql(
+                                    "SELECT content FROM source_documents"
+                                ).scalar()
+                            )
+                            == b"original-raw"
+                        )
+                        with pytest.raises(RuntimeError, match="Откат"), connection.begin_nested():
+                            binary.downgrade()
+                        trial.rollback()
                     assert connection.exec_driver_sql(
                         "SELECT snapshot FROM program_versions"
                     ).scalar()["metadata"] == {"keep": "history"}
@@ -135,14 +161,17 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema():
                         connection.exec_driver_sql(
                             "SELECT storage_key FROM source_documents"
                         ).scalar()
-                        == "unchanged-original"
+                        == "55555555-5555-4555-8555-555555555555"
                     )
                     stage4.downgrade()
                     assert schema_definition(connection, schema) == initial
                     stage4.upgrade()
-                    assert schema_definition(connection, schema) == schema_definition(
-                        connection, "public"
-                    )
+                    with connection.begin_nested() as trial:
+                        binary.upgrade()
+                        assert schema_definition(connection, schema) == schema_definition(
+                            connection, "public"
+                        )
+                        trial.rollback()
                     with pytest.raises(sa.exc.DBAPIError), connection.begin_nested():
                         connection.exec_driver_sql("""
                             INSERT INTO processing_jobs(id,program_id,input_version_id,

@@ -13,7 +13,6 @@ x-backend: &backend
     TEMPORAL_NAMESPACE: education
     TEMPORAL_TASK_QUEUE: education-default
     CHROMA_URL: http://chroma:8000
-    ORIGINAL_FILES_PATH: /data/originals
     MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
     PARSER_URL: ${PARSER_URL:-}
     ANALYSIS_URL: ${ANALYSIS_URL:-}
@@ -51,7 +50,6 @@ services:
     <<: *backend
     build: ./backend
     volumes:
-      - original-files:/data/originals
       - artifact-files:/data/artifacts:ro
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
@@ -76,7 +74,6 @@ services:
     command: ["python", "-m", "app.worker"]
     stop_grace_period: 15s
     volumes:
-      - original-files:/data/originals:ro
       - artifact-files:/data/artifacts
     depends_on:
       app-migrate:
@@ -143,6 +140,9 @@ services:
     <<: *backend
     restart: "no"
     command: ["alembic", "upgrade", "head"]
+    # Старый том нужен только миграции 0003; она читает его без удаления файлов.
+    volumes:
+      - original-files:/data/originals:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -206,6 +206,18 @@ services:
       temporal:
         condition: service_healthy
     restart: "no"
+
+  temporal-ui:
+    image: temporalio/ui:2.57.0
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_DEFAULT_NAMESPACE: education
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_PORT:-8233}:8080"
+    depends_on:
+      temporal-namespace-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   postgres-data:

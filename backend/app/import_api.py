@@ -63,19 +63,9 @@ def upload_package(
             upload = StoredUpload(filename=member.name, file=io.BytesIO(member.content))
             stored.append((member.name, originals.save(upload)))
         imports = ImportRepository(repo.pool)
-        job_id, used = imports.create(program_id, fingerprint, operation_key, stored)
-    except (psycopg.OperationalError, psycopg.InterfaceError):
-        # При потерянном подтверждении commit оригиналы сохраняем для штатного аудита.
-        raise
-    except Exception:
-        for _, item in stored:
-            originals.remove(item["storage_key"])
-        raise
+        job_id, _ = imports.create(program_id, fingerprint, operation_key, stored)
     finally:
         file.file.close()
-    for _, item in stored:
-        if item["id"] not in used:
-            originals.remove(item["storage_key"])
     return imports.read(program_id, job_id)
 
 

@@ -59,7 +59,7 @@ def test_db_failure_removes_new_original_without_document_row(monkeypatch, tmp_p
 
     with TestClient(app, raise_server_exceptions=False) as client:
         program = client.post("/api/v1/programs", json={"name": "Upload rollback"}).json()
-        app.dependency_overrides[storage] = lambda: OriginalStorage(tmp_path, 1024)
+        app.dependency_overrides[storage] = lambda: OriginalStorage(1024)
 
         def fail(*args):
             raise RuntimeError("Injected DB failure")
@@ -77,16 +77,13 @@ def test_db_failure_removes_new_original_without_document_row(monkeypatch, tmp_p
             app.dependency_overrides.clear()
 
 
-def test_failed_file_promotion_leaves_no_partial_file(monkeypatch, tmp_path):
-    import app.storage as storage_module
+def test_failed_read_cannot_prepare_a_partial_original():
+    class BrokenStream(BytesIO):
+        def read(self, size=-1):
+            raise OSError("Injected read failure")
 
-    def fail(*args):
-        raise OSError("Injected disk failure")
-
-    monkeypatch.setattr(storage_module.os, "replace", fail)
-    with pytest.raises(OSError):
-        OriginalStorage(tmp_path, 100).save(UploadFile(BytesIO(b"original"), filename="a.pdf"))
-    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(OSError, match="read failure"):
+        OriginalStorage(100).save(UploadFile(BrokenStream(b"original"), filename="a.pdf"))
 
 
 @live

@@ -1,9 +1,9 @@
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID
 
-import psycopg
 from fastapi import APIRouter, Depends, Header, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from app.config import get_settings
 from app.domain import (
@@ -26,7 +26,7 @@ def repository(request: Request):
 
 def storage():
     settings = get_settings()
-    return OriginalStorage(settings.original_files_path, settings.max_upload_bytes)
+    return OriginalStorage(settings.max_upload_bytes)
 
 
 RepoDep = Annotated[Repository, Depends(repository)]
@@ -88,17 +88,10 @@ def restore(
 def upload_document(
     program_id: UUID, file: UploadFile, repo: RepoDep, originals: StorageDep
 ) -> DocumentRead:
-    repo.program(program_id)
-    stored = originals.save(file)
     try:
+        repo.program(program_id)
+        stored = originals.save(file)
         return repo.add_document(program_id, stored)
-    except (psycopg.OperationalError, psycopg.InterfaceError):
-        # Подтверждение транзакции может потеряться после её фиксации сервером.
-        # Сохраняем оригинал; проверка без удаления выявляет файлы без записи в БД.
-        raise
-    except Exception:
-        originals.remove(stored["storage_key"])
-        raise
     finally:
         file.file.close()
 
@@ -112,17 +105,22 @@ def documents(
 
 @router.get(
     "/{program_id}/documents/{document_id}/download",
-    response_class=FileResponse,
-    responses={200: {"content": {"application/octet-stream": {
-        "schema": {"type": "string", "format": "binary"}
-    }}}},
+    response_class=Response,
+    responses={
+        200: {
+            "content": {
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+            }
+        }
+    },
 )
-def download(
-    program_id: UUID, document_id: UUID, repo: RepoDep, originals: StorageDep
-) -> FileResponse:
-    document = repo.document(program_id, document_id)
-    return FileResponse(
-        originals.download_path(document["storage_key"]),
+def download(program_id: UUID, document_id: UUID, repo: RepoDep) -> Response:
+    document = repo.document_content(program_id, document_id)
+    return Response(
+        content=bytes(document["content"]),
         media_type=document["media_type"],
-        filename=document["original_name"],
+        headers={
+            "Content-Disposition": "attachment; filename*=UTF-8''"
+            + quote(document["original_name"], safe="")
+        },
     )

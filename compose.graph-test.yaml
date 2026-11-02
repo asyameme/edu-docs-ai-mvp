@@ -1,8 +1,0 @@
-# Только изолированные проверки; автоматическую сверку проверяем отдельно.
-services:
-  api:
-    environment:
-      GRAPH_AUTO_BUILD: "false"
-  worker:
-    environment:
-      GRAPH_AUTO_BUILD: "false"

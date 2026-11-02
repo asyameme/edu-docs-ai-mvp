@@ -1,5 +1,6 @@
-"""HTTP-адаптер ML: оригиналы читаются Worker только из read-only тома."""
+"""HTTP-адаптер ML: Worker получает неизменяемые оригиналы из PostgreSQL."""
 
+import io
 import json
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from temporalio.exceptions import ApplicationError
 from app.domain import Contract
 from app.import_repository import ImportRepository
 from app.parser_adapter import GROUPS, to_snapshot
+from app.repository import Repository
 from contracts.parser_output import ParserOutput
 
 
@@ -49,9 +51,12 @@ class ImportActivities:
                 message="Сервис разбора документов ещё не подключён; оригинал сохранён",
             )
             return
-        path = self.settings.original_files_path / str(UUID(item["storage_key"]))
         try:
-            with path.open("rb") as source, httpx.Client(timeout=90, trust_env=False) as client:
+            document = Repository(self.repo.pool).document_content(job["program_id"], document_id)
+            with (
+                io.BytesIO(document["content"]) as source,
+                httpx.Client(timeout=90, trust_env=False) as client,
+            ):
                 with client.stream(
                     "POST",
                     self.settings.parser_url,

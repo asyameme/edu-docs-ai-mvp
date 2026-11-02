@@ -1,7 +1,6 @@
-"""Сверка без изменения данных; не удаляет файлы, включая незавершённые загрузки."""
+"""Проверка исходных байтов и метаданных в PostgreSQL без изменения данных."""
 
 import json
-from uuid import UUID
 
 from psycopg_pool import ConnectionPool
 
@@ -19,27 +18,14 @@ def main():
         }
     ) as pool:
         with pool.connection() as connection:
-            keys = {
-                row[0] for row in connection.execute("SELECT storage_key FROM source_documents")
-            }
-        root = settings.original_files_path
-        files = {p.name for p in root.iterdir() if p.is_file()} if root.exists() else set()
-        originals = set()
-        for name in files:
-            try:
-                if str(UUID(name)) == name:
-                    originals.add(name)
-            except ValueError:
-                continue
-        print(
-            json.dumps(
-                {
-                    "missing_originals": sorted(keys - originals),
-                    "unreferenced_originals": sorted(originals - keys),
-                    "temporary_uploads": sorted(n for n in files if n.startswith(".upload-")),
-                }
-            )
-        )
+            count, invalid = connection.execute("""SELECT count(*),
+                coalesce(jsonb_agg(id) FILTER(WHERE content IS NULL
+                    OR octet_length(content)<>size_bytes
+                    OR encode(sha256(content),'hex')<>sha256),'[]'::jsonb)
+                FROM source_documents""").fetchone()
+        print(json.dumps({"documents_checked": count, "invalid_originals": invalid}, default=str))
+        if invalid:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

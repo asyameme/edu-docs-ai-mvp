@@ -24,7 +24,7 @@ ML-парсера, статусы файлов, повтор неудачных 
 
 - Docker Desktop с запущенным движком Linux containers и Docker Compose v2.
 - PowerShell для команд ниже и полной интеграционной приёмки.
-- Свободные порты 8000/8080; для приёмки — 18000/18080.
+- Свободные порты 8000/8080/8233; для локальной приёмки — 18000/18080/18233.
 - Доступ к реестрам контейнеров и пакетам Python при первой сборке.
 
 Python и зависимости устанавливаются внутри контейнера; системный Python не требуется.
@@ -32,19 +32,19 @@ Python и зависимости устанавливаются внутри к�
 ## Запуск
 
 Откройте PowerShell в корне скачанного или клонированного репозитория — там, где
-находится `compose.yaml`. Этот README расположен в `backend/`.
+находится `docker-compose.yaml`. Этот README расположен в `backend/`.
 
 Для первого запуска создайте локальную конфигурацию, если её ещё нет:
 
 ```powershell
 if (-not (Test-Path -LiteralPath .env)) {
-    Copy-Item -LiteralPath .env.example -Destination .env
+    Copy-Item -LiteralPath backend/.env.example -Destination .env
 }
 notepad .env
 ```
 
 Замените `POSTGRES_PASSWORD`, `TEMPORAL_DB_PASSWORD` и `NEO4J_PASSWORD` на разные пароли,
-сохраните файл. `.env` исключён из Git; `.env.example` содержит только примеры настройки.
+сохраните файл. `.env` исключён из Git; `backend/.env.example` содержит только примеры настройки.
 Если база уже создана, сохраняйте её действующие пароли: изменение `.env` само по себе
 не меняет пароль существующего пользователя PostgreSQL.
 
@@ -149,14 +149,16 @@ API возвращает 503, а не выдуманный процент. Workf
 
 ## Сервисы и хранение
 
-Семь постоянных сервисов: frontend, api, worker, temporal, postgres, chroma, neo4j.
+Восемь постоянных сервисов: frontend, api, worker, temporal, postgres, chroma, neo4j, temporal-ui.
 Пять одноразовых служб со статусом Exited (0): temporal-db-init, temporal-schema-init,
 temporal-namespace-init, app-migrate, graph-init. Alembic меняет только базу education.
 Temporal использует отдельные базы temporal и temporal_visibility.
 
-Постоянные данные хранятся в postgres-data, chroma-data, original-files,
-artifact-files и neo4j-data; temporal-init-state хранит служебную настройку:
-API пишет исходные файлы, Worker читает. Фоновые процессы управляются через Temporal.
+Постоянные данные хранятся в postgres-data, chroma-data, artifact-files и neo4j-data;
+temporal-init-state хранит служебную настройку. Оригиналы PDF/DOCX/XLSX и их метаданные
+сохраняются одной транзакцией в source_documents.content (bytea). API и Worker читают
+их из PostgreSQL; списки документов не загружают бинарное содержимое. Старый том
+original-files подключён только к app-migrate для перехода с файлового хранения. Фоновые процессы управляются через Temporal.
 
 Frontend собирается внутри Docker: Node.js проверяет TypeScript и собирает React,
 затем Nginx раздаёт готовые HTML, JavaScript и CSS. Node.js на компьютере не требуется.
@@ -170,39 +172,27 @@ Chroma запускается, но индексирование програм�
 
 ## Тесты и диагностика
 
+Рабочий образ содержит только зависимости приложения. Для модульных тестов и Ruff
+соберите отдельную цель `test`; она включает тесты и зависимости разработки:
+
 ```powershell
-docker compose ps -a
-docker compose exec -T api pytest -q -m "not integration"
-docker compose exec -T api ruff check app scripts tests migrations
+docker build --target test -t education-backend-tests:local ./backend
+docker run --rm --network none -e POSTGRES_PASSWORD=test-only education-backend-tests:local pytest -q -m "not integration"
+docker run --rm --network none education-backend-tests:local ruff check app scripts tests migrations
 docker compose exec -T api python -m scripts.smoke
 docker compose exec -T api python -m scripts.audit_originals
-# Полная приёмка:
-.\scripts\verify-integration.ps1
 ```
 
-Полная приёмка использует отдельный случайный Compose-проект, тома и порты 18000/18080.
-Основной запуск не останавливается. Проверяются реальный HTTP/PostgreSQL, повторы
-Activities, независимые Workflow, отказы зависимостей, перезапуск Worker,
-пересоздание контейнеров, оригиналы и повтор миграций. Два таймера по 90 секунд
-увеличивают длительность приёмки. Успешное тестовое окружение удаляется вместе с его томами;
-при ошибке остаётся для диагностики. -KeepStack сохраняет успешное окружение,
--ResumeProject с напечатанным именем education-acceptance-xxxxxxxx повторяет неудачный запуск.
+Модульные тесты не заменяют интеграционные проверки PostgreSQL/Temporal/Neo4j.
+Тесты с `RUN_INTEGRATION=1` выполняйте только в отдельном Compose-проекте с собственными
+томами. Локальные `compose.*-test.yaml`, `compose.test.yaml` и скрипт полной приёмки
+не входят в Git. `compose.parser-test.yaml` поднимает искусственный HTTP-парсер для
+проверки успеха, ошибок и повторов; это не настоящий ML и не часть рабочего запуска.
+Readiness проверяет PostgreSQL, Temporal, Chroma и Neo4j; liveness — процесс.
 
-Обычный pytest без RUN_INTEGRATION=1 пропускает интеграционные тесты: это не полная приёмка.
-Readiness проверяет PostgreSQL, Temporal, Chroma и Neo4j с таймаутами; liveness — процесс.
-Smoke проверяет настоящий Worker и воспроизведение истории через Replayer.
-
-Проверка HTTP-контракта парсера запускается отдельно, на свободных тестовых портах
-18000/18080. Дополнительный сервис из `compose.parser-test.yaml` возвращает искусственные
-данные и ошибки; он нужен только тестам и не входит в рабочий запуск.
-
-```powershell
-$parserTestProject = 'education-parser-test-' + [guid]::NewGuid().ToString('N').Substring(0,8)
-docker compose -p $parserTestProject -f compose.yaml -f compose.test.yaml -f compose.parser-test.yaml up --build -d --wait
-docker compose -p $parserTestProject -f compose.yaml -f compose.test.yaml -f compose.parser-test.yaml exec -T -e RUN_INTEGRATION=1 -e PARSER_FIXTURE_TESTS=1 api pytest -q tests/test_import_processing.py
-# После проверки удаляется только только что созданный тестовый проект:
-docker compose -p $parserTestProject -f compose.yaml -f compose.test.yaml -f compose.parser-test.yaml down -v
-```
+Temporal UI: http://localhost:8233 (порт `TEMPORAL_UI_PORT`), namespace `education`.
+Это интерфейс существующего Temporal Server для просмотра задач, истории и повторов.
+Порт привязан только к локальному компьютеру.
 
 ## Ограничения и обслуживание
 
@@ -211,9 +201,28 @@ Nginx допускает multipart до 64 МиБ — при увеличени�
 parsing_status=not_parsed в метаданных оригинала не заменяет статус обработки:
 результат разбора конкретного запуска нужно читать в задаче импорта.
 
-Файловая система и БД не образуют общей транзакции. При известной ошибке записи БД
-файл удаляется; при потере подтверждения commit оригинал сохраняется. audit_originals
-показывает лишние, отсутствующие и временные файлы, без автоматического удаления.
+Байты оригинала, SHA-256, размер и метаданные записываются одной SQL-транзакцией.
+Ограничения БД проверяют соответствие размера и хэша, триггер запрещает изменение
+исторического оригинала. audit_originals проверяет байты без изменения данных.
+
+Миграция 0003 переносит файлы из старого original-files с проверкой размера/SHA-256,
+сохраняет ID и связи, не удаляет старые файлы. При отсутствии/повреждении файла
+миграция целиком откатывается. Перед обновлением сделайте резервную копию SQL и файлов,
+остановите api/worker/frontend, затем запустите миграцию и обновлённые сервисы.
+После резервного копирования обновление существующего запуска выполняется из корня:
+
+```powershell
+docker compose build api
+docker compose stop frontend api worker
+docker compose run --rm app-migrate
+docker compose up -d --wait
+```
+
+При ошибке миграции не запускайте новую версию API/Worker до устранения причины.
+Автоматический downgrade при наличии оригиналов запрещён, чтобы не потерять bytea.
+Оригиналы входят в полный дамп PostgreSQL; Markdown остаётся в artifact-files.
+Рост объёма базы, журналов и резервных копий зависит от количества файлов; лимит
+50 МиБ не является доказательством производительности при параллельных загрузках.
 
 ```powershell
 docker compose logs --tail 80 api worker temporal app-migrate
@@ -233,7 +242,7 @@ docker compose up --build -d
 - `scripts/` — Python-скрипты диагностики.
 - `tests/` — обычные и интеграционные тесты.
 - `../frontend/` — интерфейс загрузки, состояния обработки и настройки Nginx.
-- `../scripts/verify-integration.ps1` — интеграционная приёмка всего стека.
+- `tests/` — модульные и интеграционные проверки; запускаются в отдельном тестовом образе.
 
 При сообщении о проблеме укажите действие, ожидаемый результат и текст ошибки.
 Логи прикладывайте без паролей, содержимого `.env` и приватных документов.
@@ -299,27 +308,22 @@ ML может получить оригинал, если ParserOutput не со
 бесконечно порождать тот же конфликт заново без новой причины.
 
 Markdown создаётся только из реально переданного artifacts. Он хранится отдельно
-в постоянном artifact-files; оригиналы не переносились. Worker пишет производные файлы,
+в постоянном artifact-files; оригиналы хранятся в PostgreSQL (bytea). Worker пишет производные файлы,
 API читает. Конфигурация парсера и SHA256 сохранены.
 При одновременных попытках каждый временный файл имеет отдельное имя; итоговый путь
 публикуется атомарно без замены существующего файла. Повтор с теми же байтами
 идемпотентен, другой Markdown с тем же ID отклоняется. Файл и каталог синхронизируются
 с диском до записи SQL-метаданных.
 Резервная копия должна включать
-SQL, original-files и artifact-files. После сбоя до commit возможен файл без записи:
+SQL (включая bytea оригиналов) и artifact-files. После сбоя до commit возможен файл без записи:
 python -m scripts.audit_artifacts выявляет missing/corrupted/unreferenced, ничего
 не удаляя. Уборку выполнять отдельно после сверки незавершённых операций и backup.
 Существующая проверка оригиналов остаётся python -m scripts.audit_originals.
 
-Для проверки с искусственным ML на отдельном тестовом проекте:
-
-    docker compose -p education-acceptance-XXXXXXXX -f compose.yaml -f compose.test.yaml -f compose.review-test.yaml up --build -d --wait
-    docker compose -p education-acceptance-XXXXXXXX -f compose.yaml -f compose.test.yaml -f compose.review-test.yaml exec -T api pytest tests/test_review_integration.py -q
-
-Вместо XXXXXXXX используйте собственные восемь hex-символов. Порты18000/18080 должны
-быть свободны. compose.review-test.yaml запускает только искусственные сервисы:
-это проверка Backend-контракта, сохранности и управления задачами, а не настоящий
-разбор документов. Продуктовый Frontend и чужие ML/validation-модули этапом не менялись.
+Проверки с искусственным ML запускаются только в отдельном локальном тестовом
+окружении. Они проверяют Backend-контракт, сохранность и управление задачами,
+а не настоящий разбор документов. Продуктовый Frontend и чужие ML/validation-модули
+этими изменениями не менялись.
 
 ## Графовая часть черновика v0.4
 
@@ -399,18 +403,12 @@ Chroma, чат, правки через агента и генерация ос�
 Проверяются все SQL-версии и лишние графовые области без SQL-версии; ненулевой
 код завершения означает найденные проблемы. Автоматический Worker восстанавливает
 отсутствующие/повреждённые представления; можно запросить ручную сборку с новым ключом.
-Для backup сохраняйте SQL + original-files + artifact-files. Из этой копии можно
+Для backup сохраняйте SQL (с bytea оригиналов) + artifact-files. Из этой копии можно
 восстановить граф: после восстановления запустите graph-init и Worker с автоматической
 сверкой, дождитесь audit_graphs без замечаний. Сохранение neo4j-data ускоряет возврат,
 но не заменяет сверку с восстановленным SQL. Никогда не удаляйте рабочие тома для
 обычного обновления. В SQL остаются снимки и источники, даже при потере Neo4j.
 
-Изолированные проверки используют compose.test.yaml + compose.review-test.yaml +
-compose.graph-test.yaml. Последний отключает автоматическую сверку для управляемых
-сценариев; тест восстановления включает её отдельно. test_graph_integration.py
-проверяет настоящие Neo4j/PG/Temporal, источники, версии, атомарность и восстановление.
-GRAPH_RETRY_FAULT_TEST=1 применяется отдельно при остановленном обычном тестовом Worker:
-собственный Worker теста моделирует сбой после commit Neo4j до SQL-отчёта.
-
-Документация используемых механизмов: [транзакции Python-драйвера](https://neo4j.com/docs/python-manual/current/transactions/),
-[составная уникальность узлов и рёбер](https://neo4j.com/docs/cypher-manual/5/constraints/create-constraints/).
+Изолированные интеграционные тесты проверяют настоящие Neo4j/PG/Temporal,
+источники, версии, атомарность, повторы и восстановление графа после потери данных.
+Локальные Compose-переопределения для этих проверок не включены в Git.

@@ -217,24 +217,28 @@ class Repository:
             self.pool.connection() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute(
-                """INSERT INTO source_documents
+            return self.insert_document(cursor, program_id, stored)
+
+    @staticmethod
+    def insert_document(cursor, program_id, stored):
+        cursor.execute(
+            """INSERT INTO source_documents
                    (id, program_id, original_name, format, media_type,
-                    size_bytes, sha256, storage_key)
+                    size_bytes, sha256, content)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING """
-                + DOCUMENT_COLUMNS,
-                (
-                    stored["id"],
-                    program_id,
-                    stored["original_name"],
-                    stored["format"],
-                    stored["media_type"],
-                    stored["size_bytes"],
-                    stored["sha256"],
-                    stored["storage_key"],
-                ),
-            )
-            return cursor.fetchone()
+            + DOCUMENT_COLUMNS,
+            (
+                stored["id"],
+                program_id,
+                stored["original_name"],
+                stored["format"],
+                stored["media_type"],
+                stored["size_bytes"],
+                stored["sha256"],
+                stored["content"],
+            ),
+        )
+        return cursor.fetchone()
 
     def documents(self, program_id, limit=50, offset=0):
         self.program(program_id)
@@ -259,7 +263,20 @@ class Repository:
             cursor.execute(
                 "SELECT "
                 + DOCUMENT_COLUMNS
-                + " , storage_key FROM source_documents WHERE program_id=%s AND id=%s",
+                + " FROM source_documents WHERE program_id=%s AND id=%s",
                 (program_id, document_id),
             )
             return self.require(cursor.fetchone())
+
+    def document_content(self, program_id, document_id):
+        with (
+            self.pool.connection() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            return self.require(
+                cursor.execute(
+                    "SELECT " + DOCUMENT_COLUMNS + ",content FROM source_documents "
+                    "WHERE program_id=%s AND id=%s",
+                    (program_id, document_id),
+                ).fetchone()
+            )

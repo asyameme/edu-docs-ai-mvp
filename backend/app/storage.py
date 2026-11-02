@@ -1,9 +1,8 @@
-"""Хранение исходных байтов; расширение обозначает формат, а не успешный разбор."""
+"""Подготовка исходных байтов для атомарной записи с метаданными в PostgreSQL."""
 
 import hashlib
-import os
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from app.errors import DomainError
 
@@ -15,13 +14,8 @@ MEDIA_TYPES = {
 
 
 class OriginalStorage:
-    def __init__(self, root: Path, max_bytes: int):
-        self.root = root
+    def __init__(self, max_bytes: int):
         self.max_bytes = max_bytes
-
-    def path(self, key: str) -> Path:
-        # Ключ в БД — UUID, созданный сервером, а не пользовательское имя файла.
-        return self.root / str(UUID(key))
 
     def save(self, upload):
         name = (upload.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
@@ -30,43 +24,18 @@ class OriginalStorage:
         suffix = Path(name).suffix.lower().lstrip(".")
         if suffix not in MEDIA_TYPES:
             raise DomainError(415, "Supported formats: PDF, DOCX, XLSX")
-        document_id = uuid4()
-        key = str(document_id)
-        final = self.path(key)
-        temporary = self.root / (".upload-" + key)
-        digest, size = hashlib.sha256(), 0
-        try:
-            self.root.mkdir(parents=True, exist_ok=True)
-            with temporary.open("xb") as target:
-                while chunk := upload.file.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > self.max_bytes:
-                        raise DomainError(413, "File exceeds configured size limit")
-                    digest.update(chunk)
-                    target.write(chunk)
-                if not size:
-                    raise DomainError(422, "File is empty")
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, final)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
+        # Читаем только разрешённый объём и один байт для проверки превышения.
+        content = upload.file.read(self.max_bytes + 1)
+        if len(content) > self.max_bytes:
+            raise DomainError(413, "File exceeds configured size limit")
+        if not content:
+            raise DomainError(422, "File is empty")
         return {
-            "id": document_id,
-            "storage_key": key,
+            "id": uuid4(),
+            "content": content,
             "original_name": name,
             "format": suffix,
             "media_type": MEDIA_TYPES[suffix],
-            "size_bytes": size,
-            "sha256": digest.hexdigest(),
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
         }
-
-    def remove(self, key):
-        self.path(key).unlink(missing_ok=True)
-
-    def download_path(self, key):
-        path = self.path(key)
-        if not path.is_file():
-            raise DomainError(503, "Original file is unavailable")
-        return path
