@@ -2162,6 +2162,8 @@ def extract_course_content(document, file_name, semesters=None):
     table_found = False
     text_ref = None
     content_semester = None
+    period_caption = None
+
     def report(category, message, ref, severity="warning"):
         issues.append(ParseIssue(
             category=category,
@@ -2175,6 +2177,8 @@ def extract_course_content(document, file_name, semesters=None):
             text = normalize(block.text)
 
             if text.startswith("период обучения"):
+                period_caption = " ".join(block.text.split())
+
                 match = re.fullmatch(
                     r"период обучения\s*(?:\(модуль\))?"
                     r"\s*:\s*семестр\s+([1-8])",
@@ -2193,17 +2197,25 @@ def extract_course_content(document, file_name, semesters=None):
 
         table_found = True
 
+        if period_caption is not None and content_semester is None:
+            report(
+                "unexpected_format",
+                f"не удалось прочитать период {period_caption!r}; "
+                "нужно проверить принадлежность таблицы",
+                table_ref,
+            )
+            continue
+
         if semesters is not None:
             if content_semester is None:
                 report(
                     "manual_review",
-                    "для выбранного варианта нагрузки не определен "
-                    "семестр этой таблицы; содержание не привязано",
+                    "семестр таблицы не указан; темы прочитаны "
+                    "без распределения по семестрам",
                     table_ref,
                 )
-                continue
 
-            if content_semester not in semesters:
+            elif content_semester not in semesters:
                 report(
                     "manual_review",
                     f"таблица относится к семестру {content_semester}, "
@@ -2466,7 +2478,7 @@ def parse_rpd(
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_workload_variant_v1",
+            parser_config="rpd_workload_variant_v2",
         )
     )
 
@@ -2542,10 +2554,7 @@ def parse_rpd(
 
     selected_semesters = (
         discipline.semesters
-        if discipline is not None and (
-            workload_track is not None
-            or education_mode is not None
-        )
+        if discipline is not None
         else None
     )
 
