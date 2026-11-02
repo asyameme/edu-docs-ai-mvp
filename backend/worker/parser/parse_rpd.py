@@ -164,7 +164,13 @@ def organization_tables(document, file_name):
                 ))
 
     return tables
-def extract_control_forms(document, file_name):
+def extract_control_forms(
+    document,
+    file_name,
+    variant_rows=None,
+    workload_variant=None,
+    semesters=None,
+):
     """Прочитать формы аттестации из соответствующих колонок."""
     forms = []
     issues = []
@@ -215,7 +221,30 @@ def extract_control_forms(document, file_name):
                 labels[0],
             ):
                 continue
+            if variant_rows is not None and workload_variant is not None:
+                actual = variant_rows.get(
+                    (table_ref.table, row_index + 1),
+                    (None, None),
+                )
 
+                if any(
+                    value is not None
+                    and expected is not None
+                    and value != expected
+                    for value, expected in zip(
+                        actual,
+                        workload_variant,
+                    )
+                ):
+                    continue
+
+            if semesters is not None:
+                semester = int(
+                    re.search(r"\d+", labels[0]).group()
+                )
+
+                if semester not in semesters:
+                    continue
             for col in columns:
                 if col >= len(row.cells):
                     continue
@@ -271,7 +300,199 @@ def extract_control_forms(document, file_name):
 
     return forms, issues
 
-def build_discipline(document, file_name, title_parts):
+def organization_variant_rows(document, file_name):
+    """Связать строки раздела 2.1 с траекторией и формой обучения."""
+    variants = {}
+    cells_by_ref = {}
+    cell_variants = {}
+
+    for table, table_ref in organization_tables(document, file_name):
+        track, mode = None, None
+
+        for row_number, row in enumerate(table.rows, 1):
+            cells = row.cells
+
+            if cells and len({cell._tc for cell in cells}) == 1:
+                text = normalize(cells[0].text)
+
+                if text.startswith((
+                    "основная траектория",
+                    "траектория",
+                )):
+                    track, mode = text, None
+
+                match = re.fullmatch(
+                    r"(?:форма обучения\s*:\s*)?"
+                    r"(очная|заочная|очно-заочная)"
+                    r"(?: форма обучения)?",
+                    text,
+                )
+
+                if match:
+                    mode = match.group(1)
+
+            variant = (track, mode)
+            variants[(table_ref.table, row_number)] = variant
+
+            for column, cell in enumerate(cells, 1):
+                ref = (table_ref.table, row_number, column)
+                cells_by_ref[ref] = cell._tc
+                cell_variants.setdefault(cell._tc, set()).add(
+                    variant
+                )
+
+    conflicts = {
+        ref
+        for ref, cell in cells_by_ref.items()
+        if len(cell_variants[cell]) > 1
+    }
+
+    return variants, conflicts
+
+
+def select_workload_variant(
+    data,
+    variants,
+    conflicts,
+    workload_track=None,
+    education_mode=None,
+):
+    """Выбрать один явно указанный вариант нагрузки."""
+    groups = {}
+
+    for item in data:
+        ref = item["source_ref"]
+        variant = variants.get(
+            (ref.table, ref.row),
+            (None, None),
+        )
+        groups.setdefault(variant, []).append(item)
+
+    tracks = {
+        track
+        for track, mode in variants.values()
+        if track is not None
+    }
+    modes = {
+        mode
+        for track, mode in variants.values()
+        if mode is not None
+    }
+
+    wanted_track = (
+        normalize(workload_track)
+        if workload_track is not None
+        else None
+    )
+    wanted_mode = (
+        normalize(education_mode)
+        if education_mode is not None
+        else None
+    )
+
+    if wanted_track == "":
+        raise ValueError("workload_track не должен быть пустым")
+
+    if wanted_mode not in {
+        None, "очная", "заочная", "очно-заочная",
+    }:
+        raise ValueError("Неизвестная форма обучения")
+
+    available = "; ".join(
+        f"траектория: {track or 'без метки'}, "
+        f"форма: {mode or 'без метки'}"
+        for track, mode in groups
+    )
+
+    def issue(category, message):
+        return [], None, [ParseIssue(
+            category=category,
+            message=(
+                f"{message}. "
+                f"Доступные варианты: {available}"
+            ),
+            source_ref=data[0]["source_ref"],
+        )]
+
+    if workload_track is None and education_mode is None:
+        if len(tracks) > 1 or len(modes) > 1:
+            return issue(
+                "ambiguous",
+                "Найдено несколько траекторий или форм обучения; "
+                "нужно явно выбрать вариант нагрузки",
+            )
+
+    # Не распределяем значения без метки между размеченными блоками.
+    for axis, wanted in enumerate((wanted_track, wanted_mode)):
+        labels = {variant[axis] for variant in groups}
+
+        if wanted is not None and None in labels and len(labels) > 1:
+            return issue(
+                "ambiguous",
+                "Часть нагрузки не имеет метки варианта; "
+                "ее принадлежность не определена",
+            )
+
+    candidates = [
+        variant
+        for variant in groups
+        if (
+            wanted_track is None
+            or not tracks
+            or variant[0] == wanted_track
+        )
+        and (
+            wanted_mode is None
+            or not modes
+            or variant[1] == wanted_mode
+        )
+    ]
+
+    if len(candidates) != 1:
+        return issue(
+            "not_found" if not candidates else "ambiguous",
+            "Не удалось однозначно выбрать вариант нагрузки",
+        )
+
+    chosen = candidates[0]
+    selected = groups[chosen]
+
+    if any(
+        (
+            item["source_ref"].table,
+            item["source_ref"].row,
+            item["source_ref"].col,
+        ) in conflicts
+        for item in selected
+    ):
+        return issue(
+            "ambiguous",
+            "Ячейка нагрузки объединена между разными вариантами",
+        )
+
+    issues = []
+
+    if workload_track is not None or education_mode is not None:
+        issues.append(ParseIssue(
+            category="manual_review",
+            severity="info",
+            message=(
+                "Выбран вариант нагрузки: траектория "
+                f"{chosen[0] or 'без метки'}, форма "
+                f"{chosen[1] or 'без метки'}"
+            ),
+            source_ref=selected[0]["source_ref"],
+        ))
+
+    return selected, chosen, issues
+
+def build_discipline(
+    document,
+    file_name,
+    title_parts,
+    workload_track=None,
+    education_mode=None,
+):
     """Собрать одну дисциплину из титула и таблиц нагрузки."""
     values, issues = extract_workload(document, file_name)
     name = extract_discipline_name(title_parts)
@@ -298,51 +519,28 @@ def build_discipline(document, file_name, title_parts):
     if not name or not data:
         return None, issues
 
-    if len({
-        item["source_ref"].table
-        for item in data
-    }) != 1:
-        problem(
-            "Найдено несколько таблиц нагрузки; "
-            "их нельзя автоматически объединить",
-            SourceRef(file=file_name),
-        )
+    variant_rows, variant_conflicts = organization_variant_rows(
+        document,
+        file_name,
+    )
+
+    data, chosen_variant, variant_issues = select_workload_variant(
+        data,
+        variant_rows,
+        variant_conflicts,
+        workload_track=workload_track,
+        education_mode=education_mode,
+    )
+    issues.extend(variant_issues)
+
+    if not data:
         return None, issues
 
-    tracks = set()
-    modes = set()
-
-    for table, table_ref in organization_tables(document, file_name):
-        for row in table.rows:
-            cells = list(row.cells)
-
-            if len({cell._tc for cell in cells}) != 1:
-                continue
-
-            text = normalize(cells[0].text)
-
-            if text.startswith((
-                "основная траектория",
-                "траектория",
-            )):
-                tracks.add(text)
-
-            mode = re.fullmatch(
-                r"(?:форма обучения\s*:\s*)?"
-                r"(очная|заочная|очно-заочная)"
-                r"(?: форма обучения)?",
-                text,
-            )
-
-            if mode:
-                modes.add(mode.group(1))
-
-    if len(tracks) > 1 or len(modes) > 1:
+    if len({item["source_ref"].table for item in data}) != 1:
         problem(
-            "Найдено несколько траекторий или форм обучения; "
-            "для Discipline нужно выбрать соответствующий блок",
+            "В выбранном варианте несколько таблиц нагрузки; "
+            "их нельзя автоматически объединить",
             data[0]["source_ref"],
-            "ambiguous",
         )
         return None, issues
 
@@ -584,6 +782,17 @@ def build_discipline(document, file_name, title_parts):
     forms, form_issues = extract_control_forms(
         document,
         file_name,
+        variant_rows=(
+            variant_rows
+            if workload_track is not None or education_mode is not None
+            else None
+        ),
+        workload_variant=chosen_variant,
+        semesters=(
+            semesters
+            if workload_track is not None or education_mode is not None
+            else None
+        ),
     )
     issues.extend(form_issues)
 
@@ -1919,7 +2128,7 @@ def extract_wide_course_table(table, source_ref):
 
     return topics, issues
 
-def extract_course_content(document, file_name):
+def extract_course_content(document, file_name, semesters=None):
     """Прочитать таблицы: тема - вид занятий - часы."""
     def is_heading(paragraph):
         title = re.sub(
@@ -1952,7 +2161,7 @@ def extract_course_content(document, file_name):
     topics = []
     table_found = False
     text_ref = None
-
+    content_semester = None
     def report(category, message, ref, severity="warning"):
         issues.append(ParseIssue(
             category=category,
@@ -1965,12 +2174,45 @@ def extract_course_content(document, file_name):
         if isinstance(block, Paragraph):
             text = normalize(block.text)
 
+            if text.startswith("период обучения"):
+                match = re.fullmatch(
+                    r"период обучения\s*(?:\(модуль\))?"
+                    r"\s*:\s*семестр\s+([1-8])",
+                    text,
+                )
+                content_semester = (
+                    int(match.group(1))
+                    if match
+                    else None
+                )
+
             if not text.startswith("период обучения"):
                 text_ref = text_ref or table_ref
 
             continue
 
         table_found = True
+
+        if semesters is not None:
+            if content_semester is None:
+                report(
+                    "manual_review",
+                    "для выбранного варианта нагрузки не определен "
+                    "семестр этой таблицы; содержание не привязано",
+                    table_ref,
+                )
+                continue
+
+            if content_semester not in semesters:
+                report(
+                    "manual_review",
+                    f"таблица относится к семестру {content_semester}, "
+                    f"а выбранная нагрузка к семестрам {semesters}; "
+                    "содержание не привязано",
+                    table_ref,
+                )
+                continue
+
         rows = block.rows
         header = None
 
@@ -2172,7 +2414,11 @@ def extract_course_content(document, file_name):
 
     return topics, issues
 
-def parse_rpd(file_path):
+def parse_rpd(
+    file_path,
+    workload_track=None,
+    education_mode=None,
+):
     file_path = Path(file_path)
 
     if file_path.suffix.lower() != ".docx":
@@ -2220,7 +2466,7 @@ def parse_rpd(file_path):
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_course_content_v2",
+            parser_config="rpd_workload_variant_v1",
         )
     )
 
@@ -2243,6 +2489,8 @@ def parse_rpd(file_path):
         document,
         file_path.name,
         title_parts,
+        workload_track=workload_track,
+        education_mode=education_mode,
     )
     output.parse_issues.extend(discipline_issues)
 
@@ -2292,10 +2540,21 @@ def parse_rpd(file_path):
             source_ref=prerequisite_records[0]["source_ref"],
         ))
 
+    selected_semesters = (
+        discipline.semesters
+        if discipline is not None and (
+            workload_track is not None
+            or education_mode is not None
+        )
+        else None
+    )
+
     course_topics, content_issues = extract_course_content(
         document,
         file_path.name,
+        semesters=selected_semesters,
     )
+
     output.parse_issues.extend(content_issues)
 
     if output.disciplines:
@@ -2742,6 +3001,11 @@ def main():
         type=Path,
         required=True,
     )
+    parser.add_argument("--workload-track")
+    parser.add_argument(
+        "--education-mode",
+        choices=["очная", "заочная", "очно-заочная"],
+    )
     args = parser.parse_args()
 
     if args.input.resolve() == args.output.resolve():
@@ -2750,7 +3014,11 @@ def main():
         )
 
     try:
-        result = parse_rpd(args.input)
+        result = parse_rpd(
+            args.input,
+            workload_track=args.workload_track,
+            education_mode=args.education_mode,
+        )
     except (ValueError, OSError) as error:
         parser.error(str(error))
 
