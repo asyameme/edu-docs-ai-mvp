@@ -12,6 +12,7 @@ from .common import heading_level, normalize
 from .models import ParseIssue, ParserMeta, ParserOutput, SourceRef
 from .results import extract_results_into
 
+from .discipline import build_practice_discipline
 
 def parse_rpp(file_path):
     file_path = Path(file_path)
@@ -110,7 +111,16 @@ def parse_rpp(file_path):
         for p in candidates
         if (heading_level(p) or 2) == depth
     }
+    discipline, workload_issues = build_practice_discipline(
+        document,
+        file_path.name,
+        title_parts,
+    )
+    output.parse_issues.extend(workload_issues)
 
+    if discipline is not None:
+        output.disciplines.append(discipline)
+        
     output = extract_results_into(
         output,
         document,

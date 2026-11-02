@@ -1298,3 +1298,252 @@ def extract_prerequisites(document, file_name):
         ))
 
     return records, issues
+
+def extract_practice_workload(document, file_name):
+    """Прочитать общую и посеместровую нагрузку из текста РПП."""
+    def is_heading(paragraph):
+        text = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*",
+            "",
+            normalize(paragraph.text),
+        )
+        return bool(re.fullmatch(
+            r"организация практики(?:\s*:.*)?",
+            text,
+        ))
+
+    blocks, issues = read_section(
+        document,
+        file_name,
+        is_heading,
+        "Организация практики",
+    )
+
+    if not blocks:
+        return [], issues
+
+    records = []
+    plan_ref = None
+
+    amount_pattern = (
+        r"(.+?)\s*(?:з\.?\s*е\.?|зачетных\s+единиц|зет)"
+        r"\s*\(\s*(.+?)\s+(?:академических\s+)?час(?:ов|а)?\s*\)\.?"
+    )
+
+    for block, ref in blocks:
+        if not isinstance(block, Paragraph):
+            issues.append(ParseIssue(
+                category="manual_review",
+                message="Таблица нагрузки РПП требует отдельного разбора",
+                source_ref=ref,
+            ))
+            continue
+
+        raw = " ".join(block.text.split())
+        text = normalize(raw).replace("\u0451", "е")
+
+        if "учебном плане" in text:
+            plan_ref = ref
+
+        semester_match = re.fullmatch(
+            r"семестр\s+(\d+)\s*:\s*(.*)",
+            text,
+        )
+        total_match = re.fullmatch(
+            r"общая\s+трудоемкость(?:\s+практики)?"
+            r"(?:\s+составляет)?\s*:?\s*(.*)",
+            text,
+        )
+
+        if semester_match:
+            scope = "semester"
+            semester = int(semester_match.group(1))
+            amount = semester_match.group(2)
+
+        elif total_match:
+            scope = "total"
+            semester = None
+            amount = total_match.group(1)
+
+        else:
+            if re.match(r"семестр\b", text):
+                issues.append(ParseIssue(
+                    category="unparsed_row",
+                    message=f"Не разобрана строка нагрузки: {raw}",
+                    source_ref=ref,
+                ))
+            continue
+
+        record = {
+            "scope": scope,
+            "semester": semester,
+            "credit_units": None,
+            "hours_total": None,
+            "raw": raw,
+            "source_ref": ref,
+        }
+
+        match = re.fullmatch(amount_pattern, amount)
+
+        if match:
+            try:
+                record["credit_units"] = parse_workload_number(
+                    match.group(1)
+                )
+                record["hours_total"] = parse_workload_number(
+                    match.group(2)
+                )
+            except ValueError:
+                pass
+
+        if (
+            record["credit_units"] is None
+            or record["hours_total"] is None
+        ):
+            issues.append(ParseIssue(
+                category="unexpected_format",
+                message=(
+                    "Не удалось прочитать нагрузку "
+                    f"без предположений: {raw}"
+                ),
+                source_ref=ref,
+            ))
+
+        records.append(record)
+
+    if not records:
+        issues.append(ParseIssue(
+            category="manual_review" if plan_ref else "not_found",
+            message=(
+                "Локальные значения нагрузки не найдены; "
+                "документ отсылает к УП"
+                if plan_ref
+                else "В разделе не найдены значения нагрузки"
+            ),
+            source_ref=plan_ref or blocks[0][1],
+        ))
+
+    return records, issues
+
+
+def build_practice_discipline(document, file_name, title_parts):
+    """Собрать практику с явно указанной общей нагрузкой."""
+    records, issues = extract_practice_workload(document, file_name)
+
+    if not records:
+        return None, issues
+
+    totals = [
+        item for item in records
+        if item["scope"] == "total"
+    ]
+    periods = [
+        item for item in records
+        if item["scope"] == "semester"
+    ]
+    ref = records[0]["source_ref"]
+
+    if len(totals) != 1:
+        issues.append(ParseIssue(
+            category="ambiguous" if totals else "not_found",
+            message="Не удалось однозначно прочитать общий объем практики",
+            source_ref=ref,
+        ))
+        return None, issues
+
+    total = totals[0]
+
+    for field, minimum in (
+        ("credit_units", 1),
+        ("hours_total", 0),
+    ):
+        value = total[field]
+
+        if value is None:
+            return None, issues
+
+        if value < minimum or value != value.to_integral_value():
+            issues.append(ParseIssue(
+                category="unexpected_format",
+                message=(
+                    f"Общее значение {field}={value} "
+                    "не подходит модели"
+                ),
+                source_ref=total["source_ref"],
+            ))
+            return None, issues
+
+    semesters = [item["semester"] for item in periods]
+
+    if (
+        not semesters
+        or any(not 1 <= value <= 8 for value in semesters)
+        or len(semesters) != len(set(semesters))
+    ):
+        issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                "Семестры практики отсутствуют, повторяются "
+                "или выходят за 1-8"
+            ),
+            source_ref=ref,
+        ))
+        return None, issues
+
+    parts = [
+        " ".join(text.split())
+        for text in title_parts
+        if text.strip()
+    ]
+    names = []
+
+    for index, text in enumerate(parts):
+        compact = re.sub(
+            r"\s+", "", text,
+        ).casefold().rstrip(":")
+
+        if compact in {
+            "практики",
+            "рабочаяпрограммапрактики",
+        }:
+            if index + 1 < len(parts):
+                names.append(parts[index + 1].strip(' «»"'))
+
+    if (
+        len(names) != 1
+        or normalize(names[0]).replace("\u0451", "е").startswith((
+            "язык",
+            "трудоемкость",
+            "регистрационный",
+            "аннотация",
+        ))
+    ):
+        issues.append(ParseIssue(
+            category="manual_review",
+            message="Не удалось прочитать название практики с титула",
+            source_ref=SourceRef(file=file_name, section="титул"),
+        ))
+        return None, issues
+
+    for item in periods:
+        issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                "Посеместровая нагрузка прочитана, но в контракте нет "
+                "отдельных полей для ее передачи: " + item["raw"]
+            ),
+            source_ref=item["source_ref"],
+        ))
+
+    discipline = Discipline(
+        name=names[0],
+        semesters=sorted(semesters),
+        credit_units=int(total["credit_units"]),
+        hours_total=int(total["hours_total"]),
+        hours_by_kind={},
+        source_ref=total["source_ref"].model_copy(update={
+            "section": f"титул; {total['source_ref'].section}",
+        }),
+    )
+
+    return discipline, issues
