@@ -49,8 +49,6 @@ class EducationalGraph(BaseModel):
 
     @classmethod
     def _ensure_evidence(cls, node: GraphNode) -> None:
-        # Если у атрибута уже есть история происхождения,
-        # не приписываем его всем источникам объединённого узла.
         for key, value in node.attributes.items():
             if key in node.attribute_sources:
                 continue
@@ -82,23 +80,16 @@ class EducationalGraph(BaseModel):
             if ref not in existing.source_refs:
                 existing.source_refs.append(ref)
 
-        # Сохраняем все исходные значения с их источниками.
         for key, evidences in incoming.attribute_sources.items():
             for evidence in evidences:
                 self._add_evidence(existing, key, evidence)
 
-        # Основное представление атрибутов сохраняем для
-        # совместимости с кодом, который использует attributes.
         for key, value in incoming.attributes.items():
             if key not in existing.attributes:
                 existing.attributes[key] = value
             elif existing.attributes[key] is None and value is not None:
                 existing.attributes[key] = value
 
-        # Разные непустые значения не перезаписываем:
-        # все варианты остаются в attribute_sources.
 
     def add_edge(self, edge: GraphEdge) -> None:
-        # Каждая связь сохраняется как отдельное свидетельство,
-        # включая повторения из разных документов.
         self.edges.append(edge)
