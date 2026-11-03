@@ -8,7 +8,9 @@ from docx.text.paragraph import Paragraph
 
 from .common import (
     heading_level,
+    is_subsection,
     normalize,
+    read_section,
 )
 from .models import (
     Competency,
@@ -371,6 +373,7 @@ def extract_results_into(output, document, file_name, is_heading):
 
     start = starts[0]
     section = blocks[start].text.strip()
+    root_section = section
     depth = heading_level(blocks[start]) or 2
 
     #считаем таблицы от начала документа
@@ -387,7 +390,7 @@ def extract_results_into(output, document, file_name, is_heading):
             level = heading_level(block)
 
             if level is not None:
-                if level <= depth:
+                if level <= depth or not is_subsection(root_section, block.text):
                     break
 
                 section = block.text.strip()
@@ -770,4 +773,91 @@ def extract_results_into(output, document, file_name, is_heading):
                 source_ref=competency.source_ref,
             ))
 
+    return output
+
+
+def extract_practice_competencies(output, document, file_name, is_heading):
+    """Добавить компетенции из текстовых перечней РПП."""
+    blocks, issues = read_section(
+        document, file_name, is_heading, "компетенции практики",
+        keep_numbered_items=True,
+    )
+    if not blocks:
+        output.parse_issues.extend(issues)
+        return output
+
+    def signature(code, formulation):
+        return code, normalize(formulation).rstrip(".")
+
+    table_mentions = {
+        signature(item.code, item.formulation)
+        for item in output.competencies
+    }
+    before_count = len(output.competencies)
+    paragraph_counts = {}
+
+    for block, ref in blocks:
+        if not isinstance(block, Paragraph):
+            continue
+        for parsed in split_competencies(block.text):
+            if parsed is None:
+                if re.match(
+                    r"^\s*[А-ЯA-Z][А-ЯA-Z0-9]*(?:[-\u2013\u2014][А-ЯA-Z0-9]+)+",
+                    block.text,
+                ):
+                    output.parse_issues.append(ParseIssue(
+                        category="unparsed_row",
+                        message=(
+                            "Не разобрана запись текстового перечня компетенций: "
+                            + " ".join(block.text.split())
+                        ),
+                        source_ref=ref,
+                    ))
+                continue
+            code, formulation = parsed
+            if not formulation:
+                output.parse_issues.append(ParseIssue(
+                    category="empty_cell",
+                    message=f"В текстовом перечне нет формулировки компетенции {code}",
+                    source_ref=ref,
+                ))
+                continue
+
+            key = signature(code, formulation)
+            paragraph_counts[key] = paragraph_counts.get(key, 0) + 1
+            # Первое совпадение перечня с подробной таблицей - одно
+            # упоминание сущности. Реальные повторы внутри перечня сохраняем.
+            if key in table_mentions and paragraph_counts[key] == 1:
+                continue
+
+            competency = Competency(
+                code=code, formulation=formulation, source_ref=ref,
+            )
+            output.competencies.append(competency)
+            for discipline in output.disciplines:
+                output.relations.append(Relation(
+                    src_entity="discipline",
+                    src_key=discipline.name,
+                    dst_entity="competency",
+                    dst_key=code,
+                    kind="формирует",
+                    source_ref=ref,
+                ))
+
+    if not before_count and output.competencies:
+        output.parse_issues = [
+            issue for issue in output.parse_issues
+            if not (
+                issue.category == "not_found"
+                and issue.message == "Не найдена таблица компетенций"
+            )
+        ]
+        output.parse_issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                "Компетенции прочитаны из текстового перечня; "
+                "табличные соответствия индикаторам и результатам не найдены"
+            ),
+            source_ref=blocks[0][1],
+        ))
     return output

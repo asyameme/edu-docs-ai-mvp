@@ -387,14 +387,20 @@ def extract_wide_course_table(table, source_ref):
     return topics, issues
 
 
-def extract_course_content(document, file_name, semesters=None):
+def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD"):
     """Прочитать таблицы: тема - вид занятий - часы."""
+    if doc_type not in {"RPD", "RPP"}:
+        raise ValueError("Поддерживаются РПД и РПП")
+
     def is_heading(paragraph):
         title = re.sub(
             r"^\d+(?:\.\d+)*\.?\s*",
             "",
             normalize(paragraph.text),
         ).rstrip(".:")
+
+        if doc_type == "RPP":
+            return title == "структура и содержание практики"
 
         return title in {
             "структура и содержание учебных занятий",
@@ -405,7 +411,7 @@ def extract_course_content(document, file_name, semesters=None):
         document,
         file_name,
         is_heading,
-        "содержание дисциплины",
+        "содержание практики" if doc_type == "RPP" else "содержание дисциплины",
         keep_numbered_items=True,
     )
 

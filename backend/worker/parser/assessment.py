@@ -162,8 +162,26 @@ def assessment_names(cell):
     return names, uncertain
 
 
-def extract_assessment_tools(document, file_name, indicators):
+def _practice_assessment_name(text):
+    """Прочитать явно названное средство из короткого заголовка РПП."""
+    raw = " ".join(text.split()).rstrip(".")
+    if len(raw) <= 300 and "?" not in raw and normalize(raw).startswith(
+        "типовые вопросы к "
+    ):
+        return raw
+    match = re.fullmatch(
+        r"(форма\s+отзыва\s+.+?)\s+в\s+приложении\s+\d+",
+        raw,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD"):
     """Извлечь формулировки КИМ и явные связи с индикаторами."""
+    if doc_type not in {"RPD", "RPP"}:
+        raise ValueError("Поддерживаются РПД и РПП")
+
     def is_heading(paragraph):
         title = re.sub(
             r"^\d+(?:\.\d+)*\.?\s*",
@@ -173,6 +191,11 @@ def extract_assessment_tools(document, file_name, indicators):
 
         # Нормализация используется только для поиска заголовка.
         title = title.replace("\u00ad", "").replace("-", "")
+
+        if doc_type == "RPP":
+            return title.startswith("оценочные средства:") or title in {
+                "оценочные средства", "контрольноизмерительные материалы",
+            }
 
         return (
             title.startswith(
@@ -195,6 +218,7 @@ def extract_assessment_tools(document, file_name, indicators):
     tools = []
     relations = []
     tools_by_name = {}
+    prose_refs = {}
     known_codes = {item.code for item in indicators}
     found_table = False
     details_ref = None
@@ -209,6 +233,15 @@ def extract_assessment_tools(document, file_name, indicators):
 
     for block, table_ref in blocks:
         if isinstance(block, Paragraph):
+            if doc_type == "RPP":
+                name = _practice_assessment_name(block.text)
+                if name:
+                    if name not in tools_by_name:
+                        tool = AssessmentTool(name=name, source_ref=table_ref)
+                        tools_by_name[name] = tool
+                        tools.append(tool)
+                    prose_refs.setdefault(name, table_ref)
+                    continue
             details_ref = details_ref or table_ref
             continue
 
@@ -257,13 +290,22 @@ def extract_assessment_tools(document, file_name, indicators):
                 continue
 
             labels = [cell.text.strip() for cell in cells]
+            numbered = [label for label in labels if label]
 
             if (
                 row_number == header_index + 2
                 and sum(bool(label) for label in labels) >= 2
-                and all(
-                    not label or label == str(index)
-                    for index, label in enumerate(labels, 1)
+                and (
+                    all(
+                        not label or label == str(index)
+                        for index, label in enumerate(labels, 1)
+                    )
+                    or (
+                        doc_type == "RPP"
+                        and numbered == [
+                            str(index) for index in range(1, len(numbered) + 1)
+                        ]
+                    )
                 )
             ):
                 continue
@@ -434,7 +476,7 @@ def extract_assessment_tools(document, file_name, indicators):
                 table_ref,
             )
 
-    if blocks and not found_table:
+    if blocks and not found_table and not (doc_type == "RPP" and tools):
         report(
             "manual_review",
             "не найдена поддержанная таблица индикаторов и средств; "
@@ -451,6 +493,16 @@ def extract_assessment_tools(document, file_name, indicators):
             details_ref,
             severity="info",
         )
+
+    linked_names = {relation.dst_key for relation in relations}
+    for name, ref in prose_refs.items():
+        if name not in linked_names:
+            report(
+                "manual_review",
+                f"название {name!r} прочитано из текста; явная связь "
+                "с индикатором не найдена",
+                ref,
+            )
 
     return tools, relations, issues
 
@@ -800,4 +852,157 @@ def extract_score_scale(document, file_name):
             severity="info",
         )
 
+    return items, issues
+
+
+def extract_practice_score_scale(document, file_name):
+    """Прочитать шкалы РПП, включая параллельные колонки оценок."""
+    items, issues = extract_score_scale(document, file_name)
+
+    def is_heading(paragraph):
+        title = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*", "", normalize(paragraph.text),
+        ).rstrip(".:")
+        return title == "методика и критерии оценивания"
+
+    blocks, _ = read_section(
+        document, file_name, is_heading, "шкалы практики",
+        keep_numbered_items=True,
+    )
+    # Текстовая бинарная шкала: сохраняем весь набор требований,
+    # включая слова "всех" и "одного", определяющие условия оценки.
+    if blocks and all(isinstance(block, Paragraph) for block, _ in blocks):
+        paragraphs = [" ".join(block.text.split()) for block, _ in blocks]
+        grade_mentions = re.compile(
+            r'(?:для\s+оценки|выставляется\s+оценка)\s*[«"]'
+            r'((?:не\s+)?зачтено)[»"]',
+            re.IGNORECASE,
+        )
+        if len(paragraphs) > 1 and re.match(
+            r"для\s+оценки\b", normalize(paragraphs[0]),
+        ):
+            seen_grades = set()
+            criterion = "\n".join(paragraphs)
+            for text, (_, ref) in zip(paragraphs, blocks):
+                for match in grade_mentions.finditer(text):
+                    grade = match.group(1)
+                    key = normalize(grade)
+                    if key in seen_grades:
+                        continue
+                    seen_grades.add(key)
+                    items.append(ScoreScaleItem(
+                        grade_spbu=grade,
+                        criterion=criterion,
+                        source_ref=ref,
+                    ))
+            if seen_grades:
+                issues = [
+                    issue for issue in issues
+                    if not issue.message.startswith(
+                        "Шкалы оценивания: раздел содержит текст без поддержанной таблицы"
+                    )
+                ]
+    resolved_tables = set()
+    existing_tables = {item.source_ref.table for item in items}
+    grade_pattern = re.compile(
+        r"((?:не\s+)?зачтено|неудовлетворительно|удовлетворительно|"
+        r"хорошо|отлично)(?:\s*\(([A-F])\))?",
+        re.IGNORECASE,
+    )
+
+    for block, table_ref in blocks:
+        if isinstance(block, Paragraph) or table_ref.table in existing_tables:
+            continue
+        header = None
+        for index, row in enumerate(block.rows[:5]):
+            labels = [normalize(cell.text) for cell in row.cells]
+            grades = [i for i, text in enumerate(labels) if text == "оценка"]
+            criteria = [i for i, text in enumerate(labels) if text == "критерии"]
+            if len(grades) == 2 and len(criteria) == 1 and len(labels) == 3:
+                header = index, grades, criteria[0], len(labels)
+                break
+        if header is None:
+            continue
+
+        index, grades, criterion_column, width = header
+        before_count = len(items)
+        seen = set()
+        for row_number, row in enumerate(block.rows[index + 1:], index + 2):
+            cells = row.cells
+            ref = table_ref.model_copy(update={"row": row_number})
+            if not any(cell.text.strip() for cell in cells):
+                continue
+            if (
+                len(cells) != width
+                or row.grid_cols_before
+                or row.grid_cols_after
+            ):
+                issues.append(ParseIssue(
+                    category="unexpected_format",
+                    message="Шкала практики: строка не совпадает с шапкой",
+                    source_ref=ref,
+                ))
+                continue
+            labels = [normalize(cell.text) for cell in cells]
+            if labels[grades[0]] == labels[grades[1]] == "оценка":
+                continue
+            criterion_cell = cells[criterion_column]
+            criterion = " ".join(criterion_cell.text.split()) or None
+            if criterion is None:
+                issues.append(ParseIssue(
+                    category="empty_cell",
+                    message="Шкала практики: не указан критерий оценки",
+                    source_ref=ref.model_copy(update={"col": criterion_column + 1}),
+                ))
+
+            for column in grades:
+                grade_cell = cells[column]
+                key = grade_cell._tc, criterion_cell._tc
+                if key in seen:
+                    continue
+                seen.add(key)
+                grade = " ".join(grade_cell.text.split())
+                grade_ref = ref.model_copy(update={"col": column + 1})
+                if grade_cell._tc is criterion_cell._tc:
+                    issues.append(ParseIssue(
+                        category="ambiguous",
+                        message="Шкала практики: оценка и критерий объединены",
+                        source_ref=grade_ref,
+                    ))
+                    continue
+                if grade_cell.tables or criterion_cell.tables:
+                    issues.append(ParseIssue(
+                        category="unexpected_format",
+                        message="Шкала практики: в ячейке есть вложенная таблица",
+                        source_ref=grade_ref,
+                    ))
+                    continue
+                match = grade_pattern.fullmatch(grade)
+                if match is None:
+                    issues.append(ParseIssue(
+                        category="unparsed_row",
+                        message=f"Шкала практики: не распознана оценка {grade!r}",
+                        source_ref=grade_ref,
+                    ))
+                    continue
+                items.append(ScoreScaleItem(
+                    grade_spbu=grade,
+                    grade_ects=match.group(2).upper() if match.group(2) else None,
+                    criterion=criterion,
+                    source_ref=grade_ref,
+                ))
+
+        if len(items) > before_count:
+            resolved_tables.add(table_ref.table)
+
+    issues = [
+        issue for issue in issues
+        if not (
+            issue.source_ref is not None
+            and issue.source_ref.table in resolved_tables
+            and issue.message.startswith(
+                "Шкалы оценивания: таблица не сопоставлена полям модели"
+            )
+        )
+    ]
     return items, issues

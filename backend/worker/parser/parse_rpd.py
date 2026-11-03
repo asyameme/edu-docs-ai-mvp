@@ -166,7 +166,7 @@ def parse_rpd(
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_score_scale_v1",
+            parser_config="rpd_docx_v2",
         )
     )
 

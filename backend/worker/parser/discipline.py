@@ -1048,14 +1048,23 @@ def extract_discipline_name(title_parts):
     return name.strip(' «»"') or None
 
 
-def extract_prerequisites(document, file_name):
+def extract_prerequisites(document, file_name, *, doc_type="RPD"):
     """Извлечь явно перечисленные названия дисциплин."""
+    if doc_type not in {"RPD", "RPP"}:
+        raise ValueError("Поддерживаются РПД и РПП")
+
     def is_heading(paragraph):
         title = re.sub(
             r"^\d+(?:\.\d+)*\.?\s*",
             "",
             normalize(paragraph.text).replace("\u0451", "е"),
         )
+
+        if doc_type == "RPP":
+            return re.fullmatch(
+                r"требования (?:к )?подготовленности к прохождению практики",
+                title.rstrip(".:"),
+            ) is not None
 
         return title == "пререквизиты" or re.fullmatch(
             r"требования (?:к )?подготовленности обучающегося "
@@ -1547,3 +1556,82 @@ def build_practice_discipline(document, file_name, title_parts):
     )
 
     return discipline, issues
+
+
+def extract_practice_control_forms(document, file_name):
+    """Прочитать явно выбранные формы промежуточной аттестации РПП."""
+    def is_heading(paragraph):
+        text = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*", "", normalize(paragraph.text),
+        )
+        return text.startswith("виды и формы текущего контроля")
+
+    blocks, issues = read_section(
+        document, file_name, is_heading, "формы контроля практики",
+        keep_numbered_items=True,
+    )
+    if not blocks:
+        return [], issues
+
+    forms = []
+    active = False
+    form_pattern = (
+        r"\b(?:дифференцированный\s+зачет|зачет\s+с\s+оценкой|зачет|экзамен)\b"
+    )
+    checked = "🗹☑☒✓✔\uf0fe"
+    unchecked = "□☐"
+    marked_pattern = re.compile(
+        rf"([{checked}{unchecked}])\s*({form_pattern})"
+    )
+
+    for block, ref in blocks:
+        if not isinstance(block, Paragraph):
+            issues.append(ParseIssue(
+                category="manual_review",
+                message="Табличные формы контроля практики требуют проверки",
+                source_ref=ref,
+            ))
+            continue
+
+        text = normalize(block.text).replace("\u0451", "е")
+        if re.search(r"промежуточн\w*\s+аттестац", text):
+            active = True
+        if not active:
+            continue
+
+        candidates = re.findall(form_pattern, text)
+        if not candidates:
+            continue
+
+        marked = list(marked_pattern.finditer(text))
+        selected = [
+            match.group(2) for match in marked if match.group(1) in checked
+        ]
+        if not marked and not any(char in text for char in checked + unchecked):
+            if len(candidates) == 1 and not re.search(
+                r"\bне\s+(?:предусмотрен\w*|проводится)\b", text,
+            ):
+                selected = candidates
+
+        if not selected:
+            issues.append(ParseIssue(
+                category="manual_review",
+                message=(
+                    "Не удалось определить отмеченную форму аттестации: "
+                    + " ".join(block.text.split())
+                ),
+                source_ref=ref,
+            ))
+            continue
+
+        for form in selected:
+            if form not in forms:
+                forms.append(form)
+
+    if not forms and not issues:
+        issues.append(ParseIssue(
+            category="empty_cell",
+            message="Не найдена явно указанная форма аттестации практики",
+            source_ref=blocks[0][1],
+        ))
+    return forms, issues

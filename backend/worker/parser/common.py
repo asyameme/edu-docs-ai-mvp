@@ -38,6 +38,16 @@ def heading_level(paragraph):
     return None
 
 
+def is_subsection(parent, child):
+    """Уточнить границу раздела при пропущенном промежуточном заголовке."""
+    pattern = r"^(?:раздел\s+)?(\d+(?:\.\d+)*)"
+    parent_number = re.match(pattern, normalize(parent))
+    child_number = re.match(pattern, normalize(child))
+    if parent_number is None or child_number is None:
+        return True
+    return child_number.group(1).startswith(parent_number.group(1) + ".")
+
+
 def parse_workload_number(raw):
     """Прочитать число без округления."""
     text = raw.strip().replace("\u00a0", " ").replace("\u202f", " ")
@@ -92,6 +102,7 @@ def read_section(
 
     start = starts[0]
     section = blocks[start].text.strip()
+    root_section = section
     depth = level(blocks[start]) or 2
 
     table_number = sum(
@@ -116,7 +127,7 @@ def read_section(
                 current_level = None
 
             if current_level is not None:
-                if current_level <= depth:
+                if current_level <= depth or not is_subsection(root_section, block.text):
                     break
 
                 section = block.text.strip()

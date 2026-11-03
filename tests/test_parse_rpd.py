@@ -50,6 +50,19 @@ class TestRpdParser(unittest.TestCase):
                 )
                 self.assertEqual(restored, output)
 
+    def test_entrypoint_uses_shared_modules(self):
+        from backend.worker.parser import assessment, common, content, discipline, results
+        from backend.worker.parser import parse_rpd as entrypoint
+
+        for module, name in (
+            (common, "normalize"),
+            (discipline, "build_discipline"),
+            (content, "extract_course_content"),
+            (assessment, "extract_assessment_tools"),
+            (results, "extract_results_into"),
+        ):
+            self.assertIs(getattr(entrypoint, name), getattr(module, name))
+
     def test_changed_workload_is_preserved(self):
         output = parse_rpd(
             ROOT / "tests/stage_1/case_1/РПД_матанализ1.docx"
