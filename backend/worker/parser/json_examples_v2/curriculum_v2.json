@@ -2,44 +2,52 @@
   "meta": {
     "schema_version": 2,
     "doc_type": "CURRICULUM",
-    "file_name": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-    "file_hash": "c564673063c1a866be20d1c6b8a9eac4743dca5db764073abcf31b51d20dcec0",
-    "parser_config": "curriculum_spbu_v1_manual",
+    "file_name": "260924_Report_26_5003_1.docx",
+    "file_hash": "22018f8571dbb15e32ec517886ff84210ffeec53e57e2abf6f121c390d07e9d9",
+    "parser_config": "curriculum_spbu_v2_manual_docx",
     "program_id": "26/5003/1"
   },
   "competencies": [
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "1.1",
-        "row": 3
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 1. Формируемые компетенции",
+        "table": 3,
+        "row": 2,
+        "col": 2
       },
       "code": "УК-1",
       "formulation": "Способен осуществлять поиск, критический анализ и синтез информации, применять системный подход для решения поставленных задач"
     },
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "1.1",
-        "row": 16
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 1. Формируемые компетенции",
+        "table": 3,
+        "row": 26,
+        "col": 2
       },
-      "code": "УНК-03",
+      "code": "ПКП-УНК-03",
       "formulation": "Способен применять методы стратегического планирования в профессиональной деятельности"
     },
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "1.1",
-        "row": 49
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 1. Формируемые компетенции",
+        "table": 3,
+        "row": 16,
+        "col": 2
       },
       "code": "ОПК-1",
       "formulation": "Способен применять фундаментальные знания, полученные в области математических и (или) естественных наук, и использовать их в профессиональной деятельности"
     },
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "1.1",
-        "row": 55
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 1. Формируемые компетенции",
+        "table": 3,
+        "row": 22,
+        "col": 2
       },
       "code": "ПКА-1",
       "formulation": "Способен понимать и применять в исследовательской деятельности современный математический аппарат, фундаментальные концепции и системные методологии, международные и профессиональные стандарты в области информационных технологий, способен использовать современные инструментальные и вычислительные средства"
@@ -48,23 +56,27 @@
   "curriculum_items": [
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "раздел 2",
-        "row": 92
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 2. Организация обучения и итоговой аттестации",
+        "table": 4,
+        "row": 7,
+        "col": 4
       },
       "discipline_name": "Математический анализ I",
       "semester": 1,
       "credit_units": 6,
-      "hours_total": 62,
+      "hours_total": 216,
       "block": "Блок.1.дисц"
     }
   ],
   "relations": [
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "раздел 2",
-        "row": 92
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 2. Организация обучения и итоговой аттестации",
+        "table": 4,
+        "row": 7,
+        "col": 3
       },
       "src_entity": "curriculum_item",
       "src_key": "Математический анализ I",
@@ -74,21 +86,25 @@
     },
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "раздел 2",
-        "row": 92
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 2. Организация обучения и итоговой аттестации",
+        "table": 4,
+        "row": 7,
+        "col": 3
       },
       "src_entity": "curriculum_item",
       "src_key": "Математический анализ I",
       "dst_entity": "competency",
-      "dst_key": "УНК-03",
+      "dst_key": "ПКП-УНК-03",
       "kind": "формирует"
     },
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "раздел 2",
-        "row": 92
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 2. Организация обучения и итоговой аттестации",
+        "table": 4,
+        "row": 7,
+        "col": 3
       },
       "src_entity": "curriculum_item",
       "src_key": "Математический анализ I",
@@ -98,9 +114,11 @@
     },
     {
       "source_ref": {
-        "file": "Учебный_план_ТОП_ПИИТ_corr.xlsx",
-        "section": "раздел 2",
-        "row": 92
+        "file": "260924_Report_26_5003_1.docx",
+        "section": "Раздел 2. Организация обучения и итоговой аттестации",
+        "table": 4,
+        "row": 7,
+        "col": 3
       },
       "src_entity": "curriculum_item",
       "src_key": "Математический анализ I",
