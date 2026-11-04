@@ -20,7 +20,6 @@ class Resources:
     temporal: Client
     http: httpx.AsyncClient
     chroma_url: str
-    graph: object
 
 
 async def check_dependencies(resources: Resources) -> ReadyResponse:
@@ -39,9 +38,6 @@ async def check_dependencies(resources: Resources) -> ReadyResponse:
         response = await resources.http.get(f"{resources.chroma_url}/api/v2/heartbeat")
         response.raise_for_status()
 
-    async def graph_check() -> None:
-        await asyncio.to_thread(resources.graph.ping)
-
     async def probe(name, check) -> tuple[str, Literal["available", "unavailable"]]:
         try:
             await asyncio.wait_for(check(), timeout=3)
@@ -58,7 +54,6 @@ async def check_dependencies(resources: Resources) -> ReadyResponse:
             probe("postgres", postgres_async),
             probe("temporal", temporal_check),
             probe("chroma", chroma_check),
-            probe("neo4j", graph_check),
         )
     )
     return ReadyResponse(

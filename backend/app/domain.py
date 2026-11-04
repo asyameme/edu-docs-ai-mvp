@@ -58,6 +58,12 @@ class Relation(Contract):
     source_ref_ids: list[UUID] = Field(default_factory=list)
     confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
 
+    @model_validator(mode="after")
+    def nonempty_type(self) -> Self:
+        if not self.type.strip():
+            raise ValueError("Relation type cannot be blank")
+        return self
+
 
 class SnapshotSourceRef(Contract):
     id: UUID
@@ -218,7 +224,10 @@ class SnapshotV2(Snapshot):
         for relation in self.relations:
             if "matrix_value" in relation.attributes:
                 matrix = relation.attributes["matrix_value"]
-                if type(matrix) is not int or matrix not in (0, 1):
+                if matrix is not None and (
+                    type(matrix) is not int or matrix not in (0, 1)
+                    or relation.type != "FORMS_COMPETENCY"
+                ):
                     raise ValueError("Matrix value must be integer 0 or 1")
         if self.review:
             conflicts = [item.conflict_id for item in self.review.decisions]

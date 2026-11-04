@@ -79,7 +79,7 @@ def upgrade():
             output_version_id uuid,
             operation_key text NOT NULL,
             request_hash text NOT NULL,
-            type text NOT NULL CHECK (type IN ('import','validate','generate','build_graph')),
+            type text NOT NULL CHECK (type IN ('import','validate','generate')),
             temporal_namespace text NOT NULL,
             workflow_id text NOT NULL,
             parameters jsonb NOT NULL DEFAULT '{}'::jsonb

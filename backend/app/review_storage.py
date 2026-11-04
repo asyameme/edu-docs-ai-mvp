@@ -4,7 +4,6 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.repository import VERSION_COLUMNS
 
@@ -73,43 +72,9 @@ def insert_version(
         cur.execute(
             "INSERT INTO version_documents VALUES(%s,%s,%s)", (program_id, version_id, document_id)
         )
-    if isinstance(snapshot, SnapshotV2):
-        for ref in snapshot.source_refs:
-            if ref.artifact_id:
-                artifact = cur.execute(
-                    """SELECT id FROM document_artifacts WHERE program_id=%s
-                       AND document_id=%s AND id=%s""",
-                    (program_id, ref.document_id, ref.artifact_id),
-                ).fetchone()
-                if not artifact:
-                    raise DomainError(422, "Markdown не принадлежит документу источника")
-            cur.execute(
-                """INSERT INTO source_refs(id,version_id,document_id,artifact_id,
-                   section,locator,artifact_locator) VALUES(%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    ref.id,
-                    version_id,
-                    ref.document_id,
-                    ref.artifact_id,
-                    ref.section,
-                    ref.locator,
-                    ref.artifact_locator,
-                ),
-            )
-        for link in snapshot.source_links:
-            cur.execute(
-                """INSERT INTO source_links(id,version_id,target_kind,target_id,field_path,
-                   source_ref_id,observed_value) VALUES(%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    link.id,
-                    version_id,
-                    link.target_kind,
-                    link.target_id,
-                    link.field_path,
-                    link.source_ref_id,
-                    Jsonb(link.observed_value),
-                ),
-            )
+    from app.relational_storage import insert_projection
+
+    insert_projection(cur, version_id, snapshot)
     cur.execute("UPDATE programs SET current_version_id=%s WHERE id=%s", (version_id, program_id))
     return row
 

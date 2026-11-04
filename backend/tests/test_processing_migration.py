@@ -63,6 +63,7 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
     assert path.exists(), "Нужна одна начальная миграция итоговой схемы"
     script = ScriptDirectory(str(ROOT))
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0004_relational",
         "0003_originals_bytea",
         "0002_stage4_review",
         "0001_initial_schema",
@@ -75,6 +76,11 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
     )
     binary = importlib.util.module_from_spec(spec3)
     spec3.loader.exec_module(binary)
+    spec4 = importlib.util.spec_from_file_location(
+        "relational", ROOT / "versions" / "0004_relational.py"
+    )
+    relational = importlib.util.module_from_spec(spec4)
+    spec4.loader.exec_module(relational)
     monkeypatch.setattr(
         binary, "get_settings", lambda: SimpleNamespace(original_files_path=tmp_path)
     )
@@ -111,7 +117,14 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
                         INSERT INTO program_versions(id,program_id,number,snapshot,origin) VALUES
                             ('22222222-2222-4222-8222-222222222222',
                              '11111111-1111-4111-8111-111111111111',1,
-                             '{"schema_version":1,"metadata":{"keep":"history"}}','initial');
+                             '{"schema_version":1,"metadata":{"keep":"history"},
+                               "entities":[{"id":"66666666-6666-4666-8666-666666666666",
+                                 "kind":"discipline",
+                                 "source_ref_ids":["77777777-7777-4777-8777-777777777777"]}],
+                               "document_ids":["33333333-3333-4333-8333-333333333333"],
+                               "source_refs":[{"id":"77777777-7777-4777-8777-777777777777",
+                                 "document_id":"33333333-3333-4333-8333-333333333333",
+                                 "locator":"page:1"}]}','initial');
                         UPDATE programs SET
                             current_version_id='22222222-2222-4222-8222-222222222222';
                         INSERT INTO source_documents(
@@ -140,6 +153,29 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
                     }
                     with connection.begin_nested() as trial:
                         binary.upgrade()
+                        connection.exec_driver_sql("""
+                            INSERT INTO program_versions(id,program_id,number,snapshot,origin)
+                            SELECT '88888888-8888-4888-8888-888888888888',program_id,2,
+                                jsonb_set(snapshot,'{schema_version}','2'),'save'
+                            FROM program_versions;
+                        """)
+                        connection.exec_driver_sql("""
+                            INSERT INTO version_documents VALUES(
+                                '11111111-1111-4111-8111-111111111111',
+                                '88888888-8888-4888-8888-888888888888',
+                                '33333333-3333-4333-8333-333333333333');
+                            INSERT INTO source_refs(id,version_id,document_id,locator) VALUES(
+                                '77777777-7777-4777-8777-777777777777',
+                                '88888888-8888-4888-8888-888888888888',
+                                '33333333-3333-4333-8333-333333333333','page:1');
+                        """)
+                        relational.upgrade()
+                        assert connection.exec_driver_sql(
+                            "SELECT count(*) FROM entities"
+                        ).scalar() == 2
+                        assert connection.exec_driver_sql(
+                            "SELECT count(*) FROM source_links WHERE entity_id IS NOT NULL"
+                        ).scalar() == 2
                         assert schema_definition(connection, schema) == schema_definition(
                             connection, "public"
                         )
@@ -168,6 +204,7 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
                     stage4.upgrade()
                     with connection.begin_nested() as trial:
                         binary.upgrade()
+                        relational.upgrade()
                         assert schema_definition(connection, schema) == schema_definition(
                             connection, "public"
                         )

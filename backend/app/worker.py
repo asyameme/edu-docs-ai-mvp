@@ -11,11 +11,6 @@ from temporalio.worker import Worker
 
 from app.activities import diagnostic_echo
 from app.config import get_settings
-from app.graph_activities import GraphActivities
-from app.graph_dispatcher import dispatch_graphs
-from app.graph_repository import GraphRepository
-from app.graph_store import GraphStore
-from app.graph_workflow import GraphWorkflow
 from app.import_activities import ImportActivities
 from app.import_dispatcher import dispatch_imports
 from app.import_repository import ImportRepository
@@ -47,8 +42,6 @@ async def main() -> None:
     )
     imports = ImportActivities(pool, settings)
     reviews = ReviewActivities(pool, settings)
-    graph_store = GraphStore(settings)
-    graphs = GraphActivities(pool, graph_store)
     executor = ThreadPoolExecutor(max_workers=4)
     async with Worker(
         client,
@@ -59,7 +52,6 @@ async def main() -> None:
             LegacyImportWorkflow,
             ImportWorkflow,
             ReviewWorkflow,
-            GraphWorkflow,
         ],
         activities=[
             diagnostic_echo,
@@ -72,8 +64,6 @@ async def main() -> None:
             imports.finish_v2,
             reviews.execute,
             reviews.failed,
-            graphs.build,
-            graphs.failed,
         ],
         activity_executor=executor,
         max_concurrent_activities=2,
@@ -95,21 +85,14 @@ async def main() -> None:
         review_dispatcher = asyncio.create_task(
             dispatch_reviews(client, ReviewRepository(pool), settings.temporal_task_queue, stop)
         )
-        graph_dispatcher = asyncio.create_task(
-            dispatch_graphs(
-                client, GraphRepository(pool), graph_store, settings.temporal_task_queue, stop
-            )
-        )
         try:
             await stop.wait()
         finally:
             stop.set()
             await dispatcher
             await review_dispatcher
-            await graph_dispatcher
     executor.shutdown(wait=True)
     pool.close()
-    graph_store.close()
 
 
 if __name__ == "__main__":

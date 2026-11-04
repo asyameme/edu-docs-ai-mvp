@@ -198,6 +198,9 @@ class Repository:
             )
             result = cursor.fetchone()
             self.attach_documents(cursor, program_id, version_id, snapshot.document_ids)
+            from app.relational_storage import insert_projection
+
+            insert_projection(cursor, version_id, snapshot)
             cursor.execute(
                 "UPDATE programs SET current_version_id=%s WHERE id=%s", (version_id, program_id)
             )

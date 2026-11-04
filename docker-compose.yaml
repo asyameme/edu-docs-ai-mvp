@@ -21,13 +21,6 @@ x-backend: &backend
     ANALYSIS_MAX_REQUEST_BYTES: ${ANALYSIS_MAX_REQUEST_BYTES:-20971520}
     ANALYSIS_MAX_RESPONSE_BYTES: ${ANALYSIS_MAX_RESPONSE_BYTES:-10485760}
     ARTIFACT_FILES_PATH: /data/artifacts
-    NEO4J_URI: bolt://neo4j:7687
-    NEO4J_DATABASE: neo4j
-    NEO4J_USER: neo4j
-    NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
-    GRAPH_AUTO_BUILD: ${GRAPH_AUTO_BUILD:-true}
-    GRAPH_MAX_OBJECTS: ${GRAPH_MAX_OBJECTS:-50000}
-    GRAPH_MAX_SNAPSHOT_BYTES: ${GRAPH_MAX_SNAPSHOT_BYTES:-20971520}
   restart: unless-stopped
 
 services:
@@ -60,8 +53,6 @@ services:
         condition: service_completed_successfully
       chroma:
         condition: service_started
-      graph-init:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=8)"]
       interval: 15s
@@ -79,8 +70,6 @@ services:
       app-migrate:
         condition: service_completed_successfully
       temporal-namespace-init:
-        condition: service_completed_successfully
-      graph-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "scripts.worker_health"]
@@ -109,32 +98,6 @@ services:
     volumes:
       - chroma-data:/data
     restart: unless-stopped
-
-  neo4j:
-    image: neo4j:5.26.32-community
-    environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
-      NEO4J_server_memory_heap_initial__size: 256m
-      NEO4J_server_memory_heap_max__size: 512m
-      NEO4J_server_memory_pagecache_size: 256m
-      NEO4J_db_transaction_timeout: 60s
-    volumes:
-      - neo4j-data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "NEO4J_USERNAME=neo4j NEO4J_PASSWORD=\"$${NEO4J_AUTH#*/}\" cypher-shell 'RETURN 1' >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 10s
-      start_period: 60s
-      retries: 12
-    restart: unless-stopped
-
-  graph-init:
-    <<: *backend
-    restart: "no"
-    command: ["python", "-m", "scripts.prepare_graph"]
-    depends_on:
-      neo4j:
-        condition: service_healthy
 
   app-migrate:
     <<: *backend
@@ -225,4 +188,3 @@ volumes:
   temporal-init-state:
   original-files:
   artifact-files:
-  neo4j-data:

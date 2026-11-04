@@ -30,7 +30,7 @@ def test_version_read_preserves_v2_matrix_value_and_field_evidence():
                         "id": relation_id,
                         "source_id": entity_id,
                         "target_id": entity_id,
-                        "type": "example",
+                        "type": "FORMS_COMPETENCY",
                         "attributes": {"matrix_value": 0},
                     }
                 ],
@@ -57,8 +57,8 @@ def test_version_read_preserves_v2_matrix_value_and_field_evidence():
     assert version.snapshot.source_links[0].source_ref_id == ref_id
 
 
-@pytest.mark.parametrize("value", [True, 2, -1, None, "1"])
-def test_matrix_observation_does_not_accept_unknown_or_wrong_typed_values(value):
+@pytest.mark.parametrize("value", [True, 2, -1, "1"])
+def test_matrix_observation_does_not_accept_wrong_typed_values(value):
     identity = uuid4()
     with pytest.raises(ValidationError):
         SnapshotV2.model_validate(
@@ -69,8 +69,47 @@ def test_matrix_observation_does_not_accept_unknown_or_wrong_typed_values(value)
                         "id": uuid4(),
                         "source_id": identity,
                         "target_id": identity,
-                        "type": "matrix",
+                        "type": "FORMS_COMPETENCY",
                         "attributes": {"matrix_value": value},
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [None, 0, 1])
+def test_matrix_preserves_unknown_zero_and_one(value):
+    identity = uuid4()
+    snapshot = SnapshotV2.model_validate(
+        {
+            "entities": [{"id": identity, "kind": "discipline"}],
+            "relations": [
+                {
+                    "id": uuid4(),
+                    "source_id": identity,
+                    "target_id": identity,
+                    "type": "FORMS_COMPETENCY",
+                    "attributes": {"matrix_value": value},
+                }
+            ],
+        }
+    )
+    assert snapshot.relations[0].attributes["matrix_value"] == value
+
+
+def test_matrix_value_is_only_allowed_for_competency_coverage():
+    identity = uuid4()
+    with pytest.raises(ValidationError):
+        SnapshotV2.model_validate(
+            {
+                "entities": [{"id": identity, "kind": "discipline"}],
+                "relations": [
+                    {
+                        "id": uuid4(),
+                        "source_id": identity,
+                        "target_id": identity,
+                        "type": "HAS_TOPIC",
+                        "attributes": {"matrix_value": 0},
                     }
                 ],
             }
