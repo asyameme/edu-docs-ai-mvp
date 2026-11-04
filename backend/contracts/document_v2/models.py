@@ -73,6 +73,7 @@ class MetaV2(ParserMeta):
 
 class RPDMeta(MetaV2):
     doc_type: Literal['RPD'] = 'RPD'
+    program_id: str
 class RPPMeta(MetaV2):
     doc_type: Literal['RPP'] = 'RPP'
 class CurriculumMeta(MetaV2):
