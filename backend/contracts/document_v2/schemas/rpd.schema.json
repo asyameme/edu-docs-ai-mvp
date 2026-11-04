@@ -359,22 +359,15 @@
           "type": "string"
         },
         "program_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
+          "type": "string",
           "title": "Program Id"
         }
       },
       "required": [
         "file_name",
         "file_hash",
-        "parser_config"
+        "parser_config",
+        "program_id"
       ],
       "title": "RPDMeta",
       "type": "object"

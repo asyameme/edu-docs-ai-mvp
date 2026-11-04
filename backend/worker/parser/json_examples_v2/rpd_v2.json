@@ -4,7 +4,8 @@
     "doc_type": "RPD",
     "file_name": "РПД_матанализ1.docx",
     "file_hash": "17699d452199f8d0ddeb29bfac3ea6c9564ac281d8fee1fb0f77a08e2d5738f0",
-    "parser_config": "rpd_spbu_v1_manual"
+    "parser_config": "rpd_spbu_v1_manual",
+    "program_id": "26/5003/1"
   },
   "disciplines": [
     {
