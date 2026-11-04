@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "ruleset": {
+    "id": "artificial-backend-review",
+    "revision": "1",
+    "config": {
+      "artificial": true
+    },
+    "required_rules": [
+      "hours"
+    ],
+    "required_document_types": [
+      "RPD"
+    ]
+  },
+  "coverage": [
+    {
+      "rule_code": "hours",
+      "rule_revision": "1",
+      "status": "failed",
+      "reason": null
+    }
+  ],
+  "issues": [
+    {
+      "id": "d25317a1-1fa5-51de-94cc-427115f50175",
+      "rule_code": "hours",
+      "rule_revision": "1",
+      "type": "hours_difference",
+      "severity": "blocking",
+      "status": "open",
+      "message": "Искусственный конфликт часов",
+      "source_ref_ids": [
+        "0372acc1-a1b0-580e-9875-8b2d5b7d2ff2"
+      ],
+      "requires_decision": true,
+      "variants": [
+        {
+          "id": "7ebc6347-78c1-546e-9cf7-0b74cc3798c9",
+          "label": "108",
+          "changes": [
+            {
+              "op": "set_attribute",
+              "target_kind": "entity",
+              "target_id": "241ea62a-f933-5eb2-a89f-8dc52488f940",
+              "field_path": "/attributes/hours_total",
+              "value": 108,
+              "entity": null,
+              "relation": null
+            }
+          ]
+        },
+        {
+          "id": "abfdc288-7a72-557f-be5c-b1b8d741f8c9",
+          "label": "144",
+          "changes": [
+            {
+              "op": "set_attribute",
+              "target_kind": "entity",
+              "target_id": "241ea62a-f933-5eb2-a89f-8dc52488f940",
+              "field_path": "/attributes/hours_total",
+              "value": 144,
+              "entity": null,
+              "relation": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "candidate": {
+    "schema_version": 2,
+    "metadata": {
+      "unresolved_relations": [],
+      "parse_issues": [],
+      "fixture_case": "example.docx"
+    },
+    "entities": [
+      {
+        "id": "241ea62a-f933-5eb2-a89f-8dc52488f940",
+        "kind": "discipline",
+        "attributes": {
+          "name": "Пример дисциплины",
+          "semesters": [
+            1
+          ],
+          "credit_units": 3,
+          "hours_total": 108,
+          "hours_by_kind": {
+            "лекции": 108
+          },
+          "control_forms": [],
+          "prerequisites": []
+        },
+        "source_ref_ids": [
+          "0372acc1-a1b0-580e-9875-8b2d5b7d2ff2"
+        ]
+      }
+    ],
+    "relations": [],
+    "source_refs": [
+      {
+        "id": "0372acc1-a1b0-580e-9875-8b2d5b7d2ff2",
+        "document_id": "9b7ce48a-ecea-50a1-8d2d-5033838b3506",
+        "section": "2.1",
+        "locator": "{\"col\": null, \"file\": \"example.docx\", \"row\": 3, \"section\": \"2.1\", \"table\": null}",
+        "artifact_id": "9dc73339-bb7e-57be-828e-bcd3a5950d20",
+        "artifact_locator": "line:1"
+      }
+    ],
+    "document_ids": [
+      "9b7ce48a-ecea-50a1-8d2d-5033838b3506"
+    ],
+    "source_links": [
+      {
+        "id": "b481d942-bdf9-531b-bc55-a7dbdc016d2c",
+        "target_kind": "entity",
+        "target_id": "241ea62a-f933-5eb2-a89f-8dc52488f940",
+        "field_path": "/attributes/hours_total",
+        "source_ref_id": "0372acc1-a1b0-580e-9875-8b2d5b7d2ff2",
+        "observed_value": {
+          "value": 108,
+          "unit": "hour"
+        }
+      }
+    ],
+    "review": null
+  },
+  "artifacts": [
+    {
+      "id": "9dc73339-bb7e-57be-828e-bcd3a5950d20",
+      "document_id": "9b7ce48a-ecea-50a1-8d2d-5033838b3506",
+      "parser_revision": "artificial-1",
+      "parser_config_hash": "cfa2a690605280381dd26a9d199aba338f7d539cfe0ef42dd4662a68161adf92",
+      "parser_config": {
+        "artificial": true
+      },
+      "markdown": "# Искусственный Markdown\n"
+    }
+  ]
+}

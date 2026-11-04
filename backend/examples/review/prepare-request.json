@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "operation": "prepare",
+  "job_id": "799e4c30-d372-5e19-96ab-0b6be24ed1fc",
+  "program_id": "11111111-1111-4111-8111-111111111111",
+  "version_id": "b84e5f6e-13f4-5475-9f52-260604738be1",
+  "base_snapshot": {
+    "schema_version": 1,
+    "metadata": {},
+    "entities": [],
+    "relations": [],
+    "source_refs": [],
+    "document_ids": []
+  },
+  "documents": [
+    {
+      "document_id": "9b7ce48a-ecea-50a1-8d2d-5033838b3506",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parsed": {
+        "meta": {
+          "schema_version": 1,
+          "doc_type": "RPD",
+          "file_name": "example.docx",
+          "file_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "parser_config": "artificial-contract-example",
+          "program_id": null
+        },
+        "program": null,
+        "disciplines": [
+          {
+            "source_ref": {
+              "file": "example.docx",
+              "section": "2.1",
+              "table": null,
+              "row": 3,
+              "col": null
+            },
+            "name": "Пример дисциплины",
+            "semesters": [
+              1
+            ],
+            "credit_units": 3,
+            "hours_total": 108,
+            "hours_by_kind": {
+              "лекции": 108
+            },
+            "control_forms": [],
+            "prerequisites": []
+          }
+        ],
+        "competencies": [],
+        "indicators": [],
+        "learning_outcomes": [],
+        "assessment_tools": [],
+        "curriculum_items": [],
+        "course_content": [],
+        "score_scale": [],
+        "relations": [],
+        "parse_issues": []
+      }
+    }
+  ]
+}
