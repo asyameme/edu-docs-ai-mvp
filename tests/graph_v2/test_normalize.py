@@ -1,4 +1,3 @@
-
 import json
 import unittest
 from pathlib import Path
@@ -7,6 +6,7 @@ from backend.contracts.document_v2.models import parse_document
 from backend.worker.parser.adapters_v2.normalize import (
     merge_graphs,
     to_graph,
+    find_competency_code_conflicts,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -175,6 +175,124 @@ class GraphV2Tests(unittest.TestCase):
                 for edge in self.graph.edges
             )
         )
+
+
+    def test_curriculum_multiple_semesters(self):
+        doc = load_document("curriculum_v2.json")
+        doc = doc.model_copy(deep=True)
+
+        first = doc.curriculum_items[0]
+        second_ref = first.source_ref.model_copy(
+            update={"row": first.source_ref.row + 1}
+        )
+        second = first.model_copy(
+            update={"semester": 2, "source_ref": second_ref}
+        )
+        doc.curriculum_items.append(second)
+
+        first_relation = doc.relations[0]
+        second_relation_ref = first_relation.source_ref.model_copy(
+            update={"row": second_ref.row}
+        )
+        second_relation = first_relation.model_copy(
+            update={"source_ref": second_relation_ref}
+        )
+        doc.relations.append(second_relation)
+
+        graph = to_graph(doc)
+
+        key1 = f"{PID}|curriculum_item|{first.discipline_name}::semester=1"
+        key2 = f"{PID}|curriculum_item|{first.discipline_name}::semester=2"
+
+        node_ids = {node.id for node in graph.nodes}
+
+        self.assertIn(key1, node_ids)
+        self.assertIn(key2, node_ids)
+
+        for key in (key1, key2):
+            self.assertTrue(
+                any(
+                    edge.source_id == key
+                    and edge.relation_type == first_relation.kind
+                    for edge in graph.edges
+                )
+            )
+
+    def test_curriculum_ambiguous_reference(self):
+        doc = load_document("curriculum_v2.json")
+        doc = doc.model_copy(deep=True)
+
+        first = doc.curriculum_items[0]
+        second = first.model_copy(
+            update={
+                "semester": 2,
+                "source_ref": first.source_ref.model_copy(
+                    update={"row": first.source_ref.row + 1}
+                ),
+            }
+        )
+        doc.curriculum_items.append(second)
+
+        relation = doc.relations[0]
+        doc.relations[0] = relation.model_copy(
+            update={
+                "source_ref": relation.source_ref.model_copy(
+                    update={"row": 999}
+                )
+            }
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "Неоднозначная запись учебного плана"
+        ):
+            to_graph(doc)
+
+
+    def test_competency_code_conflicts(self):
+        from backend.contracts.document_v2.graph import (
+            EducationalGraph,
+            GraphNode,
+        )
+
+        graph = EducationalGraph()
+
+        formulations = {
+            "TEST-A": "Одинаковая тестовая формулировка.",
+            "TEST-B": "Одинаковая тестовая формулировка",
+        }
+
+        for code, formulation in formulations.items():
+            graph.add_node(GraphNode(
+                id=f"{PID}|competency|{code}",
+                entity_type="competency",
+                attributes={"formulation": formulation},
+                source_refs=[],
+            ))
+
+        conflicts = find_competency_code_conflicts(graph)
+
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(
+            conflicts[0]["codes"],
+            ["TEST-A", "TEST-B"],
+        )
+
+        self.assertEqual(len(graph.nodes), 2)
+
+
+    def test_real_competency_code_conflicts(self):
+        conflicts = find_competency_code_conflicts(self.graph)
+
+        self.assertGreater(len(conflicts), 0)
+
+        for conflict in conflicts:
+            self.assertEqual(
+                conflict["category"],
+                "competency_code_mismatch",
+            )
+            self.assertGreater(len(conflict["codes"]), 1)
+            self.assertTrue(conflict["source_refs"])
+
 
 
 if __name__ == "__main__":

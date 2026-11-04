@@ -52,27 +52,71 @@ def to_graph(document, program_id: str | None = None,) -> EducationalGraph:
     curriculum_keys = {}
     for item in getattr(document, 'curriculum_items', []):
         curriculum_keys.setdefault(item.discipline_name, []).append(f'{item.discipline_name}::semester={item.semester}')
-    
+
+    def resolve_curriculum_key(key, relation_ref):
+        candidates = [
+            item for item in getattr(document, 'curriculum_items', [])
+            if key in (
+                item.discipline_name,
+                f'{item.discipline_name}::semester={item.semester}'
+            )
+        ]
+
+        if not candidates:
+            raise ValueError(
+                f'Не найдена запись учебного плана: {key}'
+            )
+
+        if len(candidates) == 1:
+            item = candidates[0]
+            return f'{item.discipline_name}::semester={item.semester}'
+
+        matches = [
+            item for item in candidates
+            if relation_ref is not None
+            and item.source_ref is not None
+            and item.source_ref.file == relation_ref.file
+            and item.source_ref.table is not None
+            and item.source_ref.row is not None
+            and item.source_ref.table == relation_ref.table
+            and item.source_ref.row == relation_ref.row
+        ]
+
+        if len(matches) == 1:
+            item = matches[0]
+            return f'{item.discipline_name}::semester={item.semester}'
+
+        raise ValueError(
+            f'Неоднозначная запись учебного плана: {key}. '
+            'Не удалось определить семестр по ключу '
+            'или координатам source_ref.'
+        )
+
     for r in getattr(document, 'relations', []):
         src_key = r.src_key
         dst_key = r.dst_key
 
         if r.src_entity == 'curriculum_item':
-            matches = curriculum_keys.get(src_key)
-            if matches:
-                if len(matches) != 1:
-                    raise ValueError(f'Неоднозначная запись учебного плана: {src_key}')
-                src_key = matches[0]
+            src_key = resolve_curriculum_key(src_key, r.source_ref)
 
         if r.dst_entity == 'curriculum_item':
-            matches = curriculum_keys.get(dst_key)
-            if matches:
-                if len(matches) != 1:
-                    raise ValueError(f'Неоднозначная запись учебного плана: {dst_key}')
-                dst_key = matches[0]
-        if r.src_entity=='learning_outcome': src_key=f'{meta.file_name}::{src_key}'
-        if r.dst_entity=='learning_outcome': dst_key=f'{meta.file_name}::{dst_key}'
-        edge(r.src_entity,src_key,r.dst_entity,dst_key,r.kind,r.source_ref)
+            dst_key = resolve_curriculum_key(dst_key, r.source_ref)
+
+        if r.src_entity == 'learning_outcome':
+            src_key = f'{meta.file_name}::{src_key}'
+
+        if r.dst_entity == 'learning_outcome':
+            dst_key = f'{meta.file_name}::{dst_key}'
+
+        edge(
+            r.src_entity,
+            src_key,
+            r.dst_entity,
+            dst_key,
+            r.kind,
+            r.source_ref
+        )
+
 
     for cell in getattr(document,'matrix_cells',[]):
         if cell.value==1:
@@ -89,8 +133,7 @@ def to_graph(document, program_id: str | None = None,) -> EducationalGraph:
         node('semester_workload',wid,workload.source_ref,{'hours_total':workload.hours_total,'credit_units':workload.credit_units})
         edge('discipline',discipline.name,'semester_workload',wid,'имеет_нагрузку',workload.source_ref,semester=workload.semester)
 
-    
-    # Сохраняем темы, виды занятий и часы из РПД/РПП.
+
     course_content = getattr(document, 'course_content', [])
 
     if course_content:
@@ -142,3 +185,49 @@ def merge_graphs(documents, program_id: str | None = None,) -> EducationalGraph:
         result.edges.extend(graph.edges)
 
     return result
+
+
+
+
+def find_competency_code_conflicts(graph: EducationalGraph) -> list[dict]:
+    """Находит разные коды компетенций с одинаковой формулировкой."""
+    import unicodedata
+
+    by_formulation = {}
+
+    for node in graph.nodes:
+        if node.entity_type != 'competency':
+            continue
+
+        formulation = node.attributes.get('formulation')
+        if not isinstance(formulation, str) or not formulation.strip():
+            continue
+
+        normalized = unicodedata.normalize('NFKC', formulation)
+        normalized = ' '.join(normalized.casefold().split())
+        normalized = normalized.rstrip(' .,!?:;')
+
+        program_id, code = node.id.split('|competency|', 1)
+        by_formulation.setdefault(
+            (program_id, normalized), []
+        ).append((code, node))
+
+    conflicts = []
+
+    for (program_id, _), entries in by_formulation.items():
+        codes = sorted({code for code, _ in entries})
+
+        if len(codes) > 1:
+            conflicts.append({
+                'category': 'competency_code_mismatch',
+                'program_id': program_id,
+                'codes': codes,
+                'formulation': entries[0][1].attributes['formulation'],
+                'source_refs': [
+                    ref
+                    for _, node in entries
+                    for ref in node.source_refs
+                ],
+            })
+
+    return conflicts
