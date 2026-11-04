@@ -1,21 +1,79 @@
-"""Выходные форматы по типам документов, совместно используемые сущности из v1.
-
-Отдельная модель на тип документа. Не заменяет и не изменяет ParserOutput v1.
-"""
 from __future__ import annotations
 from typing import Literal, Union
 from pydantic import Field, model_validator
 from backend.contracts.parser_output import (
-    ContractModel, SourceRef, ParseIssue, Competency, Indicator, LearningOutcome,
-    AssessmentTool, CurriculumItem, CourseTopic, ScoreScaleItem, Relation,
-    Program, Discipline, ParserMeta,
+    ContractModel,
+    SourceRef as SourceRefV1,
+    ParseIssue,
+    Competency as CompetencyV1,
+    Indicator as IndicatorV1,
+    LearningOutcome as LearningOutcomeV1,
+    AssessmentTool as AssessmentToolV1,
+    CurriculumItem as CurriculumItemV1,
+    CourseTopic as CourseTopicV1,
+    ScoreScaleItem as ScoreScaleItemV1,
+    Relation as RelationV1,
+    Program as ProgramV1,
+    Discipline as DisciplineV1,
+    ParserMeta,
 )
+
+
+class SourceRefV2(SourceRefV1):
+    paragraph_index: int | None = Field(default=None, ge=0)
+    sheet_name: str | None = None
+    cell: str | None = None
+
+
+SourceRef = SourceRefV2
+
+
+class Competency(CompetencyV1):
+    source_ref: SourceRefV2
+
+
+class Indicator(IndicatorV1):
+    source_ref: SourceRefV2
+
+
+class LearningOutcome(LearningOutcomeV1):
+    source_ref: SourceRefV2
+
+
+class AssessmentTool(AssessmentToolV1):
+    source_ref: SourceRefV2
+
+
+class CurriculumItem(CurriculumItemV1):
+    source_ref: SourceRefV2
+
+
+class CourseTopic(CourseTopicV1):
+    source_ref: SourceRefV2
+
+
+class ScoreScaleItem(ScoreScaleItemV1):
+    source_ref: SourceRefV2
+
+
+class Relation(RelationV1):
+    source_ref: SourceRefV2
+
+
+class Program(ProgramV1):
+    source_ref: SourceRefV2
+
+
+class Discipline(DisciplineV1):
+    source_ref: SourceRefV2
+
 
 class MetaV2(ParserMeta):
     schema_version: Literal[2] = 2
 
 class RPDMeta(MetaV2):
     doc_type: Literal['RPD'] = 'RPD'
+    program_id: str
 class RPPMeta(MetaV2):
     doc_type: Literal['RPP'] = 'RPP'
 class CurriculumMeta(MetaV2):

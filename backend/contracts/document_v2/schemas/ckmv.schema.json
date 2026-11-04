@@ -52,7 +52,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "code": {
           "title": "Code",
@@ -75,7 +75,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "code": {
           "title": "Code",
@@ -103,7 +103,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "indicator_code": {
           "title": "Indicator Code",
@@ -124,10 +124,9 @@
     },
     "LearningOutcome": {
       "additionalProperties": false,
-      "description": "Результат обучения «знать/уметь/владеть».\n\nlocal_id назначает парсер (уникален в файле, «LO-001») — ключ для связей:\nв источнике у результатов кода нет, кроме вариантов вида «ПКП-УНК-03.01. У-1».\nkind=None — тип результата не удалось определить по данным источника.",
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "local_id": {
           "title": "Local Id",
@@ -227,7 +226,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "local_id": {
           "title": "Local Id",
@@ -248,10 +247,9 @@
     },
     "Relation": {
       "additionalProperties": false,
-      "description": "Связь между сущностями. Ссылка на сущность — по естественному ключу:\ndiscipline/curriculum_item/course_topic — название, остальные — код.",
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "src_entity": {
           "enum": [
@@ -315,7 +313,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/SourceRef"
+          "$ref": "#/$defs/SourceRefV2"
         },
         "role_id": {
           "title": "Role Id",
@@ -395,6 +393,105 @@
         "file"
       ],
       "title": "SourceRef",
+      "type": "object"
+    },
+    "SourceRefV2": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "table": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        },
+        "col": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col"
+        },
+        "paragraph_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paragraph Index"
+        },
+        "sheet_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet Name"
+        },
+        "cell": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cell"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "SourceRefV2",
       "type": "object"
     }
   },
