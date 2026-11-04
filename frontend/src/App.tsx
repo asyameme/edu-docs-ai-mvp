@@ -1,4 +1,6 @@
 import { useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { ImportProgress } from "./ImportProgress";
+import { useImportJob } from "./useImportJob";
 
 type ProgramDocument = {
   name: string;
@@ -537,6 +539,7 @@ function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const isChatPreview = previewMode === "chat";
   const hasDemoPreview = isChatPreview || previewMode === "reconciliation";
+  const processing = useImportJob();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -556,21 +559,26 @@ function App() {
   const [chatDraft, setChatDraft] = useState("");
   const [selectedSourceRef, setSelectedSourceRef] = useState<SourceRef | null>(null);
   const sourceReturnFocusRef = useRef<HTMLElement | null>(null);
-  const hasUploadedFiles = documents.length > 0;
   const hasReconciliation = parsedProgram !== null;
   const unresolvedCount = parsedProgram?.findings.filter((finding) => {
     const appliedChoice = appliedChoices[finding.id];
     const selectedChoice = selectedChoices[finding.id];
     return !appliedChoice || (selectedChoice !== undefined && selectedChoice !== appliedChoice);
   }).length ?? 0;
+  const hasUploadedFiles = documents.length > 0 || processing.job !== null;
+  const uploadNotice = processing.notice || notice;
 
-  function addFiles(files: FileList | File[]) {
+  async function addFiles(files: FileList | File[]) {
+    if (processing.busy) return;
+    setNotice("");
+    processing.clearNotice();
     const selectedFiles = Array.from(files);
     const supportedFile = selectedFiles.find(isSupportedFile);
 
     if (selectedFiles.length > 1) {
       setNotice("Загрузите один ZIP-архив с пакетом документов.");
     } else if (supportedFile) {
+      if (!(await processing.upload(supportedFile))) return;
       setDocuments([{ name: supportedFile.name, status: "Загружено" }]);
       setParsedProgram(null);
       setIsDemoMode(false);
@@ -587,14 +595,14 @@ function App() {
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    if (event.target.files) addFiles(event.target.files);
+    if (event.target.files) void addFiles(event.target.files);
     event.target.value = "";
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDragging(false);
-    addFiles(event.dataTransfer.files);
+    void addFiles(event.dataTransfer.files);
   }
 
   function applyChoice(findingId: string) {
@@ -780,16 +788,18 @@ function App() {
                   type="file"
                   accept=".zip,application/zip,application/x-zip-compressed"
                   onChange={handleFileChange}
+                  disabled={processing.busy}
                   aria-label="Выбрать ZIP-архив с документами программы"
                 />
                 <button
                   type="button"
                   className="primary-button"
                   onClick={() => fileInputRef.current?.click()}
+                  disabled={processing.busy}
                 >
                   Выбрать архив
                 </button>
-                {notice && <p className="upload-notice" role="status">{notice}</p>}
+                {uploadNotice && <p className="upload-notice" role="status">{uploadNotice}</p>}
               </div>
             </section>
 
@@ -932,14 +942,24 @@ function App() {
                   </>
                 ) : (
                   <>
-                    {documents.map((document) => (
-                      <ul className="document-list" key={document.name}>
-                        <li className="document-row">
-                          <span className="document-name">{document.name}</span>
-                          <span className="status-pill status-pill--green document-status">{document.status}</span>
-                        </li>
+                    {documents.length > 0 && (
+                      <ul className="document-list">
+                        {documents.map((document) => (
+                          <li className="document-row" key={document.name}>
+                            <span className="document-name">{document.name}</span>
+                            <span className="status-pill status-pill--green document-status">{document.status}</span>
+                          </li>
+                        ))}
                       </ul>
-                    ))}
+                    )}
+                    {processing.job && (
+                      <ImportProgress
+                        programId={processing.programId}
+                        job={processing.job}
+                        busy={processing.busy}
+                        onRetry={processing.retry}
+                      />
+                    )}
                     <p className="processing-caption">
                       Название программы, извлечённые данные и расхождения появятся после завершения обработки архива.
                     </p>
