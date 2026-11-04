@@ -1,0 +1,565 @@
+{
+  "$defs": {
+    "CKMVMeta": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 2,
+          "default": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "doc_type": {
+          "const": "CKMV",
+          "default": "CKMV",
+          "title": "Doc Type",
+          "type": "string"
+        },
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "file_hash": {
+          "title": "File Hash",
+          "type": "string"
+        },
+        "parser_config": {
+          "title": "Parser Config",
+          "type": "string"
+        },
+        "program_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Program Id"
+        }
+      },
+      "required": [
+        "file_name",
+        "file_hash",
+        "parser_config"
+      ],
+      "title": "CKMVMeta",
+      "type": "object"
+    },
+    "Competency": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "formulation": {
+          "title": "Formulation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "code",
+        "formulation"
+      ],
+      "title": "Competency",
+      "type": "object"
+    },
+    "Indicator": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "competency_code": {
+          "title": "Competency Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "code",
+        "text",
+        "competency_code"
+      ],
+      "title": "Indicator",
+      "type": "object"
+    },
+    "IndicatorOutcomeLink": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "indicator_code": {
+          "title": "Indicator Code",
+          "type": "string"
+        },
+        "learning_outcome_id": {
+          "title": "Learning Outcome Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "indicator_code",
+        "learning_outcome_id"
+      ],
+      "title": "IndicatorOutcomeLink",
+      "type": "object"
+    },
+    "LearningOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "local_id": {
+          "title": "Local Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "знать",
+                "уметь",
+                "владеть"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        }
+      },
+      "required": [
+        "source_ref",
+        "local_id",
+        "text"
+      ],
+      "title": "LearningOutcome",
+      "type": "object"
+    },
+    "ParseIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "not_found",
+            "unparsed_row",
+            "empty_cell",
+            "unexpected_format",
+            "ambiguous",
+            "manual_review"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "severity": {
+          "default": "warning",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "category",
+        "message"
+      ],
+      "title": "ParseIssue",
+      "type": "object"
+    },
+    "ProfessionalRole": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "local_id": {
+          "title": "Local Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "local_id",
+        "name"
+      ],
+      "title": "ProfessionalRole",
+      "type": "object"
+    },
+    "Relation": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "src_entity": {
+          "enum": [
+            "program",
+            "discipline",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "assessment_tool",
+            "curriculum_item",
+            "course_topic"
+          ],
+          "title": "Src Entity",
+          "type": "string"
+        },
+        "src_key": {
+          "title": "Src Key",
+          "type": "string"
+        },
+        "dst_entity": {
+          "enum": [
+            "program",
+            "discipline",
+            "competency",
+            "indicator",
+            "learning_outcome",
+            "assessment_tool",
+            "curriculum_item",
+            "course_topic"
+          ],
+          "title": "Dst Entity",
+          "type": "string"
+        },
+        "dst_key": {
+          "title": "Dst Key",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "формирует",
+            "имеет",
+            "проверяется",
+            "включает"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "src_entity",
+        "src_key",
+        "dst_entity",
+        "dst_key",
+        "kind"
+      ],
+      "title": "Relation",
+      "type": "object"
+    },
+    "RoleCompetencyLink": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "role_id": {
+          "title": "Role Id",
+          "type": "string"
+        },
+        "competency_code": {
+          "title": "Competency Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "role_id",
+        "competency_code"
+      ],
+      "title": "RoleCompetencyLink",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "table": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        },
+        "col": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "SourceRefV2": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "table": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        },
+        "col": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col"
+        },
+        "paragraph_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paragraph Index"
+        },
+        "sheet_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sheet Name"
+        },
+        "cell": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cell"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "SourceRefV2",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "$ref": "#/$defs/CKMVMeta"
+    },
+    "competencies": {
+      "items": {
+        "$ref": "#/$defs/Competency"
+      },
+      "title": "Competencies",
+      "type": "array"
+    },
+    "indicators": {
+      "items": {
+        "$ref": "#/$defs/Indicator"
+      },
+      "title": "Indicators",
+      "type": "array"
+    },
+    "learning_outcomes": {
+      "items": {
+        "$ref": "#/$defs/LearningOutcome"
+      },
+      "title": "Learning Outcomes",
+      "type": "array"
+    },
+    "professional_roles": {
+      "items": {
+        "$ref": "#/$defs/ProfessionalRole"
+      },
+      "title": "Professional Roles",
+      "type": "array"
+    },
+    "role_competency_links": {
+      "items": {
+        "$ref": "#/$defs/RoleCompetencyLink"
+      },
+      "title": "Role Competency Links",
+      "type": "array"
+    },
+    "indicator_outcome_links": {
+      "items": {
+        "$ref": "#/$defs/IndicatorOutcomeLink"
+      },
+      "title": "Indicator Outcome Links",
+      "type": "array"
+    },
+    "relations": {
+      "items": {
+        "$ref": "#/$defs/Relation"
+      },
+      "title": "Relations",
+      "type": "array"
+    },
+    "parse_issues": {
+      "items": {
+        "$ref": "#/$defs/ParseIssue"
+      },
+      "title": "Parse Issues",
+      "type": "array"
+    }
+  },
+  "required": [
+    "meta"
+  ],
+  "title": "CKMVOutput",
+  "type": "object"
+}
