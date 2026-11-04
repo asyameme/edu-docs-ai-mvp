@@ -39,7 +39,7 @@ def to_graph(document, program_id: str | None = None,) -> EducationalGraph:
         attrs = {}
         if competency.formulation is not None:
             attrs['formulation'] = competency.formulation
-            node('competency', competency.code, competency.source_ref, attrs)
+        node('competency', competency.code, competency.source_ref, attrs)
     for indicator in getattr(document,'indicators',[]):
         node('indicator',indicator.code,indicator.source_ref,{'text':indicator.text})
         edge('competency',indicator.competency_code,'indicator',indicator.code,'имеет',indicator.source_ref)
