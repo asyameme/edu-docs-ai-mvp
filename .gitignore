@@ -1,4 +1,19 @@
-.venv/
+.env
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.py[cod]
 .DS_Store
 /parsed_rpd.json
+
+.integration-results/
+
+.local-notes/
+frontend/node_modules/
+frontend/dist/
+
+# Локальные окружения с искусственными ML-сервисами и скрипт полной приёмки.
+/compose.*-test.yaml
+/compose.test.yaml
+/scripts/verify-integration.ps1

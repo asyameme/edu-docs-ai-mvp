@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "metadata": {"name": "Искусственный пример"},
+  "entities": [
+    {"id": "11111111-1111-4111-8111-111111111111", "kind": "discipline", "attributes": {"code": "Д1", "hours": 108, "unknown": null}, "source_ref_ids": ["33333333-3333-4333-8333-333333333333"]},
+    {"id": "22222222-2222-4222-8222-222222222222", "kind": "competency", "attributes": {"code": "УК-1"}, "source_ref_ids": []}
+  ],
+  "relations": [{"id": "44444444-4444-4444-8444-444444444444", "source_id": "11111111-1111-4111-8111-111111111111", "target_id": "22222222-2222-4222-8222-222222222222", "type": "forms", "source_ref_ids": [], "confidence": null}],
+  "source_refs": [{"id": "33333333-3333-4333-8333-333333333333", "document_id": "55555555-5555-4555-8555-555555555555", "section": "Пример", "locator": "page:1"}],
+  "document_ids": ["55555555-5555-4555-8555-555555555555"]
+}
