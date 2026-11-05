@@ -22,6 +22,7 @@ from .assessment import (
     score_scale_columns,
 )
 from .common import (
+    finalize_output,
     heading_level,
     normalize,
     parse_workload_number,
@@ -43,7 +44,7 @@ from .discipline import (
     organization_variant_rows,
     select_workload_variant,
 )
-from .models import (
+from backend.contracts.parser_output import (
     ParseIssue,
     ParserMeta,
     ParserOutput,
@@ -111,7 +112,7 @@ def finalize_rpd(output, document, file_name):
     output.score_scale.extend(scale)
     output.parse_issues.extend(scale_issues)
 
-    return ParserOutput.model_validate(output.model_dump())
+    return finalize_output(output, document)
 
 
 def parse_rpd(
@@ -166,7 +167,7 @@ def parse_rpd(
             doc_type="RPD",
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_docx_v2",
+            parser_config="rpd_docx_v3",
         )
     )
 

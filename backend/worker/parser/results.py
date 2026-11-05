@@ -12,7 +12,7 @@ from .common import (
     normalize,
     read_section,
 )
-from .models import (
+from backend.contracts.parser_output import (
     Competency,
     Indicator,
     LearningOutcome,

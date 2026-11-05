@@ -11,14 +11,14 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from .assessment import extract_assessment_tools, extract_practice_score_scale
-from .common import heading_level, normalize
+from .common import finalize_output, heading_level, normalize
 from .content import extract_course_content
 from .discipline import (
     build_practice_discipline,
     extract_practice_control_forms,
     extract_prerequisites,
 )
-from .models import ParseIssue, ParserMeta, ParserOutput, SourceRef
+from backend.contracts.parser_output import ParseIssue, ParserMeta, ParserOutput, SourceRef
 from .results import extract_practice_competencies, extract_results_into
 
 
@@ -112,7 +112,7 @@ def finalize_rpp(output, document, file_name):
     scale, issues = extract_practice_score_scale(document, file_name)
     output.score_scale.extend(scale)
     output.parse_issues.extend(issues)
-    return ParserOutput.model_validate(output.model_dump())
+    return finalize_output(output, document)
 
 
 def parse_rpp(file_path):
@@ -144,7 +144,7 @@ def parse_rpp(file_path):
         doc_type="RPP",
         file_name=file_path.name,
         file_hash=sha256(raw).hexdigest(),
-        parser_config="rpp_docx_v2",
+        parser_config="rpp_docx_v3",
     ))
     output.parse_issues.append(ParseIssue(
         category="manual_review",

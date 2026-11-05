@@ -3,11 +3,13 @@
 import re
 from decimal import Decimal
 
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from .models import (
+from backend.contracts.parser_output import (
     ParseIssue,
+    ParserOutput,
     SourceRef,
 )
 
@@ -60,12 +62,86 @@ def parse_workload_number(raw):
     return Decimal(text.replace(" ", "").replace(",", "."))
 
 
+def paragraph_indices(document):
+    """Нумеровать физические абзацы тела, включая пустые и вложенные таблицы.
+
+    Обход XML не дублирует абзацы объединенных ячеек и не включает
+    колонтитулы, сноски и другие части файла.
+    """
+    return {
+        paragraph: index
+        for index, paragraph in enumerate(
+            document.element.body.iter(qn("w:p")), 1,
+        )
+    }
+
+
+def finalize_output(output, document):
+    """Дополнить ссылки номерами абзацев и проверить общий контракт."""
+    indices = paragraph_indices(document)
+    tables = list(document.tables)
+    anchors = {}
+    headings = {}
+    for paragraph in document.paragraphs:
+        headings.setdefault(paragraph.text.strip(), []).append(paragraph._p)
+
+    def table_anchor(ref):
+        key = ref.table, ref.row, ref.col
+        if key in anchors:
+            return anchors[key]
+        if not 1 <= ref.table <= len(tables):
+            return None
+        table = tables[ref.table - 1]
+        element = table._tbl
+        if ref.row is not None:
+            if not 1 <= ref.row <= len(table.rows):
+                return None
+            row = table.rows[ref.row - 1]
+            element = row._tr
+            if ref.col is not None:
+                cells = row.cells
+                if not 1 <= ref.col <= len(cells):
+                    return None
+                element = cells[ref.col - 1]._tc
+        paragraphs = list(element.iter(qn("w:p")))
+        # При ссылке на целую ячейку/строку якорь - первый непустой
+        # абзац. Для пустой ячейки сохраняется ее первый пустой абзац.
+        paragraph = next((
+            item for item in paragraphs
+            if "".join(node.text or "" for node in item.iter(qn("w:t"))).strip()
+        ), paragraphs[0] if paragraphs else None)
+        anchors[key] = indices.get(paragraph)
+        return anchors[key]
+
+    records = []
+    if output.program is not None:
+        records.append(output.program)
+    for name in (
+        "disciplines", "competencies", "indicators", "learning_outcomes",
+        "assessment_tools", "curriculum_items", "course_content", "score_scale",
+        "relations", "parse_issues",
+    ):
+        records.extend(getattr(output, name))
+    for record in records:
+        ref = record.source_ref
+        if ref is None:
+            continue
+        if ref.table is not None:
+            ref.paragraph_index = table_anchor(ref)
+        elif ref.paragraph_index is None and ref.section in headings:
+            candidates = headings[ref.section]
+            if len(candidates) == 1:
+                ref.paragraph_index = indices[candidates[0]]
+    return ParserOutput.model_validate(output.model_dump())
+
+
 def read_section(
     document, file_name, is_heading, section_name,
     keep_numbered_items=False,
 ):
     """Прочитать раздел в исходном порядке вместе с координатами."""
     blocks = list(document.iter_inner_content())
+    indices = paragraph_indices(document)
 
     starts = [
         index
@@ -139,6 +215,7 @@ def read_section(
                     SourceRef(
                         file=file_name,
                         section=section,
+                        paragraph_index=indices[block._p],
                     ),
                 ))
 
@@ -160,6 +237,7 @@ def read_section(
             source_ref=SourceRef(
                 file=file_name,
                 section=blocks[start].text.strip(),
+                paragraph_index=indices[blocks[start]._p],
             ),
         )]
 

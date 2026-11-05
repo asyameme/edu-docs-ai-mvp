@@ -2,7 +2,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from backend.worker.parser.models import ParserOutput
+from backend.contracts.parser_output import ParserOutput
 from backend.worker.parser.parse_rpd import parse_rpd
 
 

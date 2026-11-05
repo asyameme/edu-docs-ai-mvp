@@ -8,7 +8,7 @@ from .common import (
     normalize,
     read_section,
 )
-from .models import (
+from backend.contracts.parser_output import (
     AssessmentTool,
     ParseIssue,
     Relation,

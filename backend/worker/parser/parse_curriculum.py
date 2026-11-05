@@ -11,8 +11,10 @@ from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from .common import heading_level, normalize, parse_workload_number, read_section
-from .models import (
+from .common import (
+    finalize_output, heading_level, normalize, parse_workload_number, read_section,
+)
+from backend.contracts.parser_output import (
     Competency, CurriculumItem, ParseIssue, ParserMeta, ParserOutput,
     Relation, SourceRef,
 )
@@ -449,11 +451,11 @@ def parse_curriculum(file_path):
         raise ValueError("Не удалось однозначно распознать учебный план по титулу")
     output = ParserOutput(meta=ParserMeta(
         doc_type="CURRICULUM", file_name=file_path.name,
-        file_hash=sha256(raw).hexdigest(), parser_config="curriculum_docx_v1",
+        file_hash=sha256(raw).hexdigest(), parser_config="curriculum_docx_v2",
     ))
     extract_curriculum_competencies(output, document)
     extract_curriculum_items(output, document)
-    return ParserOutput.model_validate(output.model_dump())
+    return finalize_output(output, document)
 
 
 def main():

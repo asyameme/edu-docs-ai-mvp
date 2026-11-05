@@ -11,7 +11,7 @@ from backend.worker.parser.discipline import (
     extract_practice_control_forms,
     extract_practice_workload,
 )
-from backend.worker.parser.models import ParserOutput
+from backend.contracts.parser_output import ParserOutput
 from backend.worker.parser.parse_rpp import parse_rpp
 
 
@@ -149,7 +149,7 @@ class TestRppParser(unittest.TestCase):
     def test_original_load_forms_and_scale(self):
         output = self.original
         self.assertEqual(output.meta.doc_type, "RPP")
-        self.assertEqual(output.meta.parser_config, "rpp_docx_v2")
+        self.assertEqual(output.meta.parser_config, "rpp_docx_v3")
         practice = output.disciplines[0]
         self.assertEqual((practice.credit_units, practice.hours_total), (18, 648))
         self.assertEqual(practice.semesters, [2, 3, 4, 5])
