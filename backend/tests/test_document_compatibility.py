@@ -74,6 +74,17 @@ def test_rpp_keeps_sections_stages_workload_and_scale_as_objects():
     )
 
 
+def test_every_object_source_has_explicit_evidence_before_sql_projection():
+    state, _ = to_snapshot(uuid4(), [file_result(payload("RPP"))])
+    result = SnapshotV2.model_validate(state)
+    covered = {
+        (link.target_kind, link.target_id, link.source_ref_id) for link in result.source_links
+    }
+    for kind, objects in (("entity", result.entities), ("relation", result.relations)):
+        for item in objects:
+            assert all((kind, item.id, ref) in covered for ref in item.source_ref_ids)
+
+
 def test_conflicting_documents_stay_separate_with_stable_scoped_ids():
     first, second = payload(), payload()
     second["disciplines"][0]["hours_total"] = 144

@@ -11,9 +11,9 @@ from temporalio.exceptions import ApplicationError
 
 from app.domain import Contract
 from app.import_repository import ImportRepository
-from app.parser_adapter import GROUPS, to_snapshot
+from app.parser_adapter import to_snapshot
 from app.repository import Repository
-from contracts.parser_output import ParserOutput
+from contracts.parser_document import has_document_data, parse_output
 
 
 class ImportActivities:
@@ -75,10 +75,18 @@ class ImportActivities:
                         chunks.append(chunk)
             raw = json.loads(b"".join(chunks))
             Contract.strings_are_storable(raw)
-            parsed = ParserOutput.model_validate(raw)
+            parsed = parse_output(raw)
             if parsed.meta.file_hash != item["sha256"]:
                 raise ValueError("Хэш результата не совпал с оригиналом")
-            if not parsed.program and not any(getattr(parsed, key) for key in GROUPS):
+            try:
+                claimed_program_id = UUID(parsed.meta.program_id or "")
+            except ValueError:
+                claimed_program_id = None
+            if claimed_program_id is not None and claimed_program_id != UUID(
+                str(job["program_id"])
+            ):
+                raise ValueError("Результат документа принадлежит другой программе")
+            if not has_document_data(parsed):
                 self.repo.file_finished(
                     UUID(job_id),
                     UUID(document_id),
@@ -91,7 +99,7 @@ class ImportActivities:
                 UUID(job_id),
                 UUID(document_id),
                 attempt,
-                output=parsed.model_dump(mode="json"),
+                output=raw,
             )
         except httpx.TransportError as error:
             raise ApplicationError(

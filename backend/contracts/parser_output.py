@@ -60,7 +60,7 @@ class SourceRef(ContractModel):
 
     file: str
     section: str | None = None
-    paragraph_index: int | None = Field(default=None, ge=1)
+    paragraph_index: int | None = Field(default=None, ge=1, strict=True)
     table: int | None = None
     row: int | None = None
     col: int | None = None

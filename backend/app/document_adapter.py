@@ -152,7 +152,16 @@ class DocumentBuilder:
         }
         self.evidence(item, "relation", document_id, ref, attributes)
         if not attributes:
-            item["source_ref_ids"] = [self.source(document_id, ref)]
+            ref_id = self.source(document_id, ref)
+            identity = self.identity(f"link:relation:{item['id']}:$:{ref_id}")
+            self.links[identity] = {
+                "id": identity,
+                "target_kind": "relation",
+                "target_id": item["id"],
+                "field_path": "$",
+                "source_ref_id": ref_id,
+                "observed_value": {"value": None},
+            }
         self.relations.append(item)
 
     def connect(

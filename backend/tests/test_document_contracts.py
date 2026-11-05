@@ -54,3 +54,11 @@ def test_unknown_versions_and_zero_based_coordinates_are_rejected():
     data["disciplines"][0]["source_ref"]["paragraph_index"] = 0
     with pytest.raises(ValidationError):
         AnalysisDocument(document_id=uuid4(), sha256="a" * 64, parsed=data)
+
+
+@pytest.mark.parametrize("value", [True, False, "1", 2])
+def test_matrix_cell_is_rejected_before_storage_when_not_integer_zero_or_one(value):
+    data = payload("MATRIX")
+    data["matrix_cells"][0]["value"] = value
+    with pytest.raises(ValidationError):
+        AnalysisDocument(document_id=uuid4(), sha256="a" * 64, parsed=data)

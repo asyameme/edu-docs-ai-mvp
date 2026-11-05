@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -25,6 +26,11 @@ async def parse(file: UploadFile, request: Request):
             return JSONResponse(status_code=503, content={"detail": "Повторите запрос"})
     if content.startswith(b"wrong-hash"):
         digest = "0" * 64
+    if content.startswith(b"contract-v2:"):
+        output = json.loads(content[len(b"contract-v2:") :])
+        output["meta"]["file_hash"] = digest
+        output["meta"]["file_name"] = file.filename
+        return output
     issues = []
     if content.startswith(b"warning"):
         issues = [{"category": "empty_cell", "message": "Пустая ячейка", "severity": "warning"}]

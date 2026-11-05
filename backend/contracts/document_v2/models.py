@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from ..parser_output import (
     AssessmentTool as AssessmentToolV1,
@@ -45,7 +45,7 @@ from ..parser_output import (
 
 
 class SourceRefV2(SourceRefV1):
-    paragraph_index: int | None = Field(default=None, ge=1)
+    paragraph_index: int | None = Field(default=None, ge=1, strict=True)
     sheet_name: str | None = None
     cell: str | None = None
 
@@ -153,6 +153,13 @@ class MatrixCell(ContractModel):
     semester: int | None = Field(default=None, ge=1, le=8)
     competency_code: str
     value: Literal[0, 1]
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def value_is_integer(cls, value):
+        if type(value) is not int:
+            raise ValueError("Ячейка матрицы должна содержать целое 0 или 1")
+        return value
 
 
 class ProfessionalRole(ContractModel):
