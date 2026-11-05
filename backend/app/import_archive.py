@@ -29,7 +29,7 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             members = archive.infolist()
-            if len(members) > 100 or sum(m.file_size for m in members) > 100 * 1024 * 1024:
+            if len(members) > 100 or sum(m.file_size for m in members) > 500 * 1024 * 1024:
                 raise DomainError(413, "Слишком большой распакованный пакет")
             for member in members:
                 name = member.filename
