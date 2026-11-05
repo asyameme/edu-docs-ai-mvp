@@ -85,7 +85,7 @@
     },
     "CurriculumItem": {
       "additionalProperties": false,
-      "description": "Строка учебного плана (xlsx).",
+      "description": "Строка учебного плана (docx).",
       "properties": {
         "source_ref": {
           "$ref": "#/$defs/SourceRef"
@@ -218,7 +218,7 @@
     },
     "LearningOutcome": {
       "additionalProperties": false,
-      "description": "Результат обучения «знать/уметь/владеть».\n\nlocal_id назначает парсер (уникален в файле, «LO-001») — ключ для связей:\nв источнике у результатов кода нет, кроме вариантов вида «ПКП-УНК-03.01. У-1».\nkind=None — формат источника ещё не нормализован (spike всех типов).",
+      "description": "Результат обучения «знать/уметь/владеть».\n\nlocal_id назначает парсер (уникален в файле, «LO-001») — ключ для связей:\nв источнике у результатов кода нет, кроме вариантов вида «ПКП-УНК-03.01. У-1».\nkind=None — тип результата не удалось определить по данным источника.",
       "properties": {
         "source_ref": {
           "$ref": "#/$defs/SourceRef"
@@ -271,7 +271,6 @@
     },
     "ParseIssue": {
       "additionalProperties": false,
-      "description": "Проблема разбора — не бизнес-нарушение (те — Issue валидатора).",
       "properties": {
         "category": {
           "enum": [
@@ -450,7 +449,7 @@
     },
     "Relation": {
       "additionalProperties": false,
-      "description": "Связь между сущностями. Ссылка на сущность — по естественному ключу:\ndiscipline/curriculum_item/course_topic — название, остальные — код.\nМежфайловые связи (например, дисциплина РПД ↔ строка плана) допустимы:\nключи кодов глобальны в рамках программы.",
+      "description": "Связь между сущностями. Ссылка на сущность — по естественному ключу:\ndiscipline/curriculum_item/course_topic — название, остальные — код.",
       "properties": {
         "source_ref": {
           "$ref": "#/$defs/SourceRef"
@@ -570,7 +569,7 @@
     },
     "SourceRef": {
       "additionalProperties": false,
-      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
+      "description": "Указатель на место в исходном DOCX; текст фрагмента хранится отдельно.\n\nparagraph_index нумеруется с 1 по порядку абзацев тела документа, включая\nабзацы в таблицах, без колонтитулов и сносок. table/row/col также нумеруются\nс 1; row=1 — шапка таблицы. Указатель относится к версии файла, связанной\nс записью парсера.",
       "properties": {
         "file": {
           "title": "File",
@@ -587,6 +586,19 @@
           ],
           "default": null,
           "title": "Section"
+        },
+        "paragraph_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paragraph Index"
         },
         "table": {
           "anyOf": [

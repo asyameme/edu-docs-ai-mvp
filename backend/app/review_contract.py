@@ -3,10 +3,10 @@
 from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, Field, JsonValue, model_validator
+from pydantic import AnyHttpUrl, Field, JsonValue, field_validator, model_validator
 
 from app.domain import Contract, Entity, RelationV2, Snapshot, SnapshotV2
-from contracts.parser_output import ParserOutput
+from contracts.parser_document import ParserDocument, parse_output
 
 
 class Mutation(Contract):
@@ -201,15 +201,32 @@ class ConfirmCreate(Contract):
 
 class AnalysisDocument(Contract):
     document_id: UUID
+    program_id: UUID | None = None
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    parsed: ParserOutput
+    parsed: ParserDocument
     original_url: AnyHttpUrl | None = None
+
+    @field_validator("parsed", mode="before")
+    @classmethod
+    def read_document_version(cls, value):
+        return parse_output(value)
 
     @model_validator(mode="after")
     def hash_matches_original(self) -> Self:
         if self.parsed.meta.file_hash != self.sha256:
             raise ValueError("Parser result and original have different hashes")
         return self
+
+    def check_program(self, program_id: UUID) -> None:
+        if self.program_id is not None and self.program_id != program_id:
+            raise ValueError("Документ принадлежит другой программе")
+        # В прежнем meta.program_id встречается UUID, в документах — академический код.
+        try:
+            legacy_id = UUID(self.parsed.meta.program_id or "")
+        except ValueError:
+            legacy_id = None
+        if legacy_id is not None and legacy_id != program_id:
+            raise ValueError("Результат документа принадлежит другой программе")
 
 
 class PrepareRequest(Contract):
@@ -227,11 +244,7 @@ class PrepareRequest(Contract):
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate input documents")
         for document in self.documents:
-            if (
-                document.parsed.meta.program_id is not None
-                and document.parsed.meta.program_id != str(self.program_id)
-            ):
-                raise ValueError("Parser result belongs to another program")
+            document.check_program(self.program_id)
         return self
 
 
@@ -244,3 +257,12 @@ class CheckRequest(Contract):
     snapshot: SnapshotV2
     ruleset: Ruleset
     documents: list[AnalysisDocument] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def documents_belong_to_program(self) -> Self:
+        ids = [item.document_id for item in self.documents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Документы проверки не должны повторяться")
+        for document in self.documents:
+            document.check_program(self.program_id)
+        return self
