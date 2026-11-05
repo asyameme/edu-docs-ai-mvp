@@ -162,6 +162,41 @@ rules:
       JSON. В текущем JSON РПД все такие ссылки находятся. Это не проверка
       формулировок и кодов индикаторов относительно ЦКМВ.
 
+  - id: "R-11"
+    name: "Смысловая связь результатов обучения с содержанием и оцениванием в РПД"
+    type: "semantic_rpd_alignment"
+    status: "draft"
+    scope:
+      document_types: ["rpd"]
+    inputs:
+      disciplines_path: "$.disciplines[*]"
+      learning_outcomes_path: "$.learning_outcomes[*]"
+      course_content_path: "$.course_content[*]"
+      indicators_path: "$.indicators[*]"
+      assessment_tools_path: "$.assessment_tools[*]"
+      relations_path: "$.relations[*]"
+    llm:
+      model_env: "VALIDATION_LLM_MODEL"
+      api_key_env: "VALIDATION_LLM_API_KEY"
+      api_base_env: "VALIDATION_LLM_API_BASE"
+      timeout_seconds: 60
+      max_tokens: 4000
+      # Qwen3 на vLLM: без отключения модель тратит max_tokens на reasoning
+      # и возвращает пустой content. false возвращает прежнее поведение.
+      disable_thinking: true
+    basis:
+      kind: "project_semantic_rule"
+      issue: 6
+      rule_id: "R-11"
+      reference: "РПД: результаты обучения; раздел 2 — содержание занятий; раздел 3 — индикаторы и оценочные средства"
+    notes: >-
+      Для каждого результата обучения внутри одной РПД модель оценивает,
+      поддержан ли он содержанием раздела 2 и связанными через компетенцию и
+      индикатор данными об оценивании из раздела 3. Вывод LLM не считается
+      нормативным нарушением: пробелы, неопределённость, отсутствие контекста
+      или недоступность модели требуют экспертной проверки. Нужны переменные
+      VALIDATION_LLM_MODEL и VALIDATION_LLM_API_KEY; VALIDATION_LLM_API_BASE необязателен.
+
   - id: "R-06"
     name: "Поиск дубликатов внутри списков сущностей"
     type: "unique_by_fields"

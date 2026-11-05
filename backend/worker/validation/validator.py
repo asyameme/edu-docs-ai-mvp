@@ -9,6 +9,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+if __package__:
+    from .semantic_rpd import SemanticEvaluator, evaluate_rpd_alignment
+else:  # Поддерживаем и прямой запуск validator.py.
+    from semantic_rpd import SemanticEvaluator, evaluate_rpd_alignment
+
 try:
     import yaml
 except ImportError:  # PyYAML устанавливается из backend/requirements.txt
@@ -315,6 +320,33 @@ def _unique(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     return _result(rule, checks, findings)
 
 
+def _semantic_rpd_alignment(
+    rule: Mapping[str, Any],
+    docs: Sequence[Document],
+    semantic_evaluator: SemanticEvaluator | None = None,
+) -> RuleResult:
+    scope, inputs = rule.get("scope", {}), rule["inputs"]
+    checks, findings = 0, []
+    allowed = {str(value).lower() for value in scope.get("document_types", [])}
+    for doc in docs:
+        if doc.role not in allowed:
+            continue
+        doc_checks, doc_findings = evaluate_rpd_alignment(
+            document_label=doc.label,
+            disciplines=_records(doc, inputs["disciplines_path"]),
+            outcomes=_records(doc, inputs["learning_outcomes_path"]),
+            course_content=_records(doc, inputs["course_content_path"]),
+            indicators=_records(doc, inputs["indicators_path"]),
+            assessment_tools=_records(doc, inputs["assessment_tools_path"]),
+            relations=_records(doc, inputs["relations_path"]),
+            llm_config=rule.get("llm", {}),
+            evaluator=semantic_evaluator,
+        )
+        checks += doc_checks
+        findings.extend(Finding(**item) for item in doc_findings)
+    return _result(rule, checks, findings)
+
+
 HANDLERS = {
     "sum_components_equals_total": _sum_hours,
     "compare_fields_across_documents": _compare_fields,
@@ -322,12 +354,15 @@ HANDLERS = {
     "compare_values_by_key": _compare_values,
     "reference_exists": _references,
     "unique_by_fields": _unique,
+    "semantic_rpd_alignment": _semantic_rpd_alignment,
 }
 
 
 def run_validation(
     documents: Sequence[Mapping[str, Any] | Document],
     rules_config: Mapping[str, Any] | None = None,
+    *,
+    semantic_evaluator: SemanticEvaluator | None = None,
 ) -> ValidationReport:
     config = rules_config if rules_config is not None else load_rules()
     docs = _documents(documents)
@@ -336,7 +371,10 @@ def run_validation(
         handler = HANDLERS.get(rule.get("type"))
         if handler is None:
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
-        results.append(handler(rule, docs))
+        if rule.get("type") == "semantic_rpd_alignment":
+            results.append(handler(rule, docs, semantic_evaluator))
+        else:
+            results.append(handler(rule, docs))
     return ValidationReport(results)
 
 
