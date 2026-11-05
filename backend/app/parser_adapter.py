@@ -5,6 +5,7 @@ from collections import defaultdict
 from uuid import UUID, uuid5
 
 from app.domain import Snapshot
+from app.parser_document import parse_output
 
 GROUPS = {
     "disciplines": ("discipline", "name"),
@@ -19,10 +20,16 @@ GROUPS = {
 
 
 def to_snapshot(program_id, files):
-    if any((item.get("output") or {}).get("meta", {}).get("schema_version") == 2 for item in files):
-        from app.document_adapter import to_snapshot_v2
+    for item in files:
+        meta = (item.get("output") or {}).get("meta", {})
+        if meta.get("schema_version") == 2 or (
+            meta
+            and "schema_version" not in meta
+            and parse_output(item["output"]).meta.schema_version == 2
+        ):
+            from app.document_adapter import to_snapshot_v2
 
-        return to_snapshot_v2(program_id, files)
+            return to_snapshot_v2(program_id, files)
     namespace = UUID(str(program_id))
     entities, relations, refs, issues, unresolved = [], [], {}, [], []
     local, all_keys = defaultdict(list), defaultdict(list)

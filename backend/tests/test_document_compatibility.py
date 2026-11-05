@@ -30,6 +30,19 @@ def test_v2_snapshot_keeps_full_documents_and_valid_field_evidence(kind):
         UUID(str(entity.id))
 
 
+def test_v2_without_explicit_version_keeps_extra_fields_in_snapshot():
+    data = payload()
+    data["meta"].pop("schema_version")
+    doc_id = uuid4()
+    state, _ = to_snapshot(uuid4(), [file_result(data, doc_id)])
+    result = SnapshotV2.model_validate(state)
+    assert result.metadata["parsed_documents"][str(doc_id)] == data
+    assert (
+        next(e for e in result.entities if e.kind == "document_section").attributes["text"]
+        == "Исходный текст"
+    )
+
+
 def test_matrix_preserves_explicit_zero_semesters_and_cell_sources():
     state, _ = to_snapshot(uuid4(), [file_result(payload("MATRIX"))])
     result = SnapshotV2.model_validate(state)

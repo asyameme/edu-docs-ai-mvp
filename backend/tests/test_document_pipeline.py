@@ -122,3 +122,30 @@ def test_invalid_v2_result_is_rejected_before_saving_parsed_output(invalid):
         assert job["files"][0]["error_code"] == "parser_invalid_result"
         assert http.get(path + "/result").status_code == 409
         assert len(http.get(root + "/documents").json()) == 1
+
+
+@pytest.mark.parametrize("explicit_version", [True, False])
+def test_v2_coordinate_allowed_by_main_survives_http_without_conversion(explicit_version):
+    data = payload()
+    data["disciplines"][0]["source_ref"]["paragraph_index"] = 0
+    if not explicit_version:
+        data["meta"].pop("schema_version")
+    original = b"contract-v2:" + json.dumps(data, ensure_ascii=False).encode()
+    with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
+        program = http.post("/api/v1/programs", json={"name": "Координаты общего контракта"}).json()
+        root = f"/api/v1/programs/{program['id']}"
+        accepted = http.post(
+            root + "/imports",
+            files={"file": ("data.zip", archive({"source.docx": original}))},
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+        assert accepted.status_code == 202, accepted.text
+        path = root + "/imports/" + accepted.json()["id"]
+        job = wait(http, path)
+        assert job["status"] == "completed", job
+        response = http.get(path + "/result")
+        assert response.status_code == 200, response.text
+        snapshot = SnapshotV2.model_validate(response.json())
+        parsed = snapshot.metadata["parsed_documents"][job["files"][0]["document_id"]]
+        assert parsed["disciplines"][0]["source_ref"]["paragraph_index"] == 0
+        assert {json.loads(ref.locator)["paragraph_index"] for ref in snapshot.source_refs} == {0}

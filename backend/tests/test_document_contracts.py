@@ -43,6 +43,16 @@ def test_analysis_envelope_does_not_add_another_program_id_to_document():
     assert "program_id" not in result["documents"][0]
 
 
+@pytest.mark.parametrize("kind", ["RPD", "RPP", "MATRIX", "CKMV", "CHARACTERISTIC"])
+def test_backend_accepts_v2_default_version_from_main_models(kind):
+    from backend.contracts.document_v2.models import parse_document
+
+    data = payload(kind)
+    data["meta"].pop("schema_version")
+    result = prepare(uuid4(), data)
+    assert result.documents[0].parsed.model_dump() == parse_document(data).model_dump()
+
+
 @pytest.mark.parametrize("kind", ["RPD", "RPP", "CURRICULUM", "MATRIX", "CKMV", "CHARACTERISTIC"])
 def test_analysis_accepts_each_v2_type_without_replacing_academic_code(kind):
     data = payload(kind)
@@ -78,5 +88,13 @@ def test_unknown_versions_and_negative_coordinates_are_rejected():
 def test_matrix_cell_is_rejected_before_storage_when_not_integer_zero_or_one(value):
     data = payload("MATRIX")
     data["matrix_cells"][0]["value"] = value
+    with pytest.raises(ValidationError):
+        AnalysisDocument(document_id=uuid4(), sha256="a" * 64, parsed=data)
+
+
+@pytest.mark.parametrize("cells", [None, 1, {"value": 0}])
+def test_invalid_matrix_collection_is_a_contract_error(cells):
+    data = payload("MATRIX")
+    data["matrix_cells"] = cells
     with pytest.raises(ValidationError):
         AnalysisDocument(document_id=uuid4(), sha256="a" * 64, parsed=data)
