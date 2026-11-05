@@ -50,8 +50,8 @@ export function useImportJob() {
       setNotice("Выберите один ZIP-архив с документами DOCX/XLSX.");
       return false;
     }
-    if (file.size > 50 * 1024 * 1024) {
-      setNotice("Размер архива не должен превышать 50 МиБ.");
+    if (file.size > 500 * 1024 * 1024) {
+      setNotice("Размер архива не должен превышать 500 МиБ.");
       return false;
     }
     busyRef.current = true;
