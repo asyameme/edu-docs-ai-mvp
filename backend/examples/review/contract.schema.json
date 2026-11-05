@@ -9,19 +9,6 @@
           "title": "Document Id",
           "type": "string"
         },
-        "program_id": {
-          "anyOf": [
-            {
-              "format": "uuid",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Program Id"
-        },
         "sha256": {
           "pattern": "^[a-f0-9]{64}$",
           "title": "Sha256",
@@ -143,7 +130,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "name": {
           "title": "Name",
@@ -232,21 +219,21 @@
         },
         "competencies": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Competency"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Competency"
           },
           "title": "Competencies",
           "type": "array"
         },
         "indicators": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Indicator"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Indicator"
           },
           "title": "Indicators",
           "type": "array"
         },
         "learning_outcomes": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__LearningOutcome"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__LearningOutcome"
           },
           "title": "Learning Outcomes",
           "type": "array"
@@ -274,7 +261,7 @@
         },
         "relations": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Relation"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Relation"
           },
           "title": "Relations",
           "type": "array"
@@ -352,7 +339,7 @@
         },
         "competencies": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Competency"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Competency"
           },
           "title": "Competencies",
           "type": "array"
@@ -516,21 +503,21 @@
         },
         "competencies": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Competency"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Competency"
           },
           "title": "Competencies",
           "type": "array"
         },
         "curriculum_items": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__CurriculumItem"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__CurriculumItem"
           },
           "title": "Curriculum Items",
           "type": "array"
         },
         "relations": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Relation"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Relation"
           },
           "title": "Relations",
           "type": "array"
@@ -553,7 +540,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "section_number": {
           "title": "Section Number",
@@ -645,7 +632,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "indicator_code": {
           "title": "Indicator Code",
@@ -715,7 +702,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "discipline_name": {
           "title": "Discipline Name",
@@ -821,7 +808,7 @@
         },
         "competencies": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Competency"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Competency"
           },
           "title": "Competencies",
           "type": "array"
@@ -1040,7 +1027,7 @@
         "disciplines": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__Discipline"
+            "$ref": "#/$defs/backend__contracts__parser_output__Discipline"
           },
           "title": "Disciplines",
           "type": "array"
@@ -1048,7 +1035,7 @@
         "competencies": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__Competency"
+            "$ref": "#/$defs/backend__contracts__parser_output__Competency"
           },
           "title": "Competencies",
           "type": "array"
@@ -1056,7 +1043,7 @@
         "indicators": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__Indicator"
+            "$ref": "#/$defs/backend__contracts__parser_output__Indicator"
           },
           "title": "Indicators",
           "type": "array"
@@ -1064,7 +1051,7 @@
         "learning_outcomes": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__LearningOutcome"
+            "$ref": "#/$defs/backend__contracts__parser_output__LearningOutcome"
           },
           "title": "Learning Outcomes",
           "type": "array"
@@ -1080,7 +1067,7 @@
         "curriculum_items": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__CurriculumItem"
+            "$ref": "#/$defs/backend__contracts__parser_output__CurriculumItem"
           },
           "title": "Curriculum Items",
           "type": "array"
@@ -1088,7 +1075,7 @@
         "course_content": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__CourseTopic"
+            "$ref": "#/$defs/backend__contracts__parser_output__CourseTopic"
           },
           "title": "Course Content",
           "type": "array"
@@ -1096,7 +1083,7 @@
         "score_scale": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__ScoreScaleItem"
+            "$ref": "#/$defs/backend__contracts__parser_output__ScoreScaleItem"
           },
           "title": "Score Scale",
           "type": "array"
@@ -1104,7 +1091,7 @@
         "relations": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/contracts__parser_output__Relation"
+            "$ref": "#/$defs/backend__contracts__parser_output__Relation"
           },
           "title": "Relations",
           "type": "array"
@@ -1128,7 +1115,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "name": {
           "title": "Name",
@@ -1238,7 +1225,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "local_id": {
           "title": "Local Id",
@@ -1336,7 +1323,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "name": {
           "anyOf": [
@@ -1511,7 +1498,7 @@
         },
         "disciplines": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Discipline"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Discipline"
           },
           "minItems": 1,
           "title": "Disciplines",
@@ -1519,21 +1506,21 @@
         },
         "competencies": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Competency"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Competency"
           },
           "title": "Competencies",
           "type": "array"
         },
         "indicators": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Indicator"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Indicator"
           },
           "title": "Indicators",
           "type": "array"
         },
         "learning_outcomes": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__LearningOutcome"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__LearningOutcome"
           },
           "title": "Learning Outcomes",
           "type": "array"
@@ -1547,7 +1534,7 @@
         },
         "course_content": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__CourseTopic"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__CourseTopic"
           },
           "title": "Course Content",
           "type": "array"
@@ -1561,14 +1548,14 @@
         },
         "relations": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Relation"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Relation"
           },
           "title": "Relations",
           "type": "array"
         },
         "score_scale": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__ScoreScaleItem"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__ScoreScaleItem"
           },
           "title": "Score Scale",
           "type": "array"
@@ -1644,7 +1631,7 @@
         },
         "disciplines": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Discipline"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Discipline"
           },
           "minItems": 1,
           "title": "Disciplines",
@@ -1674,21 +1661,21 @@
         },
         "competencies": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Competency"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Competency"
           },
           "title": "Competencies",
           "type": "array"
         },
         "indicators": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Indicator"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Indicator"
           },
           "title": "Indicators",
           "type": "array"
         },
         "learning_outcomes": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__LearningOutcome"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__LearningOutcome"
           },
           "title": "Learning Outcomes",
           "type": "array"
@@ -1702,21 +1689,21 @@
         },
         "course_content": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__CourseTopic"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__CourseTopic"
           },
           "title": "Course Content",
           "type": "array"
         },
         "score_scale": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__ScoreScaleItem"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__ScoreScaleItem"
           },
           "title": "Score Scale",
           "type": "array"
         },
         "relations": {
           "items": {
-            "$ref": "#/$defs/contracts__document_v2__models__Relation"
+            "$ref": "#/$defs/backend__contracts__document_v2__models__Relation"
           },
           "title": "Relations",
           "type": "array"
@@ -2035,7 +2022,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "role_id": {
           "title": "Role Id",
@@ -2149,7 +2136,7 @@
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "semester": {
           "maximum": 8,
@@ -2622,11 +2609,11 @@
       "title": "SourceRefV2",
       "type": "object"
     },
-    "contracts__document_v2__models__Competency": {
+    "backend__contracts__document_v2__models__Competency": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "code": {
           "title": "Code",
@@ -2645,11 +2632,11 @@
       "title": "Competency",
       "type": "object"
     },
-    "contracts__document_v2__models__CourseTopic": {
+    "backend__contracts__document_v2__models__CourseTopic": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "topic": {
           "title": "Topic",
@@ -2686,11 +2673,11 @@
       "title": "CourseTopic",
       "type": "object"
     },
-    "contracts__document_v2__models__CurriculumItem": {
+    "backend__contracts__document_v2__models__CurriculumItem": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "discipline_name": {
           "title": "Discipline Name",
@@ -2728,11 +2715,11 @@
       "title": "CurriculumItem",
       "type": "object"
     },
-    "contracts__document_v2__models__Discipline": {
+    "backend__contracts__document_v2__models__Discipline": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "name": {
           "title": "Name",
@@ -2790,11 +2777,11 @@
       "title": "Discipline",
       "type": "object"
     },
-    "contracts__document_v2__models__Indicator": {
+    "backend__contracts__document_v2__models__Indicator": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "code": {
           "title": "Code",
@@ -2818,11 +2805,11 @@
       "title": "Indicator",
       "type": "object"
     },
-    "contracts__document_v2__models__LearningOutcome": {
+    "backend__contracts__document_v2__models__LearningOutcome": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "local_id": {
           "title": "Local Id",
@@ -2870,11 +2857,11 @@
       "title": "LearningOutcome",
       "type": "object"
     },
-    "contracts__document_v2__models__Relation": {
+    "backend__contracts__document_v2__models__Relation": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "src_entity": {
           "enum": [
@@ -2934,11 +2921,11 @@
       "title": "Relation",
       "type": "object"
     },
-    "contracts__document_v2__models__ScoreScaleItem": {
+    "backend__contracts__document_v2__models__ScoreScaleItem": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
-          "$ref": "#/$defs/contracts__document_v2__models__SourceRefV2"
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
         },
         "grade_spbu": {
           "title": "Grade Spbu",
@@ -2988,7 +2975,7 @@
       "title": "ScoreScaleItem",
       "type": "object"
     },
-    "contracts__document_v2__models__SourceRefV2": {
+    "backend__contracts__document_v2__models__SourceRefV2": {
       "additionalProperties": false,
       "properties": {
         "file": {
@@ -3010,7 +2997,7 @@
         "paragraph_index": {
           "anyOf": [
             {
-              "minimum": 1,
+              "minimum": 0,
               "type": "integer"
             },
             {
@@ -3087,7 +3074,7 @@
       "title": "SourceRefV2",
       "type": "object"
     },
-    "contracts__parser_output__Competency": {
+    "backend__contracts__parser_output__Competency": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
@@ -3110,7 +3097,7 @@
       "title": "Competency",
       "type": "object"
     },
-    "contracts__parser_output__CourseTopic": {
+    "backend__contracts__parser_output__CourseTopic": {
       "additionalProperties": false,
       "description": "Строка таблицы «Структура и содержание»: тема × вид занятий × часы.",
       "properties": {
@@ -3152,7 +3139,7 @@
       "title": "CourseTopic",
       "type": "object"
     },
-    "contracts__parser_output__CurriculumItem": {
+    "backend__contracts__parser_output__CurriculumItem": {
       "additionalProperties": false,
       "description": "Строка учебного плана (docx).",
       "properties": {
@@ -3195,7 +3182,7 @@
       "title": "CurriculumItem",
       "type": "object"
     },
-    "contracts__parser_output__Discipline": {
+    "backend__contracts__parser_output__Discipline": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
@@ -3257,7 +3244,7 @@
       "title": "Discipline",
       "type": "object"
     },
-    "contracts__parser_output__Indicator": {
+    "backend__contracts__parser_output__Indicator": {
       "additionalProperties": false,
       "properties": {
         "source_ref": {
@@ -3285,7 +3272,7 @@
       "title": "Indicator",
       "type": "object"
     },
-    "contracts__parser_output__LearningOutcome": {
+    "backend__contracts__parser_output__LearningOutcome": {
       "additionalProperties": false,
       "description": "Результат обучения «знать/уметь/владеть».\n\nlocal_id назначает парсер (уникален в файле, «LO-001») — ключ для связей:\nв источнике у результатов кода нет, кроме вариантов вида «ПКП-УНК-03.01. У-1».\nkind=None — тип результата не удалось определить по данным источника.",
       "properties": {
@@ -3338,7 +3325,7 @@
       "title": "LearningOutcome",
       "type": "object"
     },
-    "contracts__parser_output__Relation": {
+    "backend__contracts__parser_output__Relation": {
       "additionalProperties": false,
       "description": "Связь между сущностями. Ссылка на сущность — по естественному ключу:\ndiscipline/curriculum_item/course_topic — название, остальные — код.",
       "properties": {
@@ -3403,7 +3390,7 @@
       "title": "Relation",
       "type": "object"
     },
-    "contracts__parser_output__ScoreScaleItem": {
+    "backend__contracts__parser_output__ScoreScaleItem": {
       "additionalProperties": false,
       "description": "Балльная шкала: оценка СПбГУ × ECTS × критерии.",
       "properties": {

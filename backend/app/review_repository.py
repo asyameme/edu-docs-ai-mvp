@@ -119,7 +119,6 @@ class ReviewRepository:
                     files.append(
                         {
                             "document_id": str(document["id"]),
-                            "program_id": str(program_id),
                             "sha256": document["sha256"],
                             "parsed": result["output"],
                         }

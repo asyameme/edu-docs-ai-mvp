@@ -10,7 +10,7 @@ from copy import deepcopy
 from uuid import UUID, uuid5
 
 from app.domain import SnapshotV2
-from contracts.parser_document import parse_output
+from app.parser_document import parse_output
 
 GROUPS = {
     "disciplines": ("discipline", "name"),

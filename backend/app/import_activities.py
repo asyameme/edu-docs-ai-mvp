@@ -12,8 +12,8 @@ from temporalio.exceptions import ApplicationError
 from app.domain import Contract
 from app.import_repository import ImportRepository
 from app.parser_adapter import to_snapshot
+from app.parser_document import has_document_data, parse_output
 from app.repository import Repository
-from contracts.parser_document import has_document_data, parse_output
 
 
 class ImportActivities:

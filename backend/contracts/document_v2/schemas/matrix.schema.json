@@ -167,7 +167,7 @@
     },
     "SourceRef": {
       "additionalProperties": false,
-      "description": "Указатель на место в исходном DOCX; текст фрагмента хранится отдельно.\n\nparagraph_index нумеруется с 1 по порядку абзацев тела документа, включая\nабзацы в таблицах, без колонтитулов и сносок. table/row/col также нумеруются\nс 1; row=1 — шапка таблицы. Указатель относится к версии файла, связанной\nс записью парсера.",
+      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
       "properties": {
         "file": {
           "title": "File",
@@ -184,19 +184,6 @@
           ],
           "default": null,
           "title": "Section"
-        },
-        "paragraph_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Paragraph Index"
         },
         "table": {
           "anyOf": [
@@ -260,19 +247,6 @@
           "default": null,
           "title": "Section"
         },
-        "paragraph_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Paragraph Index"
-        },
         "table": {
           "anyOf": [
             {
@@ -308,6 +282,19 @@
           ],
           "default": null,
           "title": "Col"
+        },
+        "paragraph_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paragraph Index"
         },
         "sheet_name": {
           "anyOf": [

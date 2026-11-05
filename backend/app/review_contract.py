@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import AnyHttpUrl, Field, JsonValue, field_validator, model_validator
 
 from app.domain import Contract, Entity, RelationV2, Snapshot, SnapshotV2
-from contracts.parser_document import ParserDocument, parse_output
+from app.parser_document import ParserDocument, parse_output
 
 
 class Mutation(Contract):
@@ -201,7 +201,6 @@ class ConfirmCreate(Contract):
 
 class AnalysisDocument(Contract):
     document_id: UUID
-    program_id: UUID | None = None
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     parsed: ParserDocument
     original_url: AnyHttpUrl | None = None
@@ -218,8 +217,6 @@ class AnalysisDocument(Contract):
         return self
 
     def check_program(self, program_id: UUID) -> None:
-        if self.program_id is not None and self.program_id != program_id:
-            raise ValueError("Документ принадлежит другой программе")
         # В прежнем meta.program_id встречается UUID, в документах — академический код.
         try:
             legacy_id = UUID(self.parsed.meta.program_id or "")

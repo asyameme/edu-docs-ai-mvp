@@ -3,45 +3,38 @@
 Четыре части: шапка (meta), сущности с обязательным source_ref, связи
 и проблемы разбора (parse_issues).
 """
-
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DocType = Literal[
-    "RPD",  # рабочая программа дисциплины
-    "RPP",  # рабочая программа практики
-    "CURRICULUM",  # учебный план (docx)
-    "MATRIX",  # матрица компетенций (формат уточняется)
-    "CHARACTERISTIC",  # общая характеристика программы
-    "CKMV",  # ЦКМВ
+    "RPD",            # рабочая программа дисциплины
+    "RPP",            # рабочая программа практики
+    "CURRICULUM",     # учебный план (docx)
+    "MATRIX",         # матрица компетенций (формат уточняется)
+    "CHARACTERISTIC", # общая характеристика программы
+    "CKMV",           # ЦКМВ
 ]
 Severity = Literal["error", "warning", "info"]
 IssueCategory = Literal[
-    "not_found",  # ожидаемый раздел/таблица не найдены
-    "unparsed_row",  # строка не распознана конфигом
-    "empty_cell",  # пустая обязательная ячейка
-    "unexpected_format",  # структура отличается от конфига шаблона
-    "ambiguous",  # значение допускает несколько прочтений
-    "manual_review",  # конфиг не покрыл поле — кандидат на LLM-fallback
+    "not_found",         # ожидаемый раздел/таблица не найдены
+    "unparsed_row",      # строка не распознана конфигом
+    "empty_cell",        # пустая обязательная ячейка
+    "unexpected_format", # структура отличается от конфига шаблона
+    "ambiguous",         # значение допускает несколько прочтений
+    "manual_review",     # конфиг не покрыл поле — кандидат на LLM-fallback
 ]
 EntityName = Literal[
-    "program",
-    "discipline",
-    "competency",
-    "indicator",
-    "learning_outcome",
-    "assessment_tool",
-    "curriculum_item",
-    "course_topic",
+    "program", "discipline", "competency", "indicator", "learning_outcome",
+    "assessment_tool", "curriculum_item", "course_topic",
 ]
 RelationKind = Literal[
-    "формирует",  # дисциплина → компетенция
-    "имеет",  # компетенция → индикатор
-    "проверяется",  # индикатор → оценочное средство
-    "включает",  # компетенция → результат обучения
+    "формирует",   # дисциплина → компетенция
+    "имеет",       # компетенция → индикатор
+    "проверяется", # индикатор → оценочное средство
+    "включает",    # компетенция → результат обучения
 ]
 
 
@@ -59,11 +52,11 @@ class SourceRef(ContractModel):
     """
 
     file: str
-    section: str | None = None
-    paragraph_index: int | None = Field(default=None, ge=1, strict=True)
-    table: int | None = None
-    row: int | None = None
-    col: int | None = None
+    section: Optional[str] = None
+    paragraph_index: Optional[int] = Field(default=None, ge=1)
+    table: Optional[int] = None
+    row: Optional[int] = None
+    col: Optional[int] = None
 
     @field_validator("file")
     @classmethod
@@ -80,21 +73,21 @@ class BaseEntity(ContractModel):
 
 
 class Program(BaseEntity):
-    name: str | None = None
-    level: Literal["бакалавриат", "магистратура", "специалитет", "аспирантура"] | None = None
-    direction_code: str | None = None  # «38.03.05»
-    education_standard: str | None = None  # «ОС СПбГУ BM.5829/23» или «ФГОС 38.03.05»
-    professional_standards: list[str] = []  # профкоды из Характеристики
+    name: Optional[str] = None
+    level: Optional[Literal["бакалавриат", "магистратура", "специалитет", "аспирантура"]] = None
+    direction_code: Optional[str] = None         # «38.03.05»
+    education_standard: Optional[str] = None     # «ОС СПбГУ BM.5829/23» или «ФГОС 38.03.05»
+    professional_standards: list[str] = []       # профкоды из Характеристики
 
 
 class Discipline(BaseEntity):
     name: str
     semesters: list[int]
-    credit_units: int = Field(ge=1)  # ЗЕТ;
+    credit_units: int = Field(ge=1)              # ЗЕТ; 
     hours_total: int = Field(ge=0)
-    hours_by_kind: dict[str, int]  # «лекции»: 62, «самостоятельная работа»: 82…
-    control_forms: list[str] = []  # «зачёт», «экзамен»
-    prerequisites: list[str] = []  # названия дисциплин из раздела 1.2
+    hours_by_kind: dict[str, int]                # «лекции»: 62, «самостоятельная работа»: 82…
+    control_forms: list[str] = []                # «зачёт», «экзамен»
+    prerequisites: list[str] = []                # названия дисциплин из раздела 1.2
 
     @field_validator("semesters")
     @classmethod
@@ -106,7 +99,7 @@ class Discipline(BaseEntity):
 
 
 class Competency(BaseEntity):
-    code: str  # УК-1, ОПК-1, ПКП-УНК-03, ПКА-1…
+    code: str                                    # УК-1, ОПК-1, ПКП-УНК-03, ПКА-1…
     formulation: str
 
     @field_validator("code")
@@ -118,9 +111,9 @@ class Competency(BaseEntity):
 
 
 class Indicator(BaseEntity):
-    code: str  # УК-1.1, ПКП-УНК-03.01…
+    code: str                                    # УК-1.1, ПКП-УНК-03.01…
     text: str
-    competency_code: str  # родительская компетенция в этом же файле
+    competency_code: str                         # родительская компетенция в этом же файле
 
 
 class LearningOutcome(BaseEntity):
@@ -133,8 +126,8 @@ class LearningOutcome(BaseEntity):
 
     local_id: str
     text: str
-    kind: Literal["знать", "уметь", "владеть"] | None = None
-    code: str | None = None
+    kind: Optional[Literal["знать", "уметь", "владеть"]] = None
+    code: Optional[str] = None
 
     @field_validator("local_id")
     @classmethod
@@ -145,7 +138,7 @@ class LearningOutcome(BaseEntity):
 
 
 class AssessmentTool(BaseEntity):
-    name: str  # «Контрольные работы», «Вопросы к экзамену»…
+    name: str                                    # «Контрольные работы», «Вопросы к экзамену»…
 
 
 class CurriculumItem(BaseEntity):
@@ -155,25 +148,25 @@ class CurriculumItem(BaseEntity):
     semester: int = Field(ge=1, le=8)
     credit_units: int = Field(ge=1)
     hours_total: int = Field(ge=0)
-    block: str  # «Блок 1», «Блок 3.1 — вариативная часть»…
+    block: str                                   # «Блок 1», «Блок 3.1 — вариативная часть»…
 
 
 class CourseTopic(BaseEntity):
     """Строка таблицы «Структура и содержание»: тема × вид занятий × часы."""
 
     topic: str
-    activity: str  # «лекции», «практические занятия», «по методическим материалам»…
+    activity: str                                # «лекции», «практические занятия», «по методическим материалам»…
     hours: int = Field(ge=0)
-    module: str | None = None  # «Модуль 1. Очерк теории чисел»
+    module: Optional[str] = None                 # «Модуль 1. Очерк теории чисел»
 
 
 class ScoreScaleItem(BaseEntity):
     """Балльная шкала: оценка СПбГУ × ECTS × критерии."""
 
     grade_spbu: str
-    grade_ects: str | None = None
-    points: str | None = None
-    criterion: str | None = None
+    grade_ects: Optional[str] = None
+    points: Optional[str] = None                 
+    criterion: Optional[str] = None
 
 
 class Relation(BaseEntity):
@@ -196,19 +189,20 @@ class Relation(BaseEntity):
 
 
 class ParseIssue(ContractModel):
+
     category: IssueCategory
     message: str
     severity: Severity = "warning"
-    source_ref: SourceRef | None = None
+    source_ref: Optional[SourceRef] = None
 
 
 class ParserMeta(ContractModel):
     schema_version: Literal[1] = 1
     doc_type: DocType
     file_name: str
-    file_hash: str  # sha256 исходного файла
-    parser_config: str  # «rpd_spbu_v1» — каким конфигом извлекали
-    program_id: str | None = None  # назначает конвейер при загрузке пакета
+    file_hash: str                               # sha256 исходного файла
+    parser_config: str                           # «rpd_spbu_v1» — каким конфигом извлекали
+    program_id: Optional[str] = None             # назначает конвейер при загрузке пакета
 
     @field_validator("file_hash")
     @classmethod
@@ -222,7 +216,7 @@ class ParserOutput(ContractModel):
     """Весь JSON, который парсер отдаёт на один входной файл."""
 
     meta: ParserMeta
-    program: Program | None = None
+    program: Optional[Program] = None
     disciplines: list[Discipline] = []
     competencies: list[Competency] = []
     indicators: list[Indicator] = []
@@ -235,7 +229,7 @@ class ParserOutput(ContractModel):
     parse_issues: list[ParseIssue] = []
 
     @model_validator(mode="after")
-    def _indicator_parent_in_file(self) -> ParserOutput:
+    def _indicator_parent_in_file(self) -> "ParserOutput":
         known = {c.code for c in self.competencies}
         for ind in self.indicators:
             if ind.competency_code not in known:

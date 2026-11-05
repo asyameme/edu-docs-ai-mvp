@@ -1,9 +1,7 @@
+
 from __future__ import annotations
-
 from typing import Any
-
 from pydantic import BaseModel, ConfigDict, Field
-
 from .models import SourceRef
 
 
@@ -91,6 +89,7 @@ class EducationalGraph(BaseModel):
                 existing.attributes[key] = value
             elif existing.attributes[key] is None and value is not None:
                 existing.attributes[key] = value
+
 
     def add_edge(self, edge: GraphEdge) -> None:
         self.edges.append(edge)

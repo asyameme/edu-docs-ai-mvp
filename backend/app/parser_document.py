@@ -1,9 +1,8 @@
 """Чтение версий результата без привязки к реализации извлечения документов."""
 
+from backend.contracts.document_v2.models import DocumentOutput, parse_document
+from backend.contracts.parser_output import ParserOutput
 from pydantic import BaseModel
-
-from .document_v2.models import DocumentOutput, parse_document
-from .parser_output import ParserOutput
 
 ParserDocument = ParserOutput | DocumentOutput
 
@@ -16,6 +15,13 @@ def parse_output(value) -> ParserDocument:
     version = value["meta"].get("schema_version", 1)
     if type(version) is not int or version not in (1, 2):
         raise ValueError("Неподдерживаемая версия результата документа")
+    # JSON Schema матрицы допускает целые 0/1; bool не является числом ячейки.
+    # Проверка границы Backend не меняет общую модель команды.
+    if version == 2 and value["meta"].get("doc_type") == "MATRIX":
+        cells = value.get("matrix_cells", [])
+        for cell in cells if isinstance(cells, list) else []:
+            if isinstance(cell, dict) and type(cell.get("value")) is not int:
+                raise ValueError("Ячейка матрицы должна содержать целое 0 или 1")
     return ParserOutput.model_validate(value) if version == 1 else parse_document(value)
 
 

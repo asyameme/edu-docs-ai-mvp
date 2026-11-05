@@ -1,21 +1,2 @@
-"""Общие специализированные модели результатов документов V2."""
-
-from .models import (
-    CharacteristicOutput,
-    CKMVOutput,
-    CurriculumOutput,
-    MatrixOutput,
-    RPDOutput,
-    RPPOutput,
-    parse_document,
-)
-
-__all__ = [
-    "CharacteristicOutput",
-    "CKMVOutput",
-    "CurriculumOutput",
-    "MatrixOutput",
-    "RPDOutput",
-    "RPPOutput",
-    "parse_document",
-]
+"""Специализированные контракты v2; ParserOutput v1 не изменён."""
+from .models import (RPDOutput, RPPOutput, CurriculumOutput, MatrixOutput, CKMVOutput, CharacteristicOutput, parse_document)
