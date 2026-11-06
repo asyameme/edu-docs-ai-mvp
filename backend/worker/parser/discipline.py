@@ -11,9 +11,10 @@ from .common import (
     parse_workload_number,
     read_section,
 )
-from backend.contracts.parser_output import (
+from backend.contracts.document_v2.models import (
     Discipline,
     ParseIssue,
+    SemesterWorkload,
     SourceRef,
 )
 
@@ -1436,11 +1437,11 @@ def extract_practice_workload(document, file_name):
 
 
 def build_practice_discipline(document, file_name, title_parts):
-    """Собрать практику с явно указанной общей нагрузкой."""
+    """Собрать практику и прочитанную посеместровую нагрузку."""
     records, issues = extract_practice_workload(document, file_name)
 
     if not records:
-        return None, issues
+        return None, [], issues
 
     totals = [
         item for item in records
@@ -1458,7 +1459,7 @@ def build_practice_discipline(document, file_name, title_parts):
             message="Не удалось однозначно прочитать общий объем практики",
             source_ref=ref,
         ))
-        return None, issues
+        return None, [], issues
 
     total = totals[0]
 
@@ -1469,7 +1470,7 @@ def build_practice_discipline(document, file_name, title_parts):
         value = total[field]
 
         if value is None:
-            return None, issues
+            return None, [], issues
 
         if value < minimum or value != value.to_integral_value():
             issues.append(ParseIssue(
@@ -1480,7 +1481,7 @@ def build_practice_discipline(document, file_name, title_parts):
                 ),
                 source_ref=total["source_ref"],
             ))
-            return None, issues
+            return None, [], issues
 
     semesters = [item["semester"] for item in periods]
 
@@ -1497,7 +1498,7 @@ def build_practice_discipline(document, file_name, title_parts):
             ),
             source_ref=ref,
         ))
-        return None, issues
+        return None, [], issues
 
     parts = [
         " ".join(text.split())
@@ -1532,15 +1533,24 @@ def build_practice_discipline(document, file_name, title_parts):
             message="Не удалось прочитать название практики с титула",
             source_ref=SourceRef(file=file_name, section="титул"),
         ))
-        return None, issues
+        return None, [], issues
 
+    semester_workload = []
     for item in periods:
-        issues.append(ParseIssue(
-            category="manual_review",
-            message=(
-                "Посеместровая нагрузка прочитана, но в контракте нет "
-                "отдельных полей для ее передачи: " + item["raw"]
-            ),
+        credits, hours = item["credit_units"], item["hours_total"]
+        if credits is None or hours is None:
+            continue  # Причина уже записана при извлечении.
+        if credits != credits.to_integral_value() or hours != hours.to_integral_value():
+            issues.append(ParseIssue(
+                category="unexpected_format",
+                message="В контракте v2 нужны целые ЗЕТ и часы: " + item["raw"],
+                source_ref=item["source_ref"],
+            ))
+            continue
+        semester_workload.append(SemesterWorkload(
+            semester=item["semester"],
+            credit_units=int(credits),
+            hours_total=int(hours),
             source_ref=item["source_ref"],
         ))
 
@@ -1555,7 +1565,7 @@ def build_practice_discipline(document, file_name, title_parts):
         }),
     )
 
-    return discipline, issues
+    return discipline, semester_workload, issues
 
 
 def extract_practice_control_forms(document, file_name):

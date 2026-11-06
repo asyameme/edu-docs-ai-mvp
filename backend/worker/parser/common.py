@@ -7,11 +7,7 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from backend.contracts.parser_output import (
-    ParseIssue,
-    ParserOutput,
-    SourceRef,
-)
+from backend.contracts.document_v2.models import ParseIssue, SourceRef
 
 
 def normalize(text):
@@ -113,26 +109,20 @@ def finalize_output(output, document):
         anchors[key] = indices.get(paragraph)
         return anchors[key]
 
-    records = []
-    if output.program is not None:
-        records.append(output.program)
-    for name in (
-        "disciplines", "competencies", "indicators", "learning_outcomes",
-        "assessment_tools", "curriculum_items", "course_content", "score_scale",
-        "relations", "parse_issues",
-    ):
-        records.extend(getattr(output, name))
-    for record in records:
-        ref = record.source_ref
-        if ref is None:
-            continue
-        if ref.table is not None:
-            ref.paragraph_index = table_anchor(ref)
-        elif ref.paragraph_index is None and ref.section in headings:
-            candidates = headings[ref.section]
-            if len(candidates) == 1:
-                ref.paragraph_index = indices[candidates[0]]
-    return ParserOutput.model_validate(output.model_dump())
+    for name in type(output).model_fields:
+        value = getattr(output, name)
+        records = value if isinstance(value, list) else [value]
+        for record in records:
+            ref = getattr(record, "source_ref", None)
+            if ref is None:
+                continue
+            if ref.table is not None:
+                ref.paragraph_index = table_anchor(ref)
+            elif ref.paragraph_index is None and ref.section in headings:
+                candidates = headings[ref.section]
+                if len(candidates) == 1:
+                    ref.paragraph_index = indices[candidates[0]]
+    return type(output).model_validate(output.model_dump())
 
 
 def read_section(

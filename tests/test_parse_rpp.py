@@ -9,9 +9,8 @@ from backend.worker.parser.assessment import extract_practice_score_scale
 from backend.worker.parser.content import extract_course_content
 from backend.worker.parser.discipline import (
     extract_practice_control_forms,
-    extract_practice_workload,
 )
-from backend.contracts.parser_output import ParserOutput
+from backend.contracts.document_v2.models import RPPOutput
 from backend.worker.parser.parse_rpp import parse_rpp
 
 
@@ -149,10 +148,16 @@ class TestRppParser(unittest.TestCase):
     def test_original_load_forms_and_scale(self):
         output = self.original
         self.assertEqual(output.meta.doc_type, "RPP")
-        self.assertEqual(output.meta.parser_config, "rpp_docx_v3")
+        self.assertEqual(output.meta.schema_version, 2)
+        self.assertEqual(output.meta.parser_config, "rpp_docx_v4")
         practice = output.disciplines[0]
         self.assertEqual((practice.credit_units, practice.hours_total), (18, 648))
         self.assertEqual(practice.semesters, [2, 3, 4, 5])
+        self.assertEqual(
+            [(item.semester, item.credit_units, item.hours_total)
+             for item in output.semester_workload],
+            [(2, 3, 108), (3, 3, 108), (4, 6, 216), (5, 6, 216)],
+        )
         self.assertEqual(practice.control_forms, ["зачет"])
         self.assertEqual(len(output.score_scale), 6)
         self.assertEqual(len(output.competencies), 33)
@@ -161,21 +166,15 @@ class TestRppParser(unittest.TestCase):
     def test_corrupted_load_is_not_corrected(self):
         path = ROOT / "tests/stage_1/case_3/РПП.docx"
         output = parse_rpp(path)
-        records, _ = extract_practice_workload(Document(path), path.name)
-        periods = [item for item in records if item["scope"] == "semester"]
         self.assertEqual(output.disciplines[0].hours_total, 612)
         self.assertEqual(output.disciplines[0].credit_units, 18)
-        self.assertEqual(sum(item["hours_total"] for item in periods), 648)
-        self.assertEqual(sum(item["credit_units"] for item in periods), 16)
-        self.assertTrue(any(
-            issue.category == "manual_review" and "Семестр 4: 4" in issue.message
-            for issue in output.parse_issues
-        ))
+        self.assertEqual(sum(item.hours_total for item in output.semester_workload), 648)
+        self.assertEqual(sum(item.credit_units for item in output.semester_workload), 16)
 
     def test_round_trip_and_relation_integrity(self):
         output = self.original
         self.assertEqual(
-            ParserOutput.model_validate_json(output.model_dump_json()), output,
+            RPPOutput.model_validate_json(output.model_dump_json()), output,
         )
         keys = {
             "discipline": {item.name for item in output.disciplines},
@@ -192,15 +191,9 @@ class TestRppParser(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "РПП"):
             parse_rpp(ROOT / "tests/originals/РПД_матанализ1.docx")
 
-    def test_curriculum_reference_does_not_invent_load_or_parent(self):
-        output = self.parse_document(practice_document(workload="reference"))
-        self.assertEqual(output.disciplines, [])
-        self.assertEqual(output.course_content, [])
-        self.assertTrue(any("отсылает к УП" in i.message for i in output.parse_issues))
-        self.assertTrue(any(
-            "Вводный инструктаж" in i.message and "не создана" in i.message
-            for i in output.parse_issues
-        ))
+    def test_curriculum_reference_explains_missing_required_load(self):
+        with self.assertRaisesRegex(ValueError, "отсылает к УП"):
+            self.parse_document(practice_document(workload="reference"))
 
     def test_content_keeps_exact_hours_and_rejects_ranges(self):
         document = practice_document()
@@ -310,12 +303,8 @@ class TestRppParser(unittest.TestCase):
         ))
 
     def test_fractional_total_is_not_rounded_for_integer_model(self):
-        output = self.parse_document(practice_document(workload="fractional"))
-        self.assertEqual(output.disciplines, [])
-        self.assertTrue(any(
-            issue.category == "unexpected_format" and "3.5" in issue.message
-            for issue in output.parse_issues
-        ))
+        with self.assertRaisesRegex(ValueError, r"credit_units=3\.5"):
+            self.parse_document(practice_document(workload="fractional"))
 
 
 if __name__ == "__main__":

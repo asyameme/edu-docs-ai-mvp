@@ -8,8 +8,8 @@ from .common import (
     normalize,
     read_section,
 )
-from backend.contracts.parser_output import (
-    AssessmentTool,
+from backend.contracts.document_v2.models import (
+    AssessmentToolV2,
     ParseIssue,
     Relation,
     ScoreScaleItem,
@@ -237,7 +237,7 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
                 name = _practice_assessment_name(block.text)
                 if name:
                     if name not in tools_by_name:
-                        tool = AssessmentTool(name=name, source_ref=table_ref)
+                        tool = AssessmentToolV2(name=name, source_ref=table_ref)
                         tools_by_name[name] = tool
                         tools.append(tool)
                     prose_refs.setdefault(name, table_ref)
@@ -399,7 +399,7 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
 
             for name in names:
                 if name not in tools_by_name:
-                    tool = AssessmentTool(
+                    tool = AssessmentToolV2(
                         name=name,
                         source_ref=tool_ref,
                     )
@@ -487,9 +487,8 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
     elif details_ref is not None:
         report(
             "manual_review",
-            "тексты заданий и вспомогательные таблицы пока "
-            "не перенесены в JSON; у AssessmentTool есть "
-            "только name и source_ref",
+            "тексты заданий и вспомогательные таблицы требуют "
+            "отдельного разбора",
             details_ref,
             severity="info",
         )

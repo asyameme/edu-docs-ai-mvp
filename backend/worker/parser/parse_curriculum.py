@@ -14,8 +14,8 @@ from docx.text.paragraph import Paragraph
 from .common import (
     finalize_output, heading_level, normalize, parse_workload_number, read_section,
 )
-from backend.contracts.parser_output import (
-    Competency, CurriculumItem, ParseIssue, ParserMeta, ParserOutput,
+from backend.contracts.document_v2.models import (
+    Competency, CurriculumItem, CurriculumMeta, CurriculumOutput, ParseIssue,
     Relation, SourceRef,
 )
 from .results import split_competency
@@ -431,7 +431,7 @@ def extract_curriculum_items(output, document):
             )
 
 
-def parse_curriculum(file_path):
+def parse_curriculum(file_path, *, program_id: str | None = None) -> CurriculumOutput:
     """Прочитать Word-план, не исправляя значения и не выбирая траекторию."""
     file_path = Path(file_path)
     if file_path.suffix.lower() != ".docx":
@@ -449,9 +449,9 @@ def parse_curriculum(file_path):
     title = re.sub(r"\s+", "", "".join(title_parts)).casefold()
     if "учебныйплан" not in title or "рабочаяпрограмма" in title:
         raise ValueError("Не удалось однозначно распознать учебный план по титулу")
-    output = ParserOutput(meta=ParserMeta(
-        doc_type="CURRICULUM", file_name=file_path.name,
-        file_hash=sha256(raw).hexdigest(), parser_config="curriculum_docx_v2",
+    output = CurriculumOutput(meta=CurriculumMeta(
+        file_name=file_path.name, file_hash=sha256(raw).hexdigest(),
+        parser_config="curriculum_docx_v3", program_id=program_id,
     ))
     extract_curriculum_competencies(output, document)
     extract_curriculum_items(output, document)
@@ -462,15 +462,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("-o", "--output", type=Path, required=True)
+    parser.add_argument("--program-id")
     args = parser.parse_args()
     if args.input.resolve() == args.output.resolve():
         parser.error("Выходной файл должен отличаться от исходного")
     try:
-        output = parse_curriculum(args.input)
+        output = parse_curriculum(args.input, program_id=args.program_id)
     except (ValueError, OSError) as error:
         parser.error(str(error))
     text = output.model_dump_json(indent=2)
-    ParserOutput.model_validate_json(text)
+    CurriculumOutput.model_validate_json(text)
     args.output.write_text(text, encoding="utf-8")
     print(
         f"Компетенций: {len(output.competencies)}. "

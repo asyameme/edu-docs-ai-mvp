@@ -18,7 +18,7 @@ from .discipline import (
     extract_practice_control_forms,
     extract_prerequisites,
 )
-from backend.contracts.parser_output import ParseIssue, ParserMeta, ParserOutput, SourceRef
+from backend.contracts.document_v2.models import ParseIssue, RPPMeta, RPPOutput, SourceRef
 from .results import extract_practice_competencies, extract_results_into
 
 
@@ -49,58 +49,26 @@ def _results_roots(document):
 
 def finalize_rpp(output, document, file_name):
     """Добавить содержание, формы контроля и оценочные материалы."""
-    discipline = output.disciplines[0] if output.disciplines else None
+    discipline = output.disciplines[0]
 
     forms, issues = extract_practice_control_forms(document, file_name)
     output.parse_issues.extend(issues)
-    if discipline is not None:
-        discipline.control_forms = forms
-    elif forms:
-        output.parse_issues.append(ParseIssue(
-            category="manual_review",
-            message=(
-                "Формы контроля прочитаны, но практика с нагрузкой "
-                "не создана: " + "; ".join(forms)
-            ),
-            source_ref=SourceRef(file=file_name),
-        ))
+    discipline.control_forms = forms
 
     prerequisites, issues = extract_prerequisites(
         document, file_name, doc_type="RPP",
     )
     output.parse_issues.extend(issues)
-    if discipline is not None:
-        discipline.prerequisites = [item["name"] for item in prerequisites]
-    elif prerequisites:
-        output.parse_issues.append(ParseIssue(
-            category="manual_review",
-            message=(
-                "Пререквизиты прочитаны, но практика с нагрузкой не создана: "
-                + "; ".join(item["name"] for item in prerequisites)
-            ),
-            source_ref=prerequisites[0]["source_ref"],
-        ))
+    discipline.prerequisites = [item["name"] for item in prerequisites]
 
     topics, issues = extract_course_content(
         document,
         file_name,
-        semesters=discipline.semesters if discipline is not None else None,
+        semesters=discipline.semesters,
         doc_type="RPP",
     )
     output.parse_issues.extend(issues)
-    if discipline is not None:
-        output.course_content.extend(topics)
-    else:
-        for topic in topics:
-            output.parse_issues.append(ParseIssue(
-                category="manual_review",
-                message=(
-                    "Тема прочитана, но практика с нагрузкой не создана; "
-                    f"в course_content не передана: {topic.topic}; "
-                    f"{topic.activity}; {topic.hours} ч."
-                ),
-                source_ref=topic.source_ref,
-            ))
+    output.course_content.extend(topics)
 
     tools, relations, issues = extract_assessment_tools(
         document, file_name, output.indicators, doc_type="RPP",
@@ -115,7 +83,7 @@ def finalize_rpp(output, document, file_name):
     return finalize_output(output, document)
 
 
-def parse_rpp(file_path):
+def parse_rpp(file_path, *, program_id: str | None = None) -> RPPOutput:
     file_path = Path(file_path)
     if file_path.suffix.lower() != ".docx":
         raise ValueError("Ожидается файл DOCX")
@@ -140,32 +108,37 @@ def parse_rpp(file_path):
     ):
         raise ValueError("Не удалось однозначно распознать РПП по титулу")
 
-    output = ParserOutput(meta=ParserMeta(
-        doc_type="RPP",
-        file_name=file_path.name,
-        file_hash=sha256(raw).hexdigest(),
-        parser_config="rpp_docx_v3",
-    ))
+    discipline, semester_workload, issues = build_practice_discipline(
+        document, file_path.name, title_parts,
+    )
+    if discipline is None or not semester_workload:
+        details = "; ".join(issue.message for issue in issues)
+        raise ValueError(
+            f"Для РПП v2 нужны общая и посеместровая нагрузки. {details}".strip()
+        )
+
+    output = RPPOutput(
+        meta=RPPMeta(
+            file_name=file_path.name,
+            file_hash=sha256(raw).hexdigest(),
+            parser_config="rpp_docx_v4",
+            program_id=program_id,
+        ),
+        disciplines=[discipline],
+        semester_workload=semester_workload,
+        parse_issues=issues,
+    )
     output.parse_issues.append(ParseIssue(
         category="manual_review",
         severity="info",
         message=(
-            "Разбор РПП поддерживает общую нагрузку, перечни и таблицы "
+            "Разбор РПП поддерживает общую и посеместровую нагрузку, перечни и таблицы "
             "компетенций, результаты обучения, табличное содержание, "
             "формы контроля, оценочные средства и шкалы. "
-            "Диапазоны часов, текстовые этапы без часов и поля, "
-            "отсутствующие в контракте, требуют проверки. "
-            "Посеместровая нагрузка пока передается в manual_review."
+            "Диапазоны часов и текстовые этапы требуют отдельного разбора."
         ),
         source_ref=SourceRef(file=file_path.name),
     ))
-
-    discipline, issues = build_practice_discipline(
-        document, file_path.name, title_parts,
-    )
-    output.parse_issues.extend(issues)
-    if discipline is not None:
-        output.disciplines.append(discipline)
 
     roots = _results_roots(document)
 
@@ -187,17 +160,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path)
     parser.add_argument("-o", "--output", type=Path, required=True)
+    parser.add_argument("--program-id")
     args = parser.parse_args()
     if args.input.resolve() == args.output.resolve():
         parser.error("Выходной файл должен отличаться от исходного")
 
     try:
-        output = parse_rpp(args.input)
+        output = parse_rpp(args.input, program_id=args.program_id)
     except (ValueError, OSError) as error:
         parser.error(str(error))
 
     text = output.model_dump_json(indent=2)
-    ParserOutput.model_validate_json(text)
+    RPPOutput.model_validate_json(text)
     args.output.write_text(text, encoding="utf-8")
     print(
         f"Практик: {len(output.disciplines)}. "

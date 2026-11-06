@@ -2,18 +2,19 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from backend.contracts.parser_output import ParserOutput
+from backend.contracts.document_v2.models import RPDOutput
 from backend.worker.parser.parse_rpd import parse_rpd
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PROGRAM_ID = "26/5003/1"
 
 
 class TestRpdParser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs = {
-            name: parse_rpd(ROOT / "tests" / "originals" / name)
+            name: parse_rpd(ROOT / "tests" / "originals" / name, program_id=PROGRAM_ID)
             for name in (
                 "РПД_матанализ1.docx",
                 "РПД_БД.docx",
@@ -45,10 +46,12 @@ class TestRpdParser(unittest.TestCase):
     def test_json_round_trip(self):
         for name, output in self.outputs.items():
             with self.subTest(file=name):
-                restored = ParserOutput.model_validate_json(
+                restored = RPDOutput.model_validate_json(
                     output.model_dump_json()
                 )
                 self.assertEqual(restored, output)
+                self.assertEqual(restored.meta.schema_version, 2)
+                self.assertEqual(restored.meta.program_id, PROGRAM_ID)
 
     def test_entrypoint_uses_shared_modules(self):
         from backend.worker.parser import assessment, common, content, discipline, results
@@ -65,7 +68,8 @@ class TestRpdParser(unittest.TestCase):
 
     def test_changed_workload_is_preserved(self):
         output = parse_rpd(
-            ROOT / "tests/stage_1/case_1/РПД_матанализ1.docx"
+            ROOT / "tests/stage_1/case_1/РПД_матанализ1.docx",
+            program_id=PROGRAM_ID,
         )
         discipline = output.disciplines[0]
 
@@ -75,7 +79,8 @@ class TestRpdParser(unittest.TestCase):
 
     def test_changed_competencies_are_preserved(self):
         output = parse_rpd(
-            ROOT / "tests/stage_1/case_4/РПД_матанализ1.docx"
+            ROOT / "tests/stage_1/case_4/РПД_матанализ1.docx",
+            program_id=PROGRAM_ID,
         )
         codes = Counter(item.code for item in output.competencies)
         indicators = {item.code for item in output.indicators}

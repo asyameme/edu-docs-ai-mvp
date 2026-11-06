@@ -9,7 +9,7 @@ from .common import (
     parse_workload_number,
     read_section,
 )
-from backend.contracts.parser_output import (
+from backend.contracts.document_v2.models import (
     CourseTopic,
     ParseIssue,
 )

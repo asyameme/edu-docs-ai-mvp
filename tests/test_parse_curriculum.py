@@ -6,7 +6,7 @@ from pathlib import Path
 
 from docx import Document
 
-from backend.contracts.parser_output import ParserOutput
+from backend.contracts.document_v2.models import CurriculumOutput
 from backend.worker.parser.parse_curriculum import parse_curriculum
 
 
@@ -106,9 +106,10 @@ class TestCurriculumParser(unittest.TestCase):
     def test_metadata_round_trip_and_relation_endpoints(self):
         output = self.output
         self.assertEqual(output.meta.doc_type, "CURRICULUM")
-        self.assertEqual(output.meta.parser_config, "curriculum_docx_v2")
+        self.assertEqual(output.meta.schema_version, 2)
+        self.assertEqual(output.meta.parser_config, "curriculum_docx_v3")
         self.assertEqual(output.meta.file_hash, sha256(self.original_path.read_bytes()).hexdigest())
-        self.assertEqual(ParserOutput.model_validate_json(output.model_dump_json()), output)
+        self.assertEqual(CurriculumOutput.model_validate_json(output.model_dump_json()), output)
         names = {item.discipline_name for item in output.curriculum_items}
         codes = {item.code for item in output.competencies}
         document = Document(self.original_path)

@@ -7,9 +7,10 @@ from docx import Document
 from docx.oxml.ns import qn
 from pydantic import ValidationError
 
-from backend.contracts import parser_output as contract
-from backend.contracts.parser_output import (
-    Competency, ParseIssue, ParserMeta, ParserOutput, SourceRef,
+from backend.contracts.document_v2 import models as contract
+from backend.contracts.document_v2.models import (
+    Competency, CurriculumMeta, CurriculumOutput, ParseIssue,
+    RPDOutput, RPPOutput, SourceRef, parse_document,
 )
 from backend.worker.parser.common import finalize_output, read_section
 from backend.worker.parser.parse_curriculum import parse_curriculum
@@ -37,9 +38,9 @@ def source_document():
 
 
 def output_with_ref(ref):
-    return ParserOutput(
-        meta=ParserMeta(
-            doc_type="RPD", file_name="example.docx", file_hash="a" * 64,
+    return CurriculumOutput(
+        meta=CurriculumMeta(
+            file_name="example.docx", file_hash="a" * 64,
             parser_config="source_ref_test",
         ),
         competencies=[Competency(code="УК-1", formulation="Описание", source_ref=ref)],
@@ -74,23 +75,25 @@ class TestParserContract(unittest.TestCase):
             "parse_rpd", "parse_rpp", "parse_curriculum",
         ):
             module = importlib.import_module("backend.worker.parser." + name)
-            for cls_name in ("ParserOutput", "ParseIssue", "SourceRef", "Competency"):
+            for cls_name in ("ParseIssue", "SourceRef", "Competency", "Discipline"):
                 if hasattr(module, cls_name):
                     self.assertIs(getattr(module, cls_name), getattr(contract, cls_name))
 
     def test_schema_matches_shared_models(self):
-        schema_path = ROOT / "backend/contracts/parser_contract.schema.json"
-        schema = json.loads(schema_path.read_text())
-        self.assertEqual(
-            without_annotations(schema),
-            without_annotations(ParserOutput.model_json_schema()),
-        )
+        schemas = ROOT / "backend/contracts/document_v2/schemas"
+        for name, model in (("rpd", RPDOutput), ("rpp", RPPOutput), ("curriculum", CurriculumOutput)):
+            with self.subTest(document=name):
+                schema = json.loads((schemas / f"{name}.schema.json").read_text())
+                self.assertEqual(
+                    without_annotations(schema),
+                    without_annotations(model.model_json_schema()),
+                )
 
-    def test_paragraph_index_is_optional_and_starts_at_one(self):
+    def test_paragraph_index_is_optional_and_cannot_be_negative(self):
         self.assertIsNone(SourceRef(file="example.docx").paragraph_index)
         self.assertEqual(SourceRef(file="example.docx", paragraph_index=1).paragraph_index, 1)
         with self.assertRaises(ValidationError):
-            SourceRef(file="example.docx", paragraph_index=0)
+            SourceRef(file="example.docx", paragraph_index=-1)
 
     def test_read_section_counts_cell_paragraphs_and_excludes_headers(self):
         document, _ = source_document()
@@ -110,7 +113,7 @@ class TestParserContract(unittest.TestCase):
         ref = output.competencies[0].source_ref
         self.assertEqual((ref.table, ref.row, ref.col, ref.paragraph_index), (1, 1, 2, 5))
         self.assertIsNone(output.parse_issues[0].source_ref.paragraph_index)
-        self.assertEqual(ParserOutput.model_validate_json(output.model_dump_json()), output)
+        self.assertEqual(CurriculumOutput.model_validate_json(output.model_dump_json()), output)
 
     def test_empty_cell_has_its_own_paragraph(self):
         document, table = source_document()
@@ -144,23 +147,26 @@ class TestParserContract(unittest.TestCase):
         ref = next(ref for block, ref in blocks if getattr(block, "text", None) == "Второй источник")
         self.assertEqual(ref.paragraph_index, 9)
 
-    def test_legacy_examples_are_accepted_by_new_contract(self):
-        for path in (ROOT / "backend/worker/parser/json_examples").glob("*.json"):
+    def test_examples_are_accepted_by_v2_contract(self):
+        examples = ROOT / "backend/worker/parser/json_examples_v2"
+        for name in ("rpd", "rpp", "curriculum"):
+            path = examples / f"{name}_v2.json"
             with self.subTest(path=path.name):
-                output = ParserOutput.model_validate_json(path.read_text())
-                self.assertEqual(ParserOutput.model_validate_json(output.model_dump_json()), output)
+                output = parse_document(json.loads(path.read_text()))
+                self.assertEqual(parse_document(output.model_dump(mode="json")), output)
 
     def test_all_three_parsers_return_resolvable_paragraph_indices(self):
         cases = (
-            ("РПД_матанализ1.docx", parse_rpd),
-            ("РПП.docx", parse_rpp),
-            ("UP.docx", parse_curriculum),
+            ("РПД_матанализ1.docx", parse_rpd, RPDOutput),
+            ("РПП.docx", parse_rpp, RPPOutput),
+            ("UP.docx", parse_curriculum, CurriculumOutput),
         )
-        for name, parser in cases:
+        for name, parser, model in cases:
             with self.subTest(file=name):
                 path = ROOT / "tests/originals" / name
-                output = parser(path)
-                self.assertIs(type(output), ParserOutput)
+                output = parser(path, program_id="26/5003/1")
+                self.assertIs(type(output), model)
+                self.assertEqual(parse_document(output.model_dump(mode="json")), output)
                 document = Document(path)
                 paragraphs = list(document.element.body.iter(qn("w:p")))
                 for field in type(output).model_fields:

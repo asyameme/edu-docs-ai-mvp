@@ -510,6 +510,19 @@
           "default": null,
           "title": "Section"
         },
+        "paragraph_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paragraph Index"
+        },
         "table": {
           "anyOf": [
             {

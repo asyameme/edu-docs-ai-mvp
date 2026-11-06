@@ -44,10 +44,10 @@ from .discipline import (
     organization_variant_rows,
     select_workload_variant,
 )
-from backend.contracts.parser_output import (
+from backend.contracts.document_v2.models import (
     ParseIssue,
-    ParserMeta,
-    ParserOutput,
+    RPDMeta,
+    RPDOutput,
     SourceRef,
 )
 from .results import (
@@ -119,11 +119,15 @@ def parse_rpd(
     file_path,
     workload_track=None,
     education_mode=None,
-):
+    *,
+    program_id: str,
+) -> RPDOutput:
     file_path = Path(file_path)
 
     if file_path.suffix.lower() != ".docx":
         raise ValueError("Ожидается файл DOCX")
+    if not isinstance(program_id, str) or not program_id.strip():
+        raise ValueError("Для РПД нужен непустой program_id")
 
     raw = file_path.read_bytes()
     document = Document(BytesIO(raw))
@@ -161,14 +165,25 @@ def parse_rpd(
             "однозначно распознанную РПД"
         )
 
-    # 2. Создаем результат и метаданные файла.
-    output = ParserOutput(
-        meta=ParserMeta(
-            doc_type="RPD",
+    discipline, discipline_issues = build_discipline(
+        document,
+        file_path.name,
+        title_parts,
+        workload_track=workload_track,
+        education_mode=education_mode,
+    )
+    if discipline is None:
+        details = "; ".join(issue.message for issue in discipline_issues)
+        raise ValueError(f"Для РПД v2 нужна дисциплина с нагрузкой. {details}".strip())
+
+    output = RPDOutput(
+        meta=RPDMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_docx_v3",
-        )
+            parser_config="rpd_docx_v4",
+            program_id=program_id,
+        ),
+        disciplines=[discipline],
     )
 
     output.parse_issues.append(
@@ -185,88 +200,35 @@ def parse_rpd(
         )
     )
 
-    # 3. Ищем раздел по заголовку, независимо от номера.
-    discipline, discipline_issues = build_discipline(
-        document,
-        file_path.name,
-        title_parts,
-        workload_track=workload_track,
-        education_mode=education_mode,
-    )
     output.parse_issues.extend(discipline_issues)
 
-    if discipline is not None:
-        output.disciplines.append(discipline)
     prerequisite_records, prerequisite_issues = extract_prerequisites(
         document,
         file_path.name,
     )
     output.parse_issues.extend(prerequisite_issues)
 
-    if output.disciplines:
-        discipline = output.disciplines[0]
-
-        discipline.prerequisites = [
-            record["name"]
-            for record in prerequisite_records
-        ]
-
-        sections = [
-            part.strip()
-            for part in (
-                discipline.source_ref.section or ""
-            ).split(";")
-            if part.strip()
-        ]
-
-        for record in prerequisite_records:
-            section = record["source_ref"].section
-
-            if section and section not in sections:
-                sections.append(section)
-
-        discipline.source_ref.section = "; ".join(
-            section
-            for section in sections
-            if section
-        )
-
-    elif prerequisite_records:
-        output.parse_issues.append(ParseIssue(
-            category="manual_review",
-            message=(
-                "Пререквизиты найдены, но Discipline не создан; "
-                "перечень не передан в JSON"
-            ),
-            source_ref=prerequisite_records[0]["source_ref"],
-        ))
-
-    selected_semesters = (
-        discipline.semesters
-        if discipline is not None
-        else None
-    )
+    discipline.prerequisites = [record["name"] for record in prerequisite_records]
+    sections = [
+        part.strip()
+        for part in (discipline.source_ref.section or "").split(";")
+        if part.strip()
+    ]
+    for record in prerequisite_records:
+        section = record["source_ref"].section
+        if section and section not in sections:
+            sections.append(section)
+    discipline.source_ref.section = "; ".join(sections)
 
     course_topics, content_issues = extract_course_content(
         document,
         file_path.name,
-        semesters=selected_semesters,
+        semesters=discipline.semesters,
     )
 
     output.parse_issues.extend(content_issues)
 
-    if output.disciplines:
-        output.course_content.extend(course_topics)
-
-    elif course_topics:
-        output.parse_issues.append(ParseIssue(
-            category="manual_review",
-            message=(
-                "Содержание прочитано, но Discipline не создан; "
-                "темы не переданы в JSON"
-            ),
-            source_ref=course_topics[0].source_ref,
-        ))
+    output.course_content.extend(course_topics)
 
     output = extract_results_into(
         output,
@@ -287,6 +249,7 @@ def main():
         required=True,
     )
     parser.add_argument("--workload-track")
+    parser.add_argument("--program-id", required=True)
     parser.add_argument(
         "--education-mode",
         choices=["очная", "заочная", "очно-заочная"],
@@ -303,14 +266,14 @@ def main():
             args.input,
             workload_track=args.workload_track,
             education_mode=args.education_mode,
+            program_id=args.program_id,
         )
     except (ValueError, OSError) as error:
         parser.error(str(error))
 
     json_text = result.model_dump_json(indent=2)
 
-    #проверяем, что сохраненный JSON читается по той же схеме
-    ParserOutput.model_validate_json(json_text)
+    RPDOutput.model_validate_json(json_text)
 
     args.output.write_text(json_text, encoding="utf-8")
 
