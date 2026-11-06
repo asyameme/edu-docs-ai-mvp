@@ -1,9 +1,11 @@
 """Предметные таблицы v0.5 и перенос проекций всех сохранённых версий."""
 
+from uuid import UUID, uuid5
+
 import sqlalchemy as sa
 from alembic import op
 
-from app.domain import Snapshot, SnapshotV2
+from app.domain import SnapshotData, SnapshotV2
 from app.relational_storage import insert_projection
 
 revision = "0004_relational"
@@ -56,8 +58,19 @@ def upgrade():
     raw = connection.connection.driver_connection
     with raw.cursor() as cur:
         for row in connection.execute(sa.text("SELECT id,snapshot FROM program_versions")):
-            model = SnapshotV2 if row.snapshot.get("schema_version") == 2 else Snapshot
-            insert_projection(cur, row.id, model.model_validate(row.snapshot))
+            if row.snapshot.get("schema_version") == 2:
+                snapshot = SnapshotV2.model_validate(row.snapshot)
+            else:
+                # Историческая миграция читает прежние поля; текущий API принимает только V2.
+                data = {k: v for k, v in row.snapshot.items() if k != "schema_version"}
+                snapshot = SnapshotData.model_validate(data)
+                refs = {ref.id: uuid5(UUID(str(row.id)), str(ref.id))
+                        for ref in snapshot.source_refs}
+                for ref in snapshot.source_refs:
+                    ref.id = refs[ref.id]
+                for item in [*snapshot.entities, *snapshot.relations]:
+                    item.source_ref_ids = [refs[key] for key in item.source_ref_ids]
+            insert_projection(cur, row.id, snapshot)
     op.execute("""
         ALTER TABLE source_links ENABLE TRIGGER immutable_links;
         ALTER TABLE source_refs ENABLE TRIGGER immutable_refs;

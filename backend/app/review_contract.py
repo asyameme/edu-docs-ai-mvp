@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import AnyHttpUrl, Field, JsonValue, field_validator, model_validator
 
-from app.domain import Contract, Entity, RelationV2, Snapshot, SnapshotV2
+from app.domain import Contract, Entity, RelationV2, SnapshotV2
 from app.parser_document import ParserDocument, parse_output
 
 
@@ -232,7 +232,7 @@ class PrepareRequest(Contract):
     job_id: UUID
     program_id: UUID
     version_id: UUID
-    base_snapshot: Snapshot | SnapshotV2
+    base_snapshot: SnapshotV2
     documents: list[AnalysisDocument] = Field(min_length=1)
 
     @model_validator(mode="after")

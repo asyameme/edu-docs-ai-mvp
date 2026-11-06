@@ -78,7 +78,7 @@ def test_v2_document_reaches_import_result_and_relational_history(kind):
                     ) == [0, 1]
 
 
-def test_mixed_package_keeps_both_versions_without_merging_observations():
+def test_v2_package_keeps_documents_without_merging_observations():
     original = b"contract-v2:" + json.dumps(payload(), ensure_ascii=False).encode()
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         program = http.post("/api/v1/programs", json={"name": "Смешанный пакет"}).json()
@@ -99,11 +99,13 @@ def test_mixed_package_keeps_both_versions_without_merging_observations():
         assert len([e for e in result.entities if e.kind == "discipline"]) == 2
 
 
-@pytest.mark.parametrize("invalid", ["boolean_cell", "unknown_version"])
+@pytest.mark.parametrize("invalid", ["boolean_cell", "unknown_version", "legacy_version"])
 def test_invalid_v2_result_is_rejected_before_saving_parsed_output(invalid):
     data = payload("MATRIX")
     if invalid == "boolean_cell":
         data["matrix_cells"][0]["value"] = False
+    elif invalid == "legacy_version":
+        data["meta"]["schema_version"] = 1
     else:
         data["meta"]["schema_version"] = 3
     original = b"contract-v2:" + json.dumps(data, ensure_ascii=False).encode()

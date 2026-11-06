@@ -113,9 +113,8 @@ def test_conflicting_documents_stay_separate_with_stable_scoped_ids():
     assert len({e["id"] for e in disciplines}) == 2
 
 
-def test_mixed_versions_keep_v1_fields_and_explicit_unknown_values():
-    old = payload(version=1)
-    old.pop("document_sections")
+def test_different_v2_types_keep_fields_and_explicit_unknown_values():
+    old = payload()
     old["disciplines"][0]["source_ref"].pop("paragraph_index")
     new = payload("RPP")
     new["practice_stages"][0]["semester"] = None

@@ -6,8 +6,9 @@ import pytest
 from document_cases import payload, prepare
 from pydantic import ValidationError
 
+from app.parser_adapter import to_snapshot
+from app.parser_document import parse_output
 from app.review_contract import AnalysisDocument
-from contracts.parser_output import ParserOutput
 
 
 def test_backend_schema_matches_models_without_regenerating_team_contracts():
@@ -22,10 +23,21 @@ def test_backend_schema_matches_models_without_regenerating_team_contracts():
         assert json.loads(path.read_text(encoding="utf-8")) == schema, str(path)
 
 
-def test_updated_v1_accepts_one_based_paragraph_coordinate():
+def test_parser_v1_is_rejected_at_every_backend_entry():
     data = payload(version=1)
     data.pop("document_sections")
-    assert ParserOutput.model_validate(data).disciplines[0].source_ref.paragraph_index == 1
+    with pytest.raises(ValueError):
+        parse_output(data)
+    with pytest.raises(ValidationError):
+        prepare(uuid4(), data)
+    with pytest.raises(ValueError):
+        to_snapshot(uuid4(), [{"document_id": uuid4(), "output": data}])
+
+
+def test_analysis_schema_offers_only_v2_document_models():
+    schema = AnalysisDocument.model_json_schema()
+    assert "ParserOutput" not in schema["$defs"]
+    assert len(schema["properties"]["parsed"]["anyOf"]) == 6
 
 
 def test_backend_accepts_zero_coordinate_allowed_by_main_v2_without_shifting_it():
@@ -68,8 +80,7 @@ def test_undocumented_program_id_in_document_envelope_is_rejected():
 
 
 def test_legacy_uuid_ownership_is_still_checked():
-    data = payload(version=1)
-    data.pop("document_sections")
+    data = payload()
     data["meta"]["program_id"] = str(uuid4())
     with pytest.raises(ValidationError):
         prepare(uuid4(), data)

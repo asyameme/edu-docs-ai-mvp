@@ -50,12 +50,14 @@ async def parse(file: UploadFile, request: Request):
     )
     return {
         "meta": {
-            "doc_type": "RPD",
+            "schema_version": 2,
+            "doc_type": "CURRICULUM" if content.startswith(b"empty") else "RPD",
             "file_name": file.filename,
             "file_hash": digest,
             "parser_config": "artificial-http-contract-fixture",
+            "program_id": "26/5003/1",
         },
-        "disciplines": disciplines,
+        **({"disciplines": disciplines} if disciplines else {}),
         "parse_issues": issues,
     }
 

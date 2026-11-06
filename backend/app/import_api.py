@@ -16,7 +16,7 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StoredUpload
 
-from app.domain import Snapshot, SnapshotV2
+from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.import_archive import read_package
 from app.import_repository import ImportRepository
@@ -129,9 +129,8 @@ async def retry_import(
 
 
 @router.get("/{job_id}/result")
-def read_result(program_id: UUID, job_id: UUID, repo: RepoDep) -> Snapshot | SnapshotV2:
+def read_result(program_id: UUID, job_id: UUID, repo: RepoDep) -> SnapshotV2:
     job = ImportRepository(repo.pool).read(program_id, job_id, include_output=True)
     if job["snapshot"] is None:
         raise DomainError(409, "Результат разбора ещё не готов или обработка завершилась ошибкой")
-    model = SnapshotV2 if job["snapshot"].get("schema_version") == 2 else Snapshot
-    return model.model_validate(job["snapshot"])
+    return SnapshotV2.model_validate(job["snapshot"])
