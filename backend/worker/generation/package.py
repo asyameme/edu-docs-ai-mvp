@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import PurePosixPath
-from typing import Literal, Sequence
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
-
+from typing import Literal
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 DocumentType = Literal["RPD", "RPP", "CURRICULUM", "CKMV", "CHARACTERISTIC"]
 _SUPPORTED_TYPES = {"RPD", "RPP", "CURRICULUM", "CKMV", "CHARACTERISTIC"}
@@ -46,7 +46,9 @@ def _validate_member(document: GeneratedDocx) -> None:
             if "[Content_Types].xml" not in names or "word/document.xml" not in names:
                 raise GenerationPackageError(f"{document.file_name}: файл не является DOCX")
     except BadZipFile as exc:
-        raise GenerationPackageError(f"{document.file_name}: файл не является корректным DOCX") from exc
+        raise GenerationPackageError(
+            f"{document.file_name}: файл не является корректным DOCX"
+        ) from exc
 
 
 def build_docx_package(documents: Sequence[GeneratedDocx]) -> bytes:

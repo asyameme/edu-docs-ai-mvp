@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from .docx_patch import DocxPatch, patch_docx_bytes
 from .package import DocumentType, GeneratedDocx, build_docx_package
