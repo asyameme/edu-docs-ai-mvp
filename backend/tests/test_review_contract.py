@@ -154,29 +154,21 @@ def test_ordinary_save_does_not_allow_review_or_confirmation_from_the_client():
         VersionCreate.model_validate(
             {
                 "expected_version_id": uuid4(),
-                "snapshot": {"schema_version": 2, "review": None},
+                "snapshot": {"schema_version": 2, "review": {
+                    "review_id": uuid4(), "import_job_id": uuid4(),
+                    "analysis_version_id": uuid4(),
+                }},
             }
         )
 
 
-def test_v1_saved_version_still_reads_with_its_original_format():
-    version = VersionRead.model_validate(
-        {
-            "id": uuid4(),
-            "program_id": uuid4(),
-            "number": 1,
-            "parent_version_id": None,
-            "restored_from_version_id": None,
-            "origin": "initial",
-            "created_at": datetime.now(UTC),
-            "snapshot": {"schema_version": 1},
-        }
-    )
-    assert version.snapshot.model_dump(mode="json") == {
-        "schema_version": 1,
-        "metadata": {},
-        "entities": [],
-        "relations": [],
-        "source_refs": [],
-        "document_ids": [],
-    }
+def test_v1_saved_version_is_not_a_supported_read_contract():
+    with pytest.raises(ValidationError):
+        VersionRead.model_validate(
+            {
+                "id": uuid4(), "program_id": uuid4(), "number": 1,
+                "parent_version_id": None, "restored_from_version_id": None,
+                "origin": "initial", "created_at": datetime.now(UTC),
+                "snapshot": {"schema_version": 1},
+            }
+        )

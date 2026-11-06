@@ -45,6 +45,9 @@ class Entity(Contract):
         "course_topic",
         "course_content",
         "score_scale",
+        "document_section",
+        "practice_stage",
+        "professional_role",
     ]
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source_ref_ids: list[UUID] = Field(default_factory=list)
@@ -72,8 +75,7 @@ class SnapshotSourceRef(Contract):
     locator: str = Field(min_length=1)
 
 
-class Snapshot(Contract):
-    schema_version: Literal[1] = 1
+class SnapshotData(Contract):
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     entities: list[Entity] = Field(default_factory=list)
     relations: list[Relation] = Field(default_factory=list)
@@ -112,11 +114,6 @@ class ProgramCreate(Contract):
         if not self.name:
             raise ValueError("Program name cannot be blank")
         return self
-
-
-class VersionCreate(Contract):
-    expected_version_id: UUID
-    snapshot: Snapshot
 
 
 class VersionRestore(Contract):
@@ -177,7 +174,7 @@ class ReviewState(Contract):
     confirmation: ReviewConfirmation | None = None
 
 
-class SnapshotV2(Snapshot):
+class SnapshotV2(SnapshotData):
     schema_version: Literal[2] = 2
     relations: list[RelationV2] = Field(default_factory=list)
     source_refs: list[SourceRefV2] = Field(default_factory=list)
@@ -236,6 +233,19 @@ class SnapshotV2(Snapshot):
         return self
 
 
+class VersionCreate(Contract):
+    expected_version_id: UUID
+    snapshot: SnapshotV2
+
+    @model_validator(mode="after")
+    def review_is_server_owned(self) -> Self:
+        if self.snapshot.review is not None:
+            raise ValueError(
+                "Состояние проверки устанавливается только через сценарий подтверждения"
+            )
+        return self
+
+
 class ProgramRead(Contract):
     id: UUID
     name: str
@@ -251,7 +261,7 @@ class VersionRead(Contract):
     restored_from_version_id: UUID | None
     origin: Literal["initial", "save", "restore"]
     created_at: datetime
-    snapshot: Snapshot | SnapshotV2
+    snapshot: SnapshotV2
 
 
 class DocumentRead(Contract):

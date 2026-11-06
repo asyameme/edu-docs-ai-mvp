@@ -7,7 +7,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from app.domain import Entity, Relation, Snapshot
+from app.domain import Entity, RelationV2, SnapshotV2
 from app.main import app
 from app.repository import Repository
 
@@ -23,9 +23,9 @@ def test_save_restore_and_version_foreign_keys():
         repo = Repository(app.state.resources.postgres)
         pid = UUID(program["id"])
         a, b, relation = uuid4(), uuid4(), uuid4()
-        snapshot = Snapshot(
+        snapshot = SnapshotV2(
             entities=[Entity(id=a, kind="discipline"), Entity(id=b, kind="competency")],
-            relations=[Relation(id=relation, source_id=a, target_id=b, type="FORMS_COMPETENCY")],
+            relations=[RelationV2(id=relation, source_id=a, target_id=b, type="FORMS_COMPETENCY")],
         )
         version = repo.save(pid, UUID(program["current_version_id"]), uuid4().hex, snapshot)
         restored = repo.save(pid, version["id"], uuid4().hex, restore_id=version["id"])
@@ -71,13 +71,12 @@ def test_projection_failure_rolls_back_snapshot_and_head(monkeypatch):
 
         monkeypatch.setattr(relational_storage, "insert_projection", fail)
         with pytest.raises(RuntimeError, match="предметных записей"):
-            repo.save(pid, head, uuid4().hex, Snapshot())
+            repo.save(pid, head, uuid4().hex, SnapshotV2())
         assert repo.program(pid)["current_version_id"] == head
         assert len(repo.versions(pid)) == 1
 
 
 def test_v2_field_evidence_matrix_and_restore_are_relational():
-    from app.domain import SnapshotV2
     from app.review_storage import insert_version
 
     with TestClient(app) as client:

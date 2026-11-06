@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
-from app.domain import Snapshot
+from app.domain import SnapshotV2
 from app.main import app
 from app.repository import Repository
 from app.storage import OriginalStorage
@@ -32,7 +32,7 @@ def test_failure_after_version_insert_rolls_back_version_and_head(monkeypatch):
                 UUID(program["id"]),
                 UUID(program["current_version_id"]),
                 str(uuid4()),
-                snapshot=Snapshot(),
+                snapshot=SnapshotV2(),
             )
         assert len(repo.versions(program["id"])) == 1
         assert (
@@ -44,7 +44,7 @@ def test_failure_after_version_insert_rolls_back_version_and_head(monkeypatch):
             "/api/v1/programs/" + program["id"] + "/versions",
             json={
                 "expected_version_id": program["current_version_id"],
-                "snapshot": Snapshot().model_dump(mode="json"),
+                "snapshot": SnapshotV2().model_dump(mode="json"),
             },
             headers={"Idempotency-Key": str(uuid4())},
         )

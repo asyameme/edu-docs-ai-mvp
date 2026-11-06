@@ -73,10 +73,21 @@ def observation(document_id, hours):
     return {
         "document_id": document_id,
         "output": {
+            "meta": {
+                "schema_version": 2,
+                "doc_type": "RPD",
+                "file_name": "source.docx",
+                "file_hash": "a" * 64,
+                "parser_config": "artificial-unit-fixture",
+                "program_id": "26/5003/1",
+            },
             "disciplines": [
                 {
                     "name": "Одинаковое имя",
+                    "semesters": [1],
+                    "credit_units": 3,
                     "hours_total": hours,
+                    "hours_by_kind": {"лекции": hours},
                     "source_ref": {"file": "source.docx", "section": "2"},
                 }
             ],

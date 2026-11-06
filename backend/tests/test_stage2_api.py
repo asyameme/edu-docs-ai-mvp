@@ -41,7 +41,7 @@ def url(program):
 def snapshot():
     discipline, competency = str(uuid4()), str(uuid4())
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "metadata": {},
         "entities": [
             {"id": discipline, "kind": "discipline", "attributes": {"name": "Test", "hours": 108}},
@@ -55,6 +55,7 @@ def snapshot():
                 "type": "develops",
                 "source_ref_ids": [],
                 "confidence": None,
+                "attributes": {},
             }
         ],
         "source_refs": [],
@@ -70,13 +71,23 @@ def save(http, program, state, expected=None, key=None):
     )
 
 
-def test_create_program_has_persisted_empty_v1(http):
+def test_create_program_has_persisted_empty_v2(http):
     program = create(http)
     assert http.get(url(program)).json() == program
     version = http.get(url(program) + "/versions/" + program["current_version_id"]).json()
     assert version["number"] == 1
+    assert version["snapshot"]["schema_version"] == 2
     assert version["snapshot"]["entities"] == []
     assert any(item["id"] == program["id"] for item in http.get("/api/v1/programs").json())
+
+
+def test_v1_snapshot_save_is_rejected_without_creating_a_version(http, program):
+    state = snapshot()
+    state["schema_version"] = 1
+    assert save(http, program, state).status_code == 422
+    versions = http.get(url(program) + "/versions").json()
+    assert len(versions) == 1
+    assert versions[0]["snapshot"]["schema_version"] == 2
 
 
 def test_versions_are_immutable_and_restore_creates_new_version(http, program):
@@ -170,9 +181,18 @@ def test_document_roundtrip_same_names_and_source_refs(http, program):
     state["entities"][0]["source_ref_ids"] = [ref]
     result = save(http, program, state)
     assert result.status_code == 201, result.text
-    assert result.json()["snapshot"]["source_refs"] == state["source_refs"]
+    saved = result.json()
+    saved_ref = saved["snapshot"]["source_refs"][0]
+    assert {key: saved_ref[key] for key in ("document_id", "section", "locator")} == {
+        key: state["source_refs"][0][key] for key in ("document_id", "section", "locator")
+    }
+    assert saved["snapshot"]["entities"][0]["source_ref_ids"] == [saved_ref["id"]]
+    repeated = save(http, program, state, expected=saved["id"])
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["snapshot"]["source_refs"][0]["id"] != saved_ref["id"]
+    assert http.get(url(program) + "/versions/" + saved["id"]).json() == saved
     state["document_ids"] = []
-    assert save(http, program, state, expected=result.json()["id"]).status_code == 422
+    assert save(http, program, state, expected=repeated.json()["id"]).status_code == 422
 
 
 @pytest.mark.parametrize(
