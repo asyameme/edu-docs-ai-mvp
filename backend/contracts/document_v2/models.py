@@ -1,75 +1,196 @@
 from __future__ import annotations
 from typing import Literal, Union
-from pydantic import Field, model_validator
-from backend.contracts.parser_output import (
-    ContractModel,
-    SourceRef as SourceRefV1,
-    ParseIssue,
-    Competency as CompetencyV1,
-    Indicator as IndicatorV1,
-    LearningOutcome as LearningOutcomeV1,
-    AssessmentTool as AssessmentToolV1,
-    CurriculumItem as CurriculumItemV1,
-    CourseTopic as CourseTopicV1,
-    ScoreScaleItem as ScoreScaleItemV1,
-    Relation as RelationV1,
-    Program as ProgramV1,
-    Discipline as DisciplineV1,
-    ParserMeta,
-)
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class SourceRefV2(SourceRefV1):
-    paragraph_index: int | None = Field(default=None, ge=0)
+DocType = Literal[
+    "RPD",
+    "RPP",
+    "CURRICULUM",
+    "MATRIX",
+    "CHARACTERISTIC",
+    "CKMV",
+]
+Severity = Literal["error", "warning", "info"]
+IssueCategory = Literal[
+    "not_found",
+    "unparsed_row",
+    "empty_cell",
+    "unexpected_format",
+    "ambiguous",
+    "manual_review",
+]
+EntityName = Literal[
+    "program",
+    "discipline",
+    "competency",
+    "indicator",
+    "learning_outcome",
+    "assessment_tool",
+    "curriculum_item",
+    "course_topic",
+]
+RelationKind = Literal["формирует", "имеет", "проверяется", "включает"]
+
+
+class ContractModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SourceRefV2(ContractModel):
+    """Координаты значения в исходном DOCX или XLSX.
+
+    paragraph_index считает абзацы тела DOCX с 1, включая таблицы и исключая
+    колонтитулы и сноски. Номера table, row и col также начинаются с 1;
+    row=1 обозначает заголовок таблицы. Для XLSX используются sheet_name и cell.
+    Текст фрагмента хранится отдельно от ссылки.
+    """
+
+    file: str
+    section: str | None = None
+    paragraph_index: int | None = Field(default=None, ge=1)
+    table: int | None = None
+    row: int | None = None
+    col: int | None = None
     sheet_name: str | None = None
     cell: str | None = None
+
+    @field_validator("file")
+    @classmethod
+    def _file_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("source_ref.file пуст")
+        return value
 
 
 SourceRef = SourceRefV2
 
 
-class Competency(CompetencyV1):
+class BaseEntity(ContractModel):
     source_ref: SourceRefV2
 
 
-class Indicator(IndicatorV1):
-    source_ref: SourceRefV2
+class Program(BaseEntity):
+    name: str | None = None
+    level: Literal["бакалавриат", "магистратура", "специалитет", "аспирантура"] | None = None
+    direction_code: str | None = None
+    education_standard: str | None = None
+    professional_standards: list[str] = []
 
 
-class LearningOutcome(LearningOutcomeV1):
-    source_ref: SourceRefV2
+class Discipline(BaseEntity):
+    name: str
+    semesters: list[int]
+    credit_units: int = Field(ge=1)
+    hours_total: int = Field(ge=0)
+    hours_by_kind: dict[str, int]
+    control_forms: list[str] = []
+    prerequisites: list[str] = []
+
+    @field_validator("semesters")
+    @classmethod
+    def _semesters_1_8(cls, value: list[int]) -> list[int]:
+        bad = [semester for semester in value if not 1 <= semester <= 8]
+        if bad:
+            raise ValueError(f"семестры вне 1–8: {bad}")
+        return value
 
 
-class AssessmentTool(AssessmentToolV1):
-    source_ref: SourceRefV2
+class Competency(BaseEntity):
+    code: str
+    formulation: str
+
+    @field_validator("code")
+    @classmethod
+    def _code_no_spaces(cls, value: str) -> str:
+        if not value.strip() or len(value.split()) > 1:
+            raise ValueError("код компетенции пуст или содержит пробелы")
+        return value
 
 
-class CurriculumItem(CurriculumItemV1):
-    source_ref: SourceRefV2
+class Indicator(BaseEntity):
+    code: str
+    text: str
+    competency_code: str
 
 
-class CourseTopic(CourseTopicV1):
-    source_ref: SourceRefV2
+class LearningOutcome(BaseEntity):
+    local_id: str
+    text: str
+    kind: Literal["знать", "уметь", "владеть"] | None = None
+    code: str | None = None
+
+    @field_validator("local_id")
+    @classmethod
+    def _id_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("local_id пуст")
+        return value
 
 
-class ScoreScaleItem(ScoreScaleItemV1):
-    source_ref: SourceRefV2
+class AssessmentTool(BaseEntity):
+    name: str
 
 
-class Relation(RelationV1):
-    source_ref: SourceRefV2
+class CurriculumItem(BaseEntity):
+    discipline_name: str
+    semester: int = Field(ge=1, le=8)
+    credit_units: int = Field(ge=1)
+    hours_total: int = Field(ge=0)
+    block: str
 
 
-class Program(ProgramV1):
-    source_ref: SourceRefV2
+class CourseTopic(BaseEntity):
+    topic: str
+    activity: str
+    hours: int = Field(ge=0)
+    module: str | None = None
 
 
-class Discipline(DisciplineV1):
-    source_ref: SourceRefV2
+class ScoreScaleItem(BaseEntity):
+    grade_spbu: str
+    grade_ects: str | None = None
+    points: str | None = None
+    criterion: str | None = None
 
 
-class MetaV2(ParserMeta):
+class Relation(BaseEntity):
+    src_entity: EntityName
+    src_key: str
+    dst_entity: EntityName
+    dst_key: str
+    kind: RelationKind
+
+    @field_validator("src_key", "dst_key")
+    @classmethod
+    def _key_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("ключ связи пуст")
+        return value
+
+
+class ParseIssue(ContractModel):
+    category: IssueCategory
+    message: str
+    severity: Severity = "warning"
+    source_ref: SourceRefV2 | None = None
+
+
+class MetaV2(ContractModel):
     schema_version: Literal[2] = 2
+    doc_type: DocType
+    file_name: str
+    file_hash: str
+    parser_config: str
+    program_id: str | None = None
+
+    @field_validator("file_hash")
+    @classmethod
+    def _hash_sha256(cls, value: str) -> str:
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.lower()):
+            raise ValueError("file_hash должен быть sha256 (64 hex-символа)")
+        return value.lower()
 
 class RPDMeta(MetaV2):
     doc_type: Literal['RPD'] = 'RPD'
