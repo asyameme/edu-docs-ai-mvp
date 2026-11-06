@@ -1,6 +1,7 @@
-import { useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ImportProgress } from "./ImportProgress";
 import { useImportJob } from "./useImportJob";
+import type { ImportJob, ReviewDetails, ReviewIssue } from "./api";
 
 type ProgramDocument = {
   name: string;
@@ -19,6 +20,7 @@ type ReconciliationFinding = {
   title: string;
   description: string;
   choices: FindingChoice[];
+  selectedChoiceId?: string;
 };
 
 type ValidationIssue = {
@@ -30,8 +32,6 @@ type ValidationIssue = {
 };
 
 type ParsedProgram = {
-  name: string;
-  summary: string;
   documentCount: number;
   findings: ReconciliationFinding[];
   issues: ValidationIssue[];
@@ -69,6 +69,13 @@ type ChatMessage = {
   id: string;
   role: "agent" | "user";
   text: string;
+  result?: {
+    kind: "coverage";
+    title: string;
+    status: string;
+    sourceLabel: string;
+    sourceRef: SourceRef;
+  };
   entity?: {
     name: string;
     details: string[];
@@ -80,45 +87,30 @@ type ChatMessage = {
 type AppScreen = "Программа" | "Чат";
 
 const demoProgram: ParsedProgram = {
-  name: "Пример образовательной программы",
-  summary: "Демонстрационные данные · бакалавриат · версия 1",
   documentCount: 12,
   findings: [
     {
       id: "competence-code",
       title: "Код компетенции различается",
-      description: "Выберите значение, которое следует сохранить в версии программы.",
+      description: "План: УК-2 · РПД: УК-3 | Учебный план, стр. 8 · РПД, разд. 3.2",
       choices: [
         {
           id: "study-plan",
           source: "Учебный план.docx",
-          value: "УК-2",
-          location: "Раздел «Компетенции», строка 14",
+          value: "Оставить УК-2",
+          location: "стр. 8",
         },
         {
           id: "rpd",
           source: "РПД_Анализ_данных.docx",
-          value: "УК-3",
-          location: "Раздел «Результаты обучения», таблица 2",
-        },
-      ],
-    },
-    {
-      id: "discipline-hours",
-      title: "Не совпадает объём дисциплины",
-      description: "В документах указано разное количество контактных часов.",
-      choices: [
-        {
-          id: "study-plan-hours",
-          source: "Учебный план.docx",
-          value: "72 часа",
-          location: "Семестр 3, строка «Основы анализа данных»",
+          value: "Оставить УК-3",
+          location: "разд. 3.2",
         },
         {
-          id: "rpd-hours",
-          source: "РПД_Анализ_данных.docx",
-          value: "68 часов",
-          location: "Раздел «Объём дисциплины», таблица 1",
+          id: "both",
+          source: "Учебный план.docx · РПД_Анализ_данных.docx",
+          value: "Оба варианта",
+          location: "стр. 8 · разд. 3.2",
         },
       ],
     },
@@ -140,14 +132,24 @@ const demoProgram: ParsedProgram = {
     },
     {
       id: "issue-3",
-      severity: "info",
-      title: "Документ успешно разобран",
-      source: "Характеристика_программы.docx",
+      severity: "warning",
+      title: "В документах различаются формулировки результатов обучения",
+      source: "Учебный план.docx · таблица «Результаты обучения»",
+      ruleId: "R-11",
     },
   ],
 };
 
-const navigation = ["Программа", "Чат", "Выгрузка"] as const;
+const navigation = ["Программа", "Чат"] as const;
+
+const demoMLOpsSourceRef: SourceRef = {
+  id: "demo-mlops-rpd-v1-paragraph-42",
+  documentId: "demo-mlops-rpd",
+  documentVersionId: "demo-rpd-v1",
+  fileName: "РПД MLOps.docx",
+  versionLabel: "v1",
+  coordinate: { kind: "paragraph", paragraphIndex: 42 },
+};
 
 const demoRpdSourceRef: SourceRef = {
   id: "demo-rpd-v1-paragraph-42",
@@ -166,6 +168,23 @@ const demoChatMessages: ChatMessage[] = [
   },
   {
     id: "sample-request",
+    role: "user",
+    text: "Проверь покрытие результатов обучения в MLOps",
+  },
+  {
+    id: "coverage-result",
+    role: "agent",
+    text: "Для результата обучения РО-2 не найдено подтверждение в программе курса.",
+    result: {
+      kind: "coverage",
+      title: "Покрытие частичное",
+      status: "Требует внимания",
+      sourceLabel: "РПД MLOps · раздел 4.2",
+      sourceRef: demoMLOpsSourceRef,
+    },
+  },
+  {
+    id: "assessment-request",
     role: "user",
     text: "Хочу изменить способ оценки в дисциплине «Технологии анализа данных».",
   },
@@ -197,6 +216,14 @@ const demoChatMessages: ChatMessage[] = [
 
 // Demo SourceFragment response is kept separately from the source_ref pointer.
 const demoSourceFragments: Record<string, SourceFragment> = {
+  [demoMLOpsSourceRef.id]: {
+    sourceRef: demoMLOpsSourceRef,
+    excerpt: "Для результата обучения РО-2 подтверждение в программе курса не найдено.",
+    context: [
+      { relation: "before", text: "4. Результаты обучения и их связь с содержанием дисциплины" },
+      { relation: "after", text: "Проверьте связь результата обучения с разделами программы курса." },
+    ],
+  },
   [demoRpdSourceRef.id]: {
     sourceRef: demoRpdSourceRef,
     excerpt: "Формы текущего контроля: практические работы — 40 баллов; проект — 60 баллов.",
@@ -218,16 +245,90 @@ function isSupportedFile(file: File) {
 }
 
 function formatFileCount(count: number) {
+  return formatCountWithWords(count, "файл", "файла", "файлов");
+}
+
+function formatCountWithWords(count: number, one: string, few: string, many: string) {
   const lastTwoDigits = count % 100;
   const lastDigit = count % 10;
-  if (lastTwoDigits >= 11 && lastTwoDigits <= 14) return `${count} файлов`;
-  if (lastDigit === 1) return `${count} файл`;
-  if (lastDigit >= 2 && lastDigit <= 4) return `${count} файла`;
-  return `${count} файлов`;
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 14) return `${count} ${many}`;
+  if (lastDigit === 1) return `${count} ${one}`;
+  if (lastDigit >= 2 && lastDigit <= 4) return `${count} ${few}`;
+  return `${count} ${many}`;
+}
+
+function formatIssueSummary(issues: ValidationIssue[]) {
+  const errors = issues.filter((issue) => issue.severity === "error").length;
+  const warnings = issues.filter((issue) => issue.severity === "warning").length;
+  return [
+    errors > 0 ? formatCountWithWords(errors, "ошибка", "ошибки", "ошибок") : "",
+    warnings > 0 ? formatCountWithWords(warnings, "предупреждение", "предупреждения", "предупреждений") : "",
+  ].filter(Boolean).join(" · ") || "Проверка завершена";
+}
+
+function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): ParsedProgram {
+  const snapshot = details.version.snapshot;
+  const sourceRefs = new Map(snapshot.source_refs.map((source) => [source.id, source]));
+  const documentNames = new Map((job?.files ?? []).map((file) => [file.document_id, file.member_name]));
+  const documentCount = job?.files.length ?? snapshot.source_refs.length;
+  const sourceDescription = (ids: string[]) => {
+    const sources = ids.map((id) => sourceRefs.get(id)).filter((source) => source !== undefined);
+    const names = [...new Set(sources.map((source) => documentNames.get(source.document_id)).filter((name) => name !== undefined))];
+    const sections = [...new Set(sources.map((source) => source.section).filter((section) => section !== null))];
+    return {
+      source: names.length ? names.join(" · ") : "Источник пакета документов",
+      location: sections.length ? sections.join(" · ") : "Фрагмент исходного документа",
+    };
+  };
+  const findings = details.issues.filter((issue) => issue.requires_decision)
+    .map((issue) => {
+      const choices = issue.variants.map((variant) => {
+        const changeSourceIds = variant.changes.flatMap((change) => [
+          ...(change.entity?.source_ref_ids ?? []),
+          ...(change.relation?.source_ref_ids ?? []),
+        ]);
+        const location = sourceDescription(changeSourceIds.length ? changeSourceIds : issue.source_ref_ids);
+        return { id: variant.id, value: variant.label, ...location };
+      });
+      const choiceSummary = choices.map((choice) => choice.value).join(" · ");
+      const sourceSummary = [...new Set(choices.map((choice) => `${choice.source}, ${choice.location}`))].join(" · ");
+      return {
+        id: issue.id,
+        title: issue.message,
+        description: choiceSummary
+          ? `${choiceSummary}${sourceSummary ? ` | ${sourceSummary}` : ""}`
+          : `Правило ${issue.rule_code} · ${issue.type}`,
+        selectedChoiceId: issue.decision?.variant_id,
+        choices,
+      };
+    });
+  const reviewIssues = details.issues.map((issue: ReviewIssue) => {
+    const source = sourceDescription(issue.source_ref_ids);
+    return {
+      id: issue.id,
+      severity: issue.severity === "blocking" ? "error" as const : "warning" as const,
+      title: issue.message,
+      source: source.source,
+      ruleId: `${issue.rule_code} · ${issue.rule_revision}`,
+    };
+  });
+  const importIssues = (job?.issues ?? []).map((issue, index) => ({
+    id: `import-${index}-${issue.category}`,
+    severity: issue.severity === "error" ? "error" as const : "warning" as const,
+    title: issue.message,
+    source: "Разбор ZIP-пакета",
+    ruleId: issue.category,
+  }));
+
+  return {
+    documentCount,
+    findings,
+    issues: [...reviewIssues, ...importIssues],
+  };
 }
 
 type ChatScreenProps = {
-  programName: string;
+  versionNumber: number;
   isDemoMode: boolean;
   isConfirmed: boolean;
   canUseChat: boolean;
@@ -243,7 +344,7 @@ type ChatScreenProps = {
 };
 
 function ChatScreen({
-  programName,
+  versionNumber,
   isDemoMode,
   isConfirmed,
   canUseChat,
@@ -262,46 +363,24 @@ function ChatScreen({
       <section className="page-heading">
         <div>
           <h1>Чат с агентом</h1>
-          <p className="eyebrow">Программа «{programName}» · версия v1</p>
+          <p className="eyebrow">Вопросы, проверки и изменения программы</p>
         </div>
-        <span className={`status-pill ${!isDemoMode && isConfirmed ? "status-pill--green" : "status-pill--muted"}`}>
-          {isDemoMode ? "Демо-сценарий" : isConfirmed ? "Версия подтверждена" : "Только чтение"}
+        <span className={`status-pill ${isDemoMode || isConfirmed ? "status-pill--green" : "status-pill--muted"}`}>
+          Версия {versionNumber}
         </span>
       </section>
 
-      {isDemoMode && (
-        <div className="demo-banner" role="status">
-          Демо-чат: сообщения и план изменений примерные. Ответы реального агента пока не подключены.
-        </div>
-      )}
-
       <section className="chat-panel card" aria-label="Чат с агентом">
-        <div className="chat-panel-heading">
-          <div>
-            <strong>История диалога</strong>
-            <span>{isConfirmed ? "Можно обсуждать и готовить правки" : "Можно задавать вопросы о программе"}</span>
-          </div>
-          <span className={`agent-presence ${isDemoMode ? "agent-presence--demo" : "agent-presence--offline"}`}>
-            <span /> {isDemoMode ? "Пример диалога" : "Ожидает подключения"}
-          </span>
-        </div>
-
         <div className="chat-transcript" aria-live="polite" aria-relevant="additions text">
           {messages.length === 0 ? (
             <div className="chat-empty-state">
               <div className="agent-mark" aria-hidden="true">ИИ</div>
-              <h2>{canUseChat ? "Начните диалог с агентом" : "Чат появится после обработки программы"}</h2>
+              <h2>{canUseChat ? "Начните диалог с агентом" : "Чат с агентом пока не подключён"}</h2>
               <p>
                 {canUseChat
                   ? "Задайте вопрос по документам или опишите нужное изменение."
-                  : "Загрузите ZIP-пакет и дождитесь распаковки и парсинга документов. Для работы с правками потребуется подтверждённая версия."}
+                  : "После подключения агента здесь появятся ответы, проверки и планы правок по программе."}
               </p>
-              {canUseChat && (
-                <div className="quick-prompts" aria-label="Примеры запросов">
-                  <button type="button" onClick={() => onSend("Покажи структуру программы")}>Покажи структуру программы</button>
-                  <button type="button" onClick={() => onSend("Проверь результаты обучения")}>Проверь результаты обучения</button>
-                </div>
-              )}
             </div>
           ) : (
             messages.map((message) => (
@@ -309,7 +388,28 @@ function ChatScreen({
                 {message.role === "agent" && <div className="agent-mark" aria-hidden="true">ИИ</div>}
                 <div className="message-column">
                   <div className="message-meta">{message.role === "agent" ? "Агент" : "Вы"}</div>
-                  <div className={`message-bubble message-bubble--${message.role}`}>{message.text}</div>
+                  <div className={`message-bubble message-bubble--${message.role}`}>
+                    {message.result?.kind === "coverage" && (
+                      <strong className="message-result-title">{message.result.title}</strong>
+                    )}
+                    {message.text && <p className="message-body">{message.text}</p>}
+                    {message.result?.kind === "coverage" && (
+                      <>
+                        <span className="message-result-status">{message.result.status}</span>
+                        <button
+                          type="button"
+                          className="entity-source message-source"
+                          aria-haspopup="dialog"
+                          aria-expanded={selectedSourceRef?.id === message.result.sourceRef.id}
+                          onClick={() => {
+                            if (message.result?.kind === "coverage") onOpenSource(message.result.sourceRef);
+                          }}
+                        >
+                          Источник: {message.result.sourceLabel}
+                        </button>
+                      </>
+                    )}
+                  </div>
 
                   {message.entity && (
                     <section className="entity-card" aria-label="Найденная сущность">
@@ -394,13 +494,15 @@ function ChatScreen({
           )}
         </div>
 
-        {!canUseChat && (
-          <p className="chat-connection-note">
-            Подключение к API чата ещё не настроено. Этот экран пока показывает состояния интерфейса.
-          </p>
-        )}
+      </section>
 
-        <form
+      <div className="chat-quick-actions" aria-label="Быстрые действия">
+        <button type="button" disabled={!canUseChat} onClick={() => onSend("Проверь часы")}>Проверить часы</button>
+        <button type="button" disabled={!canUseChat} onClick={() => onSend("Покажи проблемы")}>Показать проблемы</button>
+        <button type="button" disabled={!canUseChat} onClick={() => onSend("Найди дисциплину")}>Найти дисциплину</button>
+      </div>
+
+      <form
           className="chat-composer"
           onSubmit={(event) => {
             event.preventDefault();
@@ -410,7 +512,7 @@ function ChatScreen({
           <label className="visually-hidden" htmlFor="chat-message">Сообщение агенту</label>
           <textarea
             id="chat-message"
-            rows={2}
+            rows={1}
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}
             placeholder={isConfirmed ? "Опишите, что нужно изменить, или задайте вопрос…" : "Задайте вопрос о программе…"}
@@ -419,11 +521,7 @@ function ChatScreen({
           <button className="chat-send-button" disabled={!canUseChat || !draft.trim()} type="submit">
             Отправить
           </button>
-          <span className="composer-hint">
-            {isConfirmed ? "Правки будут показаны планом до применения." : "До подтверждения версии чат работает в режиме вопросов."}
-          </span>
-        </form>
-      </section>
+      </form>
 
       {selectedSourceRef && (
         <SourcePanel
@@ -538,35 +636,63 @@ function SourcePanel({ sourceRef, fragment, onClose }: SourcePanelProps) {
 function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const isChatPreview = previewMode === "chat";
-  const hasDemoPreview = isChatPreview || previewMode === "reconciliation";
+  const isReconciliationPreview = previewMode === "reconciliation";
+  const hasDemoPreview = isChatPreview || isReconciliationPreview;
   const processing = useImportJob();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState("");
   const [isDemoMode, setIsDemoMode] = useState(hasDemoPreview);
-  const [activeScreen, setActiveScreen] = useState<AppScreen>(isChatPreview ? "Чат" : "Программа");
-  const [parsedProgram, setParsedProgram] = useState<ParsedProgram | null>(() =>
-    hasDemoPreview ? demoProgram : null,
+  const [activeScreen, setActiveScreen] = useState<AppScreen>(
+    isChatPreview ? "Чат" : "Программа",
   );
+  const [demoConfirmed, setDemoConfirmed] = useState(isChatPreview);
   const chatPreviewChoices = isChatPreview
     ? Object.fromEntries(demoProgram.findings.map((finding) => [finding.id, finding.choices[0]?.id ?? ""]))
     : {};
   const [selectedChoices, setSelectedChoices] = useState<Record<string, string>>(chatPreviewChoices);
   const [appliedChoices, setAppliedChoices] = useState<Record<string, string>>(chatPreviewChoices);
-  const [isConfirmed, setIsConfirmed] = useState(isChatPreview);
+  const [acceptedWarningIds, setAcceptedWarningIds] = useState<string[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(hasDemoPreview ? demoChatMessages : []);
   const [chatDraft, setChatDraft] = useState("");
   const [selectedSourceRef, setSelectedSourceRef] = useState<SourceRef | null>(null);
   const sourceReturnFocusRef = useRef<HTMLElement | null>(null);
+  const parsedProgram = isDemoMode
+    ? demoProgram
+    : processing.reviewDetails
+      ? mapReviewToProgram(processing.reviewDetails, processing.job)
+      : null;
+  const isConfirmed = isDemoMode ? demoConfirmed : Boolean(processing.reviewDetails?.confirmed);
+  const versionNumber = processing.reviewDetails?.version.number ?? 1;
   const hasReconciliation = parsedProgram !== null;
   const unresolvedCount = parsedProgram?.findings.filter((finding) => {
-    const appliedChoice = appliedChoices[finding.id];
+    const appliedChoice = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
     const selectedChoice = selectedChoices[finding.id];
     return !appliedChoice || (selectedChoice !== undefined && selectedChoice !== appliedChoice);
   }).length ?? 0;
   const hasUploadedFiles = documents.length > 0 || processing.job !== null;
   const uploadNotice = processing.notice || notice;
+  const checkWarnings = processing.checkJob?.status === "completed"
+    ? processing.checkJob.report?.issues.filter((issue) => issue.severity === "warning") ?? []
+    : [];
+  const checkBlockingCount = processing.checkJob?.status === "completed"
+    ? processing.checkJob.report?.issues.filter((issue) => issue.severity === "blocking" || issue.requires_decision).length ?? 0
+    : 0;
+  const checkMatchesCurrentVersion = Boolean(
+    processing.checkJob?.status === "completed" && processing.checkJob.report &&
+    processing.checkJob.input_version_id === processing.versionId,
+  );
+  const skippedRequiredChecks = checkMatchesCurrentVersion
+    ? processing.checkJob?.report?.ruleset.required_rules.filter((ruleCode) => {
+      const status = processing.checkJob?.report?.coverage.find((item) => item.rule_code === ruleCode)?.status;
+      return status !== "passed" && status !== "failed";
+    }) ?? []
+    : [];
+
+  useEffect(() => {
+    setAcceptedWarningIds([]);
+  }, [processing.checkJob?.id]);
 
   async function addFiles(files: FileList | File[]) {
     if (processing.busy) return;
@@ -580,11 +706,11 @@ function App() {
     } else if (supportedFile) {
       if (!(await processing.upload(supportedFile))) return;
       setDocuments([{ name: supportedFile.name, status: "Загружено" }]);
-      setParsedProgram(null);
       setIsDemoMode(false);
       setSelectedChoices({});
       setAppliedChoices({});
-      setIsConfirmed(false);
+      setDemoConfirmed(false);
+      setAcceptedWarningIds([]);
       setChatMessages([]);
       setChatDraft("");
       setActiveScreen("Программа");
@@ -605,10 +731,13 @@ function App() {
     void addFiles(event.dataTransfer.files);
   }
 
-  function applyChoice(findingId: string) {
-    const choiceId = selectedChoices[findingId];
-    if (!choiceId) return;
-    setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
+  function chooseFindingChoice(findingId: string, choiceId: string) {
+    setSelectedChoices((current) => ({ ...current, [findingId]: choiceId }));
+    if (isDemoMode) {
+      setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
+      return;
+    }
+    void processing.decide(findingId, choiceId);
   }
 
   function sendChatMessage(message?: string) {
@@ -667,12 +796,14 @@ function App() {
     requestAnimationFrame(() => sourceReturnFocusRef.current?.focus());
   }
 
-  const pageStatus = isDemoMode
-    ? "Предпросмотр"
+  const pageStatus = isDemoMode && parsedProgram
+    ? `Версия ${versionNumber} · подтверждена`
     : isConfirmed
-      ? "Версия подтверждена"
+      ? `Версия ${versionNumber} · подтверждена`
       : hasReconciliation
         ? "Готова к сверке"
+        : processing.reviewJob && ["pending", "processing"].includes(processing.reviewJob.status)
+          ? "Сверка документов"
         : hasUploadedFiles
           ? "Пакет загружен"
           : "Ожидает загрузки";
@@ -681,7 +812,6 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">Система проверки документов</div>
-        <div className="user-avatar" aria-hidden="true">АК</div>
       </header>
 
       <div className="workspace">
@@ -693,12 +823,7 @@ function App() {
                 key={item}
                 className={`nav-item${item === activeScreen ? " is-active" : ""}`}
                 aria-current={item === activeScreen ? "page" : undefined}
-                aria-disabled={item === "Выгрузка" ? true : undefined}
-                disabled={item === "Выгрузка"}
-                title={item === "Выгрузка" ? "Экран будет подготовлен отдельно" : undefined}
-                onClick={() => {
-                  if (item !== "Выгрузка") setActiveScreen(item);
-                }}
+                onClick={() => setActiveScreen(item)}
               >
                 {item}
               </button>
@@ -710,7 +835,7 @@ function App() {
           <div className="content-column">
             {activeScreen === "Чат" ? (
               <ChatScreen
-                programName={parsedProgram?.name ?? "Образовательная программа"}
+                versionNumber={versionNumber}
                 isDemoMode={isDemoMode}
                 isConfirmed={isConfirmed}
                 canUseChat={isDemoMode && hasReconciliation}
@@ -736,30 +861,16 @@ function App() {
               </span>
             </section>
 
-            {isDemoMode && (
-              <div className="demo-banner" role="status">
-                Предпросмотр экрана: данные ниже демонстрационные и не получены из архива.
-              </div>
-            )}
-
-            {parsedProgram && (
-              <section className="program-card card" aria-label="Название программы">
-                <div>
-                  <h2>{parsedProgram.name}</h2>
-                  <p>{parsedProgram.summary}</p>
-                </div>
-                <span className="version-label">{isConfirmed ? "v1 · подтверждена" : "Черновик версии v1"}</span>
-              </section>
-            )}
-
             <section className="documents-section" aria-labelledby="documents-title">
               <div className="section-heading">
                 <h2 id="documents-title">Документы программы</h2>
                 <span className="file-count">
                   {hasUploadedFiles
-                    ? "1 ZIP-архив"
+                    ? processing.job?.files.length
+                      ? formatFileCount(processing.job.files.length)
+                      : "1 ZIP-архив"
                     : isDemoMode && parsedProgram
-                      ? `Демо-пакет · ${formatFileCount(parsedProgram.documentCount)}`
+                      ? formatFileCount(parsedProgram.documentCount)
                       : "Архив не загружен"}
                 </span>
               </div>
@@ -779,8 +890,8 @@ function App() {
                 onDrop={handleDrop}
               >
                 <div className="upload-copy">
-                  <strong>Перетащите сюда ZIP-архив</strong>
-                  <span>Название программы и результаты появятся после распаковки и парсинга документов.</span>
+                  <strong>Перетащите сюда ZIP-архив с документами</strong>
+                  <span>Загрузите весь пакет одним архивом. Название и результаты появятся после распаковки и парсинга.</span>
                 </div>
                 <input
                   ref={fileInputRef}
@@ -797,7 +908,7 @@ function App() {
                   onClick={() => fileInputRef.current?.click()}
                   disabled={processing.busy}
                 >
-                  Выбрать архив
+                  Выбрать ZIP-архив
                 </button>
                 {uploadNotice && <p className="upload-notice" role="status">{uploadNotice}</p>}
               </div>
@@ -807,16 +918,16 @@ function App() {
               <section className="processing-card card" aria-labelledby="processing-title">
                 <div className="processing-heading">
                   <div>
-                    <h2 id="processing-title">Сверка программы</h2>
+                    <h2 id="processing-title">Обработка и сверка</h2>
                     <p className="processing-subtitle">
                       {parsedProgram
-                        ? `Обработано ${formatFileCount(parsedProgram.documentCount)} · разрешите расхождения и подтвердите версию`
+                        ? `Все ${formatFileCount(parsedProgram.documentCount)} обработаны. Проверьте расхождения перед подтверждением.`
                         : "Проверка начнётся после загрузки, распаковки и парсинга архива."}
                     </p>
                   </div>
                   {parsedProgram ? (
                     <span className={`status-pill ${unresolvedCount ? "status-pill--warning" : "status-pill--green"}`}>
-                      {unresolvedCount ? `${unresolvedCount} требуют решения` : "Все расхождения разрешены"}
+                      {formatIssueSummary(parsedProgram.issues)}
                     </span>
                   ) : (
                     <span className="status-pill status-pill--muted">Ожидает обработки</span>
@@ -825,34 +936,16 @@ function App() {
 
                 {parsedProgram ? (
                   <>
-                    <div className="reconciliation-summary" aria-label="Сводка проверки">
-                      <div className="summary-metric summary-metric--conflicts">
-                        <strong>{parsedProgram.findings.length}</strong>
-                        <span>расхождения</span>
-                      </div>
-                      <div className="summary-metric summary-metric--errors">
-                        <strong>{parsedProgram.issues.filter((issue) => issue.severity === "error").length}</strong>
-                        <span>ошибки</span>
-                      </div>
-                      <div className="summary-metric summary-metric--warnings">
-                        <strong>{parsedProgram.issues.filter((issue) => issue.severity === "warning").length}</strong>
-                        <span>предупреждения</span>
-                      </div>
-                      <div className="summary-metric summary-metric--info">
-                        <strong>{parsedProgram.issues.filter((issue) => issue.severity === "info").length}</strong>
-                        <span>информация</span>
-                      </div>
-                    </div>
-
                     <div className="finding-list">
                       {parsedProgram.findings.map((finding, index) => {
-                        const appliedChoiceId = appliedChoices[finding.id];
+                        const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
                         const selectedChoiceId = selectedChoices[finding.id] ?? appliedChoiceId ?? "";
                         const isResolved = Boolean(appliedChoice && selectedChoiceId === appliedChoice.id);
 
                         return (
-                          <article className={`finding-card${isResolved ? " is-resolved" : ""}`} key={finding.id}>
+                          <div className="finding-group" key={finding.id}>
+                            <article className={`finding-card${isResolved ? " is-resolved" : ""}`}>
                             <div className="finding-topline">
                               <span className="finding-label">Расхождение {index + 1} из {parsedProgram.findings.length}</span>
                               <span className={`finding-status${isResolved ? " finding-status--resolved" : ""}`}>
@@ -861,42 +954,38 @@ function App() {
                             </div>
                             <h3>{finding.title}</h3>
                             <p className="finding-description">{finding.description}</p>
-                            <fieldset className="choice-list">
-                              <legend>Выберите верное значение</legend>
-                              {finding.choices.map((choice) => (
-                                <label className={`choice-card${selectedChoiceId === choice.id ? " is-selected" : ""}`} key={choice.id}>
-                                  <input
-                                    type="radio"
-                                    name={`choice-${finding.id}`}
-                                    value={choice.id}
-                                    checked={selectedChoiceId === choice.id}
-                                    disabled={isConfirmed}
-                                    onChange={() => setSelectedChoices((current) => ({ ...current, [finding.id]: choice.id }))}
-                                  />
-                                  <span className="choice-content">
-                                    <span className="choice-value">{choice.value}</span>
-                                    <span className="choice-source">{choice.source}</span>
-                                    <span className="choice-location">{choice.location}</span>
-                                  </span>
-                                </label>
-                              ))}
-                            </fieldset>
-                            <div className="finding-footer">
-                              {isResolved && appliedChoice ? (
-                                <p className="resolution-note">В версии сохранено: <strong>{appliedChoice.value}</strong> · {appliedChoice.source}</p>
-                              ) : (
-                                <span className="finding-help">Выбор будет применён к версии программы.</span>
-                              )}
-                              <button
-                                className="secondary-button"
-                                disabled={isConfirmed || !selectedChoiceId || selectedChoiceId === appliedChoiceId}
-                                onClick={() => applyChoice(finding.id)}
-                                type="button"
-                              >
-                                {appliedChoice ? "Обновить выбор" : "Применить выбор"}
-                              </button>
-                            </div>
+                            {finding.choices.length === 0 && (
+                              <p className="finding-help">Для этого расхождения сервер пока не подготовил варианты решения.</p>
+                            )}
                           </article>
+                            {finding.choices.length > 0 && (
+                              <fieldset className="choice-list">
+                                <legend className="visually-hidden">Выберите верное значение</legend>
+                                {finding.choices.map((choice) => (
+                                  <label
+                                    className={`choice-card${selectedChoiceId === choice.id ? " is-selected" : ""}`}
+                                    key={choice.id}
+                                    title={`${choice.source} · ${choice.location}`}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`choice-${finding.id}`}
+                                      value={choice.id}
+                                      checked={selectedChoiceId === choice.id}
+                                      aria-label={`${choice.value} · ${choice.source} · ${choice.location}`}
+                                      disabled={isConfirmed || processing.reviewBusy}
+                                      onChange={() => chooseFindingChoice(finding.id, choice.id)}
+                                    />
+                                    <span className="choice-content">
+                                      <span className="choice-value">{choice.value}</span>
+                                      <span className="choice-source">{choice.source}</span>
+                                      <span className="choice-location">{choice.location}</span>
+                                    </span>
+                                  </label>
+                                ))}
+                              </fieldset>
+                            )}
+                          </div>
                         );
                       })}
                     </div>
@@ -919,24 +1008,88 @@ function App() {
                       </ul>
                     </details>
 
+                    {!isDemoMode && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
+                      <div className="processing-caption" role="status">
+                        Повторная проверка версии выполняется · {processing.checkJob.progress}%
+                        <progress max={100} value={processing.checkJob.progress} aria-label="Прогресс повторной проверки" />
+                      </div>
+                    )}
+
+                    {!isDemoMode && checkMatchesCurrentVersion && checkWarnings.length > 0 && (
+                      <fieldset className="choice-list" aria-label="Принятие предупреждений">
+                        <legend>Подтвердите, что предупреждения учтены</legend>
+                        {checkWarnings.map((warning) => (
+                          <label className="choice-card" key={warning.id}>
+                            <input
+                              type="checkbox"
+                              checked={acceptedWarningIds.includes(warning.id)}
+                              disabled={isConfirmed || processing.reviewBusy}
+                              onChange={(event) => setAcceptedWarningIds((current) => (
+                                event.target.checked
+                                  ? [...new Set([...current, warning.id])]
+                                  : current.filter((id) => id !== warning.id)
+                              ))}
+                            />
+                            <span className="choice-content">
+                              <span className="choice-value">{warning.message}</span>
+                              <span className="choice-source">Предупреждение проверки</span>
+                            </span>
+                          </label>
+                        ))}
+                      </fieldset>
+                    )}
+
+                    {!isDemoMode && checkMatchesCurrentVersion && checkBlockingCount > 0 && (
+                      <p className="upload-notice" role="alert">
+                        Проверка нашла {checkBlockingCount} блокирующих замечаний. Исправьте их перед подтверждением версии.
+                      </p>
+                    )}
+                    {!isDemoMode && skippedRequiredChecks.length > 0 && (
+                      <p className="upload-notice" role="alert">
+                        Не выполнены обязательные проверки: {skippedRequiredChecks.join(", ")}.
+                      </p>
+                    )}
+
                     <div className="confirm-version">
                       <div className="confirm-copy">
                         <strong>{isConfirmed ? "Версия программы подтверждена" : "Готовы зафиксировать версию?"}</strong>
                         <span>
                           {isConfirmed
-                            ? "Результат подтверждения сохранён в этом предпросмотре."
+                            ? isDemoMode ? "Результат подтверждения сохранён в предпросмотре." : "Подтверждённая версия сохранена на сервере."
                             : unresolvedCount
                               ? `Сначала примените решение для ${unresolvedCount} ${unresolvedCount === 1 ? "расхождения" : "расхождений"}.`
-                              : "После подтверждения эта версия станет основой для работы с программой."}
+                              : !isDemoMode && !checkMatchesCurrentVersion
+                                ? "Сначала запустите повторную проверку выбранной версии."
+                                : !isDemoMode && checkBlockingCount > 0
+                                  ? "Проверка нашла блокирующие замечания. Эту версию нельзя подтвердить."
+                                : !isDemoMode && skippedRequiredChecks.length > 0
+                                  ? "Не все обязательные проверки выполнены, версия пока не подтверждена."
+                                  : !isDemoMode && checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))
+                                    ? "Примите каждое предупреждение, чтобы подтвердить проверенную версию."
+                                    : "После подтверждения эта версия станет основой для работы с программой."}
                         </span>
                       </div>
                       <button
                         className="confirm-button"
-                        disabled={unresolvedCount > 0 || isConfirmed}
-                        onClick={() => setIsConfirmed(true)}
+                        disabled={unresolvedCount > 0 || isConfirmed || processing.reviewBusy || (!isDemoMode && checkMatchesCurrentVersion && (checkBlockingCount > 0 || skippedRequiredChecks.length > 0 || checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))))}
+                        onClick={() => {
+                          if (isDemoMode) setDemoConfirmed(true);
+                          else if (checkMatchesCurrentVersion) void processing.confirm(acceptedWarningIds);
+                          else void processing.runCheck();
+                        }}
                         type="button"
                       >
-                        {isConfirmed ? "Версия подтверждена" : "Подтвердить версию"}
+                        {isConfirmed
+                          ? "Версия подтверждена"
+                          : processing.reviewBusy
+                            ? "Обрабатываем…"
+                            : !isDemoMode && checkMatchesCurrentVersion && checkBlockingCount > 0
+                              ? "Есть блокирующие замечания"
+                            : !isDemoMode && checkMatchesCurrentVersion && skippedRequiredChecks.length > 0
+                              ? "Проверки не завершены"
+                            : isDemoMode || checkMatchesCurrentVersion
+                              ? "Подтвердить версию"
+                              : "Проверить версию"}
                       </button>
                     </div>
                   </>
@@ -960,8 +1113,29 @@ function App() {
                         onRetry={processing.retry}
                       />
                     )}
+                    {processing.reviewJob && (
+                      <div className="processing-caption" role="status">
+                        {processing.reviewJob.status === "completed"
+                          ? "Сверка завершена. Загружаем результаты…"
+                          : processing.reviewJob.status === "failed" || processing.reviewJob.status === "conflict"
+                            ? processing.reviewJob.message || "Не удалось подготовить сверку."
+                            : `Подготавливаем сверку · ${processing.reviewJob.progress}%`}
+                        {!["completed", "failed", "conflict"].includes(processing.reviewJob.status) && (
+                          <progress max={100} value={processing.reviewJob.progress} aria-label="Прогресс подготовки сверки" />
+                        )}
+                      </div>
+                    )}
+                    {processing.canPrepareReview && processing.notice && (!processing.reviewJob || ["failed", "conflict"].includes(processing.reviewJob.status)) && (
+                      <button className="secondary-button" type="button" onClick={processing.retryPrepare} disabled={processing.reviewBusy}>
+                        Повторить подготовку сверки
+                      </button>
+                    )}
                     <p className="processing-caption">
-                      Название программы, извлечённые данные и расхождения появятся после завершения обработки архива.
+                      {processing.job?.issues.some((issue) => issue.severity === "error")
+                        ? "В архиве есть ошибки разбора. Исправьте исходные документы и загрузите пакет заново."
+                        : processing.reviewBusy
+                          ? "Пакет разобран. Подготавливаем результаты сверки."
+                          : "Название программы, извлечённые данные и расхождения появятся после завершения обработки архива."}
                     </p>
                   </>
                 )}
