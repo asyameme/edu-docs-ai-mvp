@@ -93,7 +93,7 @@ def test_bad_observed_value_and_locator_fail():
 
 def test_stale_observed_value_fails_before_patch():
     docx = make_docx(
-        '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Трудоёмкость</w:t></w:r></w:p></w:tc>'
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Трудоёмкость</w:t></w:r></w:p></w:tc>"
         "<w:tc><w:p><w:r><w:t>72 ч</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
     )
     ref = _ref("ref-1", "doc-1", table=1, row=1, col=2)
@@ -126,6 +126,53 @@ def test_two_changes_claiming_one_fragment_fail():
         resolve_planned_patches({"doc-1": docx}, planned)
 
 
+def test_same_old_text_at_different_coordinates_can_be_changed_independently():
+    docx = make_docx(_make_paragraph("72 ч") + _make_paragraph("72 ч"))
+    links = [
+        _link(field_path="/attributes/hours_a", ref_id="ref-1"),
+        _link(field_path="/attributes/hours_b", ref_id="ref-2"),
+    ]
+    refs = [
+        _ref("ref-1", "doc-1", paragraph_index=1),
+        _ref("ref-2", "doc-1", paragraph_index=2),
+    ]
+    changes = [
+        _change(field_path="/attributes/hours_a", value=108),
+        _change(field_path="/attributes/hours_b", value=144),
+    ]
+
+    planned = plan_patches(changes, links, refs)
+    resolved = resolve_planned_patches({"doc-1": docx}, planned)
+    patched = patch_docx_bytes(docx, resolved["doc-1"])
+
+    assert document_text(patched).count("108 ч") == 1
+    assert document_text(patched).count("144 ч") == 1
+
+
+def test_identical_claims_for_one_coordinate_collapse():
+    docx = make_docx(_make_paragraph("72 ч"))
+    duplicate_link = _link()
+    planned = plan_patches(
+        [_change(value=108)],
+        [duplicate_link, duplicate_link],
+        [_ref(paragraph_index=1)],
+    )
+
+    resolved = resolve_planned_patches({"doc-1": docx}, planned)
+    patched = patch_docx_bytes(docx, resolved["doc-1"])
+
+    assert len(resolved["doc-1"]) == 1
+    assert "108 ч" in document_text(patched)
+
+
+def test_ambiguous_value_inside_source_area_fails_during_resolution():
+    docx = make_docx(_make_paragraph("72 ч и 72 ч"))
+    planned = plan_patches([_change(value=108)], [_link()], [_ref(paragraph_index=1)])
+
+    with pytest.raises(GenerationMappingError, match="найдено неоднозначно"):
+        resolve_planned_patches({"doc-1": docx}, planned)
+
+
 def _make_paragraph(text):
     return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
 
@@ -155,9 +202,7 @@ def test_end_to_end_package_generation():
 
 
 def test_evidence_pointing_outside_package_fails():
-    originals = [
-        OriginalDocument("doc-1", "RPD", "РПД.docx", make_docx(_make_paragraph("72 ч")))
-    ]
+    originals = [OriginalDocument("doc-1", "RPD", "РПД.docx", make_docx(_make_paragraph("72 ч")))]
     refs = [_ref("ref-1", "doc-missing", paragraph_index=1)]
     with pytest.raises(GenerationMappingError, match="вне пакета"):
         build_generation_documents([_change()], [_link()], refs, originals)

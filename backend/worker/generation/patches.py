@@ -16,6 +16,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError
+from json import dumps as _json_dumps
 from json import loads as _json_loads
 from typing import Literal
 
@@ -134,6 +135,18 @@ def _parse_locator(locator: str) -> dict[str, object]:
     return {key: coordinates[key] for key in _LOCATOR_KEYS if key in coordinates}
 
 
+def _patch_location_key(source_ref: Mapping[str, object]) -> str:
+    """Return the coordinates that actually select the patcher's search area."""
+
+    if source_ref.get("table") is not None:
+        coordinates = {key: source_ref[key] for key in ("table", "row", "col") if key in source_ref}
+    elif source_ref.get("paragraph_index") is not None:
+        coordinates = {"paragraph_index": source_ref["paragraph_index"]}
+    else:
+        coordinates = {}
+    return _json_dumps(coordinates, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def plan_patches(
     changes: Sequence[FieldChange], links: Sequence[FieldEvidence], refs: Sequence[SourceEvidence]
 ) -> dict[str, list[PlannedPatch]]:
@@ -205,8 +218,8 @@ def resolve_planned_patches(
 
     The recorded observed value must still occur in the area selected by the
     coordinates; otherwise the evidence is stale and patching is refused.
-    Two patches claiming the same on-page fragment with different texts also
-    fail here, before the patcher starts.
+    Two patches claiming the same source location and old text with different
+    replacements fail here. Identical claims collapse to one patch.
     """
 
     resolved: dict[str, tuple[DocxPatch, ...]] = {}
@@ -214,23 +227,32 @@ def resolve_planned_patches(
         document = documents.get(document_id)
         if document is None:
             raise GenerationMappingError(f"В пакете нет документа {document_id}")
-        claimed: dict[str, str] = {}
+        claimed: dict[tuple[str, str], str] = {}
         frozen: list[DocxPatch] = []
         for patch in patches:
             area = read_area_text(document, patch.source_ref)
-            if not any(text.count(patch.old_text) for text in area):
+            occurrences = sum(text.count(patch.old_text) for text in area)
+            if occurrences == 0:
                 raise GenerationMappingError(
                     f"В документе {document_id} не найдено записанное значение "
                     f"{patch.old_text!r} поля {_describe(patch.change)}; "
                     "свидетельство устарело относительно исходного файла"
                 )
-            previous = claimed.get(patch.old_text)
+            if occurrences > 1:
+                raise GenerationMappingError(
+                    f"В документе {document_id} значение {patch.old_text!r} "
+                    f"найдено неоднозначно в области источника поля {_describe(patch.change)}"
+                )
+            claim_key = (_patch_location_key(patch.source_ref), patch.old_text)
+            previous = claimed.get(claim_key)
             if previous is not None and previous != patch.new_text:
                 raise GenerationMappingError(
                     f"Два изменения претендуют на один фрагмент {patch.old_text!r} "
-                    f"документа {document_id}"
+                    f"в одном источнике документа {document_id}"
                 )
-            claimed[patch.old_text] = patch.new_text
+            if previous is not None:
+                continue
+            claimed[claim_key] = patch.new_text
             frozen.append(
                 DocxPatch(
                     source_ref=patch.source_ref,
