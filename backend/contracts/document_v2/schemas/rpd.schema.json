@@ -315,7 +315,7 @@
         "source_ref": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SourceRef"
+              "$ref": "#/$defs/SourceRefV2"
             },
             {
               "type": "null"
@@ -359,8 +359,8 @@
           "type": "string"
         },
         "program_id": {
-          "type": "string",
-          "title": "Program Id"
+          "title": "Program Id",
+          "type": "string"
         }
       },
       "required": [
@@ -490,9 +490,9 @@
       "title": "ScoreScaleItem",
       "type": "object"
     },
-    "SourceRef": {
+    "SourceRefV2": {
       "additionalProperties": false,
-      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
+      "description": "Координаты значения в исходном DOCX или XLSX.\n\nparagraph_index считает абзацы тела DOCX с 1, включая таблицы и исключая\nколонтитулы и сноски. Номера table, row и col также начинаются с 1;\nrow=1 обозначает заголовок таблицы. Для XLSX используются sheet_name и cell.\nТекст фрагмента хранится отдельно от ссылки.",
       "properties": {
         "file": {
           "title": "File",
@@ -558,81 +558,6 @@
           ],
           "default": null,
           "title": "Col"
-        }
-      },
-      "required": [
-        "file"
-      ],
-      "title": "SourceRef",
-      "type": "object"
-    },
-    "SourceRefV2": {
-      "additionalProperties": false,
-      "properties": {
-        "file": {
-          "title": "File",
-          "type": "string"
-        },
-        "section": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Section"
-        },
-        "table": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Table"
-        },
-        "row": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Row"
-        },
-        "col": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Col"
-        },
-        "paragraph_index": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Paragraph Index"
         },
         "sheet_name": {
           "anyOf": [
