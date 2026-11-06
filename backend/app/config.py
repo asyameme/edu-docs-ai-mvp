@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     chroma_url: str = "http://chroma:8000"
     # Только чтение прежнего тома при миграции 0003; рабочие оригиналы лежат в bytea.
     original_files_path: Path = Path("/data/originals")
-    max_upload_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
+    max_upload_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
     parser_url: str = ""
     analysis_url: str = ""
     analysis_original_base_url: str = "http://api:8000"

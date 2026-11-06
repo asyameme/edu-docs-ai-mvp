@@ -85,7 +85,7 @@
     },
     "CurriculumItem": {
       "additionalProperties": false,
-      "description": "Строка учебного плана (xlsx).",
+      "description": "Строка учебного плана (docx).",
       "properties": {
         "source_ref": {
           "$ref": "#/$defs/SourceRef"
@@ -570,7 +570,7 @@
     },
     "SourceRef": {
       "additionalProperties": false,
-      "description": "Место в исходном документе: file обязателен, остальное — что применимо.\n\nrow/col нумеруются с 1; row=1 — шапка таблицы.",
+      "description": "Указатель на место в исходном DOCX; текст фрагмента хранится отдельно. paragraph_index нумеруется с 1 по порядку абзацев тела документа, включая абзацы в таблицах, без колонтитулов и сносок. table/row/col также нумеруются с 1; row=1 — шапка таблицы. Указатель относится к версии файла, связанной с записью парсера.",
       "properties": {
         "file": {
           "title": "File",
@@ -587,6 +587,19 @@
           ],
           "default": null,
           "title": "Section"
+        },
+        "paragraph_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paragraph Index"
         },
         "table": {
           "anyOf": [

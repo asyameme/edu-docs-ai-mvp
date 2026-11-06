@@ -12,8 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 DocType = Literal[
     "RPD",            # рабочая программа дисциплины
     "RPP",            # рабочая программа практики
-    "CURRICULUM",     # учебный план (xlsx)
-    "MATRIX",         # матрица компетенций (xlsx)
+    "CURRICULUM",     # учебный план (docx)
+    "MATRIX",         # матрица компетенций (формат уточняется)
     "CHARACTERISTIC", # общая характеристика программы
     "CKMV",           # ЦКМВ
 ]
@@ -43,13 +43,17 @@ class ContractModel(BaseModel):
 
 
 class SourceRef(ContractModel):
-    """Место в исходном документе: file обязателен, остальное — что применимо.
+    """Указатель на место в исходном DOCX; текст фрагмента хранится отдельно.
 
-    row/col нумеруются с 1; row=1 — шапка таблицы.
+    paragraph_index нумеруется с 1 по порядку абзацев тела документа, включая
+    абзацы в таблицах, без колонтитулов и сносок. table/row/col также нумеруются
+    с 1; row=1 — шапка таблицы. Указатель относится к версии файла, связанной
+    с записью парсера.
     """
 
     file: str
     section: Optional[str] = None
+    paragraph_index: Optional[int] = Field(default=None, ge=1)
     table: Optional[int] = None
     row: Optional[int] = None
     col: Optional[int] = None
@@ -138,7 +142,7 @@ class AssessmentTool(BaseEntity):
 
 
 class CurriculumItem(BaseEntity):
-    """Строка учебного плана (xlsx)."""
+    """Строка учебного плана (docx)."""
 
     discipline_name: str
     semester: int = Field(ge=1, le=8)
