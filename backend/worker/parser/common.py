@@ -114,11 +114,11 @@ def finalize_output(output, document):
         records = value if isinstance(value, list) else [value]
         for record in records:
             ref = getattr(record, "source_ref", None)
-            if ref is None:
+            if ref is None or ref.paragraph_index is not None:
                 continue
             if ref.table is not None:
                 ref.paragraph_index = table_anchor(ref)
-            elif ref.paragraph_index is None and ref.section in headings:
+            elif ref.section in headings:
                 candidates = headings[ref.section]
                 if len(candidates) == 1:
                     ref.paragraph_index = indices[candidates[0]]
