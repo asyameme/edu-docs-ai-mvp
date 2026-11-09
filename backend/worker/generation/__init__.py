@@ -1,7 +1,7 @@
 """Генерация выходных документов пакета программы."""
 
 from .docx_patch import DocxPatch, DocxPatchError, patch_docx_bytes, read_area_text
-from .generator import SourceDocx, generate_docx_package
+from .generator import SourceDocx, generate_docx_package, generate_program_package
 from .matrix_xlsx import (
     DerivedMatrix,
     MatrixRow,
@@ -9,7 +9,13 @@ from .matrix_xlsx import (
     derive_matrix,
     read_matrix_xlsx,
 )
-from .package import GeneratedDocx, GenerationPackageError, build_docx_package
+from .package import (
+    GeneratedDocx,
+    GeneratedXlsx,
+    GenerationPackageError,
+    build_docx_package,
+    build_program_package,
+)
 from .patches import (
     FieldChange,
     FieldEvidence,
@@ -29,6 +35,7 @@ __all__ = [
     "FieldChange",
     "FieldEvidence",
     "GeneratedDocx",
+    "GeneratedXlsx",
     "GenerationMappingError",
     "GenerationPackageError",
     "MatrixRow",
@@ -39,8 +46,10 @@ __all__ = [
     "build_docx_package",
     "build_generation_documents",
     "build_matrix_xlsx",
+    "build_program_package",
     "derive_matrix",
     "generate_docx_package",
+    "generate_program_package",
     "patch_docx_bytes",
     "plan_patches",
     "read_area_text",
