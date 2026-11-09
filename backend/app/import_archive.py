@@ -8,6 +8,7 @@ import zipfile
 import zlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from unicodedata import normalize
 
 from app.errors import DomainError
 
@@ -17,6 +18,7 @@ class PackageFile:
     name: str
     content: bytes
     sha256: str
+    parse: bool = True
 
 
 def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
@@ -26,6 +28,7 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
     if len(data) > max_bytes:
         raise DomainError(413, "Архив превышает допустимый размер")
     files, names, hashes = [], set(), set()
+    parsed_count = 0
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             members = archive.infolist()
@@ -54,7 +57,16 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
                     raise DomainError(422, f"Неподдерживаемый формат: {suffix}")
                 if member.file_size == 0:
                     raise DomainError(422, f"Файл пуст: {name}")
-                if member.file_size > max_bytes or len(files) >= 100:
+                if member.file_size > max_bytes:
+                    raise DomainError(413, "Превышен размер файла или число документов (100)")
+                parse = not (
+                    path.suffix.lower() == ".xlsx"
+                    and any(
+                        normalize("NFC", folder).casefold() == "матрица компетенций"
+                        for folder in path.parts[:-1]
+                    )
+                )
+                if parse and parsed_count >= 100:
                     raise DomainError(413, "Превышен размер файла или число документов (100)")
                 if name.casefold() in names:
                     raise DomainError(422, "Повторяющееся имя в архиве")
@@ -64,7 +76,8 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
                     raise DomainError(422, "Один документ включён в пакет несколько раз")
                 names.add(name.casefold())
                 hashes.add(digest)
-                files.append(PackageFile(name, content, digest))
+                files.append(PackageFile(name, content, digest, parse=parse))
+                parsed_count += parse
     except (
         zipfile.BadZipFile,
         RuntimeError,
@@ -75,7 +88,7 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
         zlib.error,
     ) as error:
         raise DomainError(422, "Архив повреждён или не поддерживается") from error
-    if not files:
-        raise DomainError(422, "В архиве нет документов DOCX/XLSX")
+    if not parsed_count:
+        raise DomainError(422, "В архиве нет документов для разбора")
     fingerprint = hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()
     return fingerprint, files

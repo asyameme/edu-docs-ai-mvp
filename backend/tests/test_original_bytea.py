@@ -93,7 +93,7 @@ def test_failure_after_original_insert_rolls_back_bytes_metadata_and_job(monkeyp
 
             def operation():
                 return ImportRepository(pool).create(
-                    program["id"], "fingerprint", str(uuid4()), [("source.pdf", stored)]
+                    program["id"], "fingerprint", str(uuid4()), [("source.pdf", stored, True)]
                 )
         else:
             insert = Repository.insert_document

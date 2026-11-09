@@ -69,7 +69,7 @@ class ImportRepository:
                 return previous["id"], used
             job_id = uuid4()
             documents = []
-            for member_name, item in stored:
+            for member_name, item, parse in stored:
                 previous = cur.execute(
                     """SELECT id FROM source_documents WHERE program_id=%s AND sha256=%s
                        ORDER BY created_at,id LIMIT 1""",
@@ -81,7 +81,8 @@ class ImportRepository:
                     document_id = item["id"]
                     Repository.insert_document(cur, program_id, item)
                     used.add(document_id)
-                documents.append({"document_id": str(document_id), "member_name": member_name})
+                if parse:
+                    documents.append({"document_id": str(document_id), "member_name": member_name})
             cur.execute(
                 """INSERT INTO processing_jobs (
                    id,program_id,input_version_id,operation_key,request_hash,type,

@@ -16,7 +16,9 @@ def upload(members):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         for name, content in members:
-            archive.writestr(name, content)
+            info = zipfile.ZipInfo(name)
+            info.filename = name
+            archive.writestr(info, content)
     stream.seek(0)
     return SimpleNamespace(filename="package.zip", file=stream)
 
@@ -48,12 +50,61 @@ def test_package_identity_is_independent_of_zip_order_and_names():
     assert [f.name for f in files] == ["one.docx", "two.xlsx"]
 
 
+def test_pm_archive_preserves_matrix_without_sending_it_to_parser():
+    documents = [
+        ("РПД/Первая.docx", b"rpd-1"),
+        ("РПД/Вторая.docx", b"rpd-2"),
+        ("РПП/Практика.docx", b"rpp"),
+        ("Учебный план/План.docx", b"plan"),
+        ("Характеристика/Характеристика.docx", b"characteristic"),
+        ("ЦКМВ/ЦКМВ.docx", b"ckmv"),
+    ]
+    matrix = ("Матрица компетенций/Матрица компетенций.xlsx", b"matrix")
+    with_matrix, files = read_package(upload([matrix, *documents]), 10000)
+    without_matrix, _ = read_package(upload(documents), 10000)
+    assert with_matrix != without_matrix
+    assert files[0].name == matrix[0]
+    assert files[0].parse is False
+    assert [(item.name, item.parse) for item in files[1:]] == [
+        (name, True) for name, _ in documents
+    ]
+
+
 def test_archive_checks_compressed_size_and_member_count():
     with pytest.raises(DomainError) as failure:
         read_package(upload([("one.docx", b"one")]), 10)
     assert failure.value.status == 413
     with pytest.raises(DomainError):
-        read_package(upload([(f"{i}.docx", str(i).encode()) for i in range(51)]), 100000)
+        read_package(upload([(f"{i}.docx", str(i).encode()) for i in range(101)]), 100000)
+
+    _, files = read_package(
+        upload([
+            ("Матрица компетенций/Матрица компетенций.xlsx", b"matrix"),
+            *((f"РПД/{i}.docx", str(i).encode()) for i in range(100)),
+        ]),
+        100000,
+    )
+    assert len(files) == 101
+    assert sum(file.parse for file in files) == 100
+
+
+def test_archive_with_only_matrix_has_no_documents_to_parse():
+    with pytest.raises(DomainError, match="нет документов для разбора"):
+        read_package(
+            upload([("Матрица компетенций/Матрица компетенций.xlsx", b"matrix")]),
+            10000,
+        )
+
+
+def test_archive_may_have_one_wrapper_folder():
+    _, files = read_package(
+        upload([
+            ("данные/Матрица компетенций/Матрица компетенций.xlsx", b"matrix"),
+            ("данные/РПД/РПД.docx", b"rpd"),
+        ]),
+        10000,
+    )
+    assert [file.parse for file in files] == [False, True]
 
 
 def test_archive_rejects_damaged_compressed_document():

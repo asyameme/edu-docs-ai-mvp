@@ -14,11 +14,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize(
     ("name", "expected_type"),
-    [("РПД_матанализ1.docx", "RPD"), ("РПП.docx", "RPP"), ("UP.docx", "CURRICULUM")],
+    [
+        ("РПД/РПД_матанализ1.docx", "RPD"),
+        ("РПП/РПП.docx", "RPP"),
+        ("Учебный план/UP.docx", "CURRICULUM"),
+        ("Характеристика/Общая характеристика.docx", "CHARACTERISTIC"),
+        ("ЦКМВ/ЦКМВ.docx", "CKMV"),
+    ],
 )
 def test_worker_activity_stores_real_parser_output_without_url(monkeypatch, name, expected_type):
     program_id, document_id, job_id = uuid4(), uuid4(), uuid4()
-    content = (ROOT / "tests" / "originals" / name).read_bytes()
+    content = (ROOT / "tests" / "originals" / Path(name).name).read_bytes()
     from hashlib import sha256
 
     saved = []
@@ -62,7 +68,7 @@ def test_worker_activity_stores_real_parser_output_without_url(monkeypatch, name
     output = saved[0][1]["output"]
     assert output["meta"]["doc_type"] == expected_type
     snapshot, _ = to_snapshot(program_id, [{"document_id": document_id, "output": output}])
-    assert snapshot["entities"] and snapshot["relations"]
+    assert snapshot["entities"] and snapshot["source_refs"]
 
 
 def test_worker_marks_unsupported_xlsx_without_url(monkeypatch):

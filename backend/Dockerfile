@@ -8,6 +8,7 @@ RUN mkdir -p /data/originals /data/artifacts && chown appuser:appuser /workspace
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser contracts ./contracts
 COPY --chown=appuser:appuser worker/parser ./worker/parser
+COPY --chown=appuser:appuser worker/generation ./worker/generation
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser examples ./examples
 COPY --chown=appuser:appuser pyproject.toml alembic.ini ./
