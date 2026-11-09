@@ -29,7 +29,7 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             members = archive.infolist()
-            if len(members) > 100 or sum(m.file_size for m in members) > 500 * 1024 * 1024:
+            if len(members) > 200 or sum(m.file_size for m in members) > 500 * 1024 * 1024:
                 raise DomainError(413, "Слишком большой распакованный пакет")
             for member in members:
                 name = member.filename
@@ -54,8 +54,8 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
                     raise DomainError(422, f"Неподдерживаемый формат: {suffix}")
                 if member.file_size == 0:
                     raise DomainError(422, f"Файл пуст: {name}")
-                if member.file_size > max_bytes or len(files) >= 50:
-                    raise DomainError(413, "Превышен размер файла или число документов (50)")
+                if member.file_size > max_bytes or len(files) >= 100:
+                    raise DomainError(413, "Превышен размер файла или число документов (100)")
                 if name.casefold() in names:
                     raise DomainError(422, "Повторяющееся имя в архиве")
                 content = archive.read(member)
