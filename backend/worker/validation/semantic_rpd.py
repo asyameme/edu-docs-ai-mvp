@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import defaultdict
-from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-
-SemanticEvaluator = Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
-
-
-class SemanticEvaluationUnavailable(RuntimeError):
-    """The semantic model is not configured or could not return a usable answer."""
+if __package__:
+    from .semantic_llm import (
+        SemanticEvaluator,
+        SemanticEvaluationUnavailable,
+        evaluate_semantic_payload,
+    )
+else:  # Поддерживаем и прямой запуск semantic_rpd.py.
+    from semantic_llm import (
+        SemanticEvaluator,
+        SemanticEvaluationUnavailable,
+        evaluate_semantic_payload,
+    )
 
 
 SYSTEM_PROMPT = """Ты проверяешь внутреннюю согласованность одной рабочей программы дисциплины.
@@ -40,16 +44,6 @@ SYSTEM_PROMPT = """Ты проверяешь внутреннюю согласо
 def _source_ref(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     ref = row.get("source_ref") if row else None
     return dict(ref) if isinstance(ref, Mapping) else None
-
-
-def _strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    stripped = stripped.strip("`").lstrip()
-    if stripped[:4].lower() == "json":
-        stripped = stripped[4:].lstrip()
-    return stripped
 
 
 def _finding(
@@ -81,68 +75,6 @@ def _finding(
     if extra:
         evidence.update(extra)
     return {"code": code, "status": "needs_review", "message": message, "evidence": evidence}
-
-
-def _litellm_evaluator(
-    payload: Mapping[str, Any], config: Mapping[str, Any]
-) -> Mapping[str, Any]:
-    try:
-        from dotenv import load_dotenv
-    except ImportError as exc:
-        raise SemanticEvaluationUnavailable(
-            "Не установлен python-dotenv; установите зависимости backend."
-        ) from exc
-
-    project_root = Path(__file__).resolve().parents[3]
-    load_dotenv(project_root / ".env", override=False)
-    model = os.getenv(str(config.get("model_env", "VALIDATION_LLM_MODEL")))
-    api_key = os.getenv(str(config.get("api_key_env", "VALIDATION_LLM_API_KEY")))
-    api_base = os.getenv(str(config.get("api_base_env", "VALIDATION_LLM_API_BASE")))
-    if not model or not api_key:
-        raise SemanticEvaluationUnavailable(
-            "Не настроены VALIDATION_LLM_MODEL и/или VALIDATION_LLM_API_KEY."
-        )
-    try:
-        from litellm import completion
-    except ImportError as exc:
-        raise SemanticEvaluationUnavailable(
-            "Не установлен LiteLLM; установите зависимости backend."
-        ) from exc
-
-    request: dict[str, Any] = {
-        "model": model,
-        "api_key": api_key,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        "temperature": 0,
-        "max_tokens": int(config.get("max_tokens", 1800)),
-        "timeout": float(config.get("timeout_seconds", 60)),
-    }
-    if api_base:
-        request["api_base"] = api_base
-    if config.get("disable_thinking", True):
-        # Qwen3 на vLLM: рассуждения уходят в reasoning_content и съедают
-        # бюджет max_tokens до финального ответа; флаг понимает только
-        # vLLM-шаблон Qwen3, для других эндпоинтов отключить в rules.yaml.
-        request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
-    try:
-        response = completion(**request)
-        content = response.choices[0].message.content
-        if not isinstance(content, str):
-            raise SemanticEvaluationUnavailable("LLM вернула ответ не в текстовом формате.")
-        parsed = json.loads(_strip_code_fence(content))
-    except SemanticEvaluationUnavailable:
-        raise
-    except Exception as exc:
-        # Не включаем тело ошибки провайдера: оно может содержать чувствительные данные.
-        raise SemanticEvaluationUnavailable(
-            f"Вызов LLM завершился ошибкой ({type(exc).__name__})."
-        ) from exc
-    if not isinstance(parsed, Mapping):
-        raise SemanticEvaluationUnavailable("LLM вернула JSON не в виде объекта.")
-    return parsed
 
 
 def evaluate_rpd_alignment(
@@ -336,9 +268,13 @@ def evaluate_rpd_alignment(
         "learning_outcomes": model_outcomes,
         "course_content_section_2": course_items,
     }
-    run_evaluator = evaluator or _litellm_evaluator
     try:
-        response = run_evaluator(payload, llm_config)
+        response = evaluate_semantic_payload(
+            payload,
+            llm_config,
+            system_prompt=SYSTEM_PROMPT,
+            evaluator=evaluator,
+        )
     except Exception as exc:
         error_message = str(exc) if isinstance(exc, SemanticEvaluationUnavailable) else f"ошибка {type(exc).__name__}"
         findings.append(_finding(

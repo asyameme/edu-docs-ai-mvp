@@ -9,10 +9,12 @@ from pydantic import ValidationError
 
 from backend.contracts.document_v2 import models as contract
 from backend.contracts.document_v2.models import (
-    Competency, CurriculumMeta, CurriculumOutput, ParseIssue,
+    CKMVOutput, CharacteristicOutput, Competency, CurriculumMeta, CurriculumOutput, ParseIssue,
     RPDOutput, RPPOutput, SourceRef, parse_document,
 )
 from backend.worker.parser.common import finalize_output, read_section
+from backend.worker.parser.parse_characteristic import parse_characteristic
+from backend.worker.parser.parse_ckmv import parse_ckmv
 from backend.worker.parser.parse_curriculum import parse_curriculum
 from backend.worker.parser.parse_rpd import parse_rpd
 from backend.worker.parser.parse_rpp import parse_rpp
@@ -72,7 +74,7 @@ class TestParserContract(unittest.TestCase):
     def test_modules_import_the_same_shared_classes(self):
         for name in (
             "common", "results", "discipline", "content", "assessment",
-            "parse_rpd", "parse_rpp", "parse_curriculum",
+            "parse_rpd", "parse_rpp", "parse_curriculum", "parse_ckmv", "parse_characteristic",
         ):
             module = importlib.import_module("backend.worker.parser." + name)
             for cls_name in ("ParseIssue", "SourceRef", "Competency", "Discipline"):
@@ -81,7 +83,10 @@ class TestParserContract(unittest.TestCase):
 
     def test_schema_matches_shared_models(self):
         schemas = ROOT / "backend/contracts/document_v2/schemas"
-        for name, model in (("rpd", RPDOutput), ("rpp", RPPOutput), ("curriculum", CurriculumOutput)):
+        for name, model in (
+            ("rpd", RPDOutput), ("rpp", RPPOutput), ("curriculum", CurriculumOutput),
+            ("ckmv", CKMVOutput), ("characteristic", CharacteristicOutput),
+        ):
             with self.subTest(document=name):
                 schema = json.loads((schemas / f"{name}.schema.json").read_text())
                 self.assertEqual(
@@ -149,17 +154,19 @@ class TestParserContract(unittest.TestCase):
 
     def test_examples_are_accepted_by_v2_contract(self):
         examples = ROOT / "backend/worker/parser/json_examples_v2"
-        for name in ("rpd", "rpp", "curriculum"):
+        for name in ("rpd", "rpp", "curriculum", "ckmv", "characteristic"):
             path = examples / f"{name}_v2.json"
             with self.subTest(path=path.name):
                 output = parse_document(json.loads(path.read_text()))
                 self.assertEqual(parse_document(output.model_dump(mode="json")), output)
 
-    def test_all_three_parsers_return_resolvable_paragraph_indices(self):
+    def test_parsers_return_resolvable_paragraph_indices(self):
         cases = (
             ("РПД_матанализ1.docx", parse_rpd, RPDOutput),
             ("РПП.docx", parse_rpp, RPPOutput),
             ("UP.docx", parse_curriculum, CurriculumOutput),
+            ("ЦКМВ.docx", parse_ckmv, CKMVOutput),
+            ("Общая характеристика.docx", parse_characteristic, CharacteristicOutput),
         )
         for name, parser, model in cases:
             with self.subTest(file=name):
@@ -171,10 +178,8 @@ class TestParserContract(unittest.TestCase):
                 paragraphs = list(document.element.body.iter(qn("w:p")))
                 for field in type(output).model_fields:
                     values = getattr(output, field)
-                    if not isinstance(values, list):
-                        continue
-                    for record in values:
-                        ref = record.source_ref
+                    for record in values if isinstance(values, list) else [values]:
+                        ref = getattr(record, "source_ref", None)
                         if ref is None:
                             continue
                         if ref.table is not None:

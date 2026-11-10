@@ -11,10 +11,14 @@ import unicodedata
 
 
 if __package__:
-    from .semantic_rpd import SemanticEvaluator, evaluate_rpd_alignment
+    from .semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
+    from .semantic_llm import SemanticEvaluator
+    from .semantic_rpd import evaluate_rpd_alignment
     from .semantic_competency import evaluate_competency_pair, CompetencyEvaluator
 else:  # Поддерживаем и прямой запуск validator.py.
-    from semantic_rpd import SemanticEvaluator, evaluate_rpd_alignment
+    from semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
+    from semantic_llm import SemanticEvaluator
+    from semantic_rpd import evaluate_rpd_alignment
     from semantic_competency import evaluate_competency_pair, CompetencyEvaluator
 
 try:
@@ -352,6 +356,7 @@ def _semantic_rpd_alignment(
 
 
 
+
 def _hours_against_curriculum(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     """R-02: сравнить общую нагрузку одинаковой дисциплины в одном семестре."""
     checks, findings = 0, []
@@ -663,6 +668,38 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                      'source_refs': refs}))
     return _result(rule, checks, findings)
 
+  
+def _semantic_indicator_consistency(
+    rule: Mapping[str, Any],
+    docs: Sequence[Document],
+    semantic_evaluator: SemanticEvaluator | None = None,
+) -> RuleResult:
+    scope, inputs = rule.get("scope", {}), rule["inputs"]
+    allowed = {str(value).lower() for value in scope.get("document_types", [])}
+    indicator_documents = []
+    for doc in docs:
+        if doc.role not in allowed:
+            continue
+        indicators = []
+        for row in _records(doc, inputs["indicators_path"]):
+            item = dict(row)
+            item["_source_ref"] = _source_ref(doc, row)
+            indicators.append(item)
+        indicator_documents.append(IndicatorDocument(
+            label=doc.label,
+            document_type=doc.role or "unknown",
+            program_id=doc.program_id,
+            indicators=indicators,
+            competencies=_records(doc, inputs["competencies_path"]),
+        ))
+
+    checks, raw_findings = evaluate_indicator_consistency(
+        documents=indicator_documents,
+        llm_config=rule.get("llm", {}),
+        evaluator=semantic_evaluator,
+    )
+    return _result(rule, checks, [Finding(**item) for item in raw_findings])
+
 
 HANDLERS = {
     "competency_consistency": _competency_consistency,
@@ -682,7 +719,9 @@ HANDLERS = {
     "reference_exists": _references,
     "unique_by_fields": _unique,
     "semantic_rpd_alignment": _semantic_rpd_alignment,
+    "semantic_indicator_consistency": _semantic_indicator_consistency,
 }
+SEMANTIC_RULE_TYPES = {"semantic_rpd_alignment", "semantic_indicator_consistency"}
 
 
 def run_validation(
@@ -701,7 +740,7 @@ def run_validation(
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
         if rule.get("type") == "competency_formulations":
             results.append(handler(rule, docs, competency_evaluator))
-        elif rule.get("type") == "semantic_rpd_alignment":
+        elif rule.get("type") in SEMANTIC_RULE_TYPES:
             results.append(handler(rule, docs, semantic_evaluator))
         else:
             results.append(handler(rule, docs))
