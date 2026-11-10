@@ -61,7 +61,7 @@ def upload_package(
         fingerprint, members = read_package(file, originals.max_bytes)
         for member in members:
             upload = StoredUpload(filename=member.name, file=io.BytesIO(member.content))
-            stored.append((member.name, originals.save(upload)))
+            stored.append((member.name, originals.save(upload), member.parse))
         imports = ImportRepository(repo.pool)
         job_id, _ = imports.create(program_id, fingerprint, operation_key, stored)
     finally:
