@@ -43,10 +43,16 @@ def test_archive_rejects_empty_unsupported_and_duplicate_documents(members):
         read_package(upload(members), 1024 * 1024)
 
 
-def test_package_identity_is_independent_of_zip_order_and_names():
+def test_package_identity_preserves_names_that_select_the_parser():
     first, files = read_package(upload([("one.docx", b"one"), ("two.xlsx", b"two")]), 10000)
-    second, _ = read_package(upload([("renamed.xlsx", b"two"), ("nested/new.docx", b"one")]), 10000)
-    assert first == second
+    reordered, _ = read_package(upload([("two.xlsx", b"two"), ("one.docx", b"one")]), 10000)
+    renamed, _ = read_package(
+        upload([("renamed.xlsx", b"two"), ("nested/new.docx", b"one")]), 10000
+    )
+    other_folder, _ = read_package(upload([("РПД/one.docx", b"one"), ("two.xlsx", b"two")]), 10000)
+    assert first == reordered
+    assert first != renamed
+    assert first != other_folder
     assert [f.name for f in files] == ["one.docx", "two.xlsx"]
 
 

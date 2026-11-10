@@ -11,6 +11,7 @@ from temporalio.client import Client
 
 from app.config import get_settings
 from app.errors import DomainError
+from app.generation_api import router as generation_router
 from app.health import Resources, check_dependencies
 from app.import_api import router as import_router
 from app.models import LiveResponse, ReadyResponse
@@ -76,6 +77,7 @@ app.include_router(health)
 app.include_router(program_router)
 app.include_router(import_router)
 app.include_router(review_router)
+app.include_router(generation_router)
 
 
 @app.exception_handler(DomainError)

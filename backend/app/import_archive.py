@@ -90,5 +90,9 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
         raise DomainError(422, "Архив повреждён или не поддерживается") from error
     if not parsed_count:
         raise DomainError(422, "В архиве нет документов для разбора")
-    fingerprint = hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()
+    fingerprint = hashlib.sha256(
+        "\n".join(
+            sorted(f"{file.name}\0{file.sha256}\0{int(file.parse)}" for file in files)
+        ).encode()
+    ).hexdigest()
     return fingerprint, files
