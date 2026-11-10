@@ -162,6 +162,37 @@ rules:
       JSON. В текущем JSON РПД все такие ссылки находятся. Это не проверка
       формулировок и кодов индикаторов относительно ЦКМВ.
 
+  - id: "R-08-semantic"
+    name: "Смысловая согласованность индикаторов с одинаковым кодом"
+    type: "semantic_indicator_consistency"
+    status: "draft"
+    scope:
+      document_types: ["rpd", "rpp", "ckmv"]
+    inputs:
+      indicators_path: "$.indicators[*]"
+      competencies_path: "$.competencies[*]"
+    llm:
+      model_env: "VALIDATION_LLM_MODEL"
+      api_key_env: "VALIDATION_LLM_API_KEY"
+      api_base_env: "VALIDATION_LLM_API_BASE"
+      prompt_version: "r08-v1"
+      timeout_seconds: 60
+      max_tokens: 2400
+      disable_thinking: true
+    basis:
+      kind: "project_consistency_rule"
+      issue: 6
+      rule_id: "R-08"
+      reference: "Сопоставление описаний индикатора и родительской компетенции в документах одного пакета"
+    notes: >-
+      Группирует индикаторы по коду в пределах одной программы и сравнивает
+      формулировки и контекст родительской компетенции в РПД, РПП и ЦКМВ.
+      Совпадающие после нормализации формулировки и родительские компетенции
+      проходят без вызова LLM. Для различающихся данных LLM определяет только
+      смысловую эквивалентность, существенное различие или неопределённость.
+      Эталонный текст не назначается; различие и неопределённость требуют
+      экспертной проверки и не являются нормативным нарушением.
+
   - id: "R-11"
     name: "Смысловая связь результатов обучения с содержанием и оцениванием в РПД"
     type: "semantic_rpd_alignment"
@@ -179,6 +210,7 @@ rules:
       model_env: "VALIDATION_LLM_MODEL"
       api_key_env: "VALIDATION_LLM_API_KEY"
       api_base_env: "VALIDATION_LLM_API_BASE"
+      prompt_version: "r11-v1"
       timeout_seconds: 60
       max_tokens: 4000
       # Qwen3 на vLLM: без отключения модель тратит max_tokens на reasoning
