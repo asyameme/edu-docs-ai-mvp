@@ -49,6 +49,7 @@ from backend.contracts.document_v2.models import (
     RPDMeta,
     RPDOutput,
     SourceRef,
+    Discipline,
 )
 from .results import (
     extract_indicators,
@@ -173,8 +174,19 @@ def parse_rpd(
         education_mode=education_mode,
     )
     if discipline is None:
-        details = "; ".join(issue.message for issue in discipline_issues)
-        raise ValueError(f"Для РПД v2 нужна дисциплина с нагрузкой. {details}".strip())
+        name = extract_discipline_name(title_parts)
+        if not name or workload_track is not None or education_mode is not None:
+            details = "; ".join(issue.message for issue in discipline_issues)
+            raise ValueError(f"Не удалось собрать дисциплину РПД. {details}".strip())
+
+        discipline = Discipline(
+            name=name,
+            semesters=[],
+            credit_units=None,
+            hours_total=None,
+            hours_by_kind={},
+            source_ref=SourceRef(file=file_path.name, section="титул"),
+        )
 
     output = RPDOutput(
         meta=RPDMeta(
@@ -223,7 +235,7 @@ def parse_rpd(
     course_topics, content_issues = extract_course_content(
         document,
         file_path.name,
-        semesters=discipline.semesters,
+        semesters=discipline.semesters or None,
     )
 
     output.parse_issues.extend(content_issues)
