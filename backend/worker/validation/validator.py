@@ -13,9 +13,11 @@ import unicodedata
 if __package__:
     from .semantic_rpd import SemanticEvaluator, evaluate_rpd_alignment
     from .semantic_competency import evaluate_competency_pair, CompetencyEvaluator
+    from .competency_codes import suggest_competency_code
 else:  # Поддерживаем и прямой запуск validator.py.
     from semantic_rpd import SemanticEvaluator, evaluate_rpd_alignment
     from semantic_competency import evaluate_competency_pair, CompetencyEvaluator
+    from competency_codes import suggest_competency_code
 
 try:
     import yaml
@@ -561,16 +563,36 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
                 if not code:
                     continue
                 checks += 1
+                alternative = suggest_competency_code(code)
                 if code not in declared:
-                    findings.append(Finding('unknown_competency_code', 'failed',
-                        f'В {doc.label} связь использует неизвестный код компетенции {code}.',
-                        {'code': code, 'source_refs': [_source_ref(doc, rel)]}))
+                    if alternative in declared:
+                        findings.append(Finding(
+                            'competency_code_alias_review', 'needs_review',
+                            f'Код {code} в {doc.label} может соответствовать {alternative}. Требуется решение пользователя.',
+                            {'code': code, 'suggested_code': alternative,
+                             'requires_user_decision': True,
+                             'source_refs': [_source_ref(doc, rel),
+                                             *[_source_ref(d, r) for d, r in declared[alternative]]]}))
+                    else:
+                        findings.append(Finding('unknown_competency_code', 'failed',
+                            f'В {doc.label} связь использует неизвестный код компетенции {code}.',
+                            {'code': code, 'source_refs': [_source_ref(doc, rel)]}))
                 elif authoritative and code not in authoritative:
-                    # A partial CKMV/characteristic list is not an exhaustive catalogue.
-                    findings.append(Finding('competency_not_in_program_catalogue', 'needs_review',
-                        f'Код {code} не найден в доступных справочниках программы.',
-                        {'code': code, 'source_refs': [_source_ref(doc, rel),
-                          *[_source_ref(d, r) for d, r in declared[code]]]}))
+                    if alternative in authoritative:
+                        findings.append(Finding(
+                            'competency_code_alias_review', 'needs_review',
+                            f'Код {code} в {doc.label} может соответствовать коду {alternative} из справочника программы.',
+                            {'code': code, 'suggested_code': alternative,
+                             'requires_user_decision': True,
+                             'source_refs': [_source_ref(doc, rel),
+                                             *[_source_ref(d, r) for d, r in declared[alternative]
+                                               if d.role in {'ckmv', 'characteristic'}]]}))
+                    else:
+                        # A partial CKMV/characteristic list is not an exhaustive catalogue.
+                        findings.append(Finding('competency_not_in_program_catalogue', 'needs_review',
+                            f'Код {code} не найден в доступных справочниках программы.',
+                            {'code': code, 'source_refs': [_source_ref(doc, rel),
+                              *[_source_ref(d, r) for d, r in declared[code]]]}))
         # Compare only disciplines explicitly represented in the supplied curriculum.
         # A curriculum_item can occur in several semesters; match both name and semester.
         for plan in (d for d in group if d.role == 'curriculum'):
@@ -599,10 +621,32 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
                                 f'Недостаточно связей для проверки компетенций «{name}» в семестре {semester}.',
                                 {'semester': semester, 'source_refs': refs}))
                         elif plan_codes != doc_codes:
-                            findings.append(Finding('competency_relation_mismatch', 'failed',
-                                f'Компетенции «{name}» в семестре {semester} различаются в УП и {doc.role.upper()}.',
-                                {'semester': semester, 'only_in_curriculum': sorted(plan_codes - doc_codes),
-                                 'only_in_document': sorted(doc_codes - plan_codes), 'source_refs': refs}))
+                            only_plan = plan_codes - doc_codes
+                            only_doc = doc_codes - plan_codes
+                            suggested_pairs = [
+                                {'source_code': p, 'suggested_code': d}
+                                for p in sorted(only_plan)
+                                for d in sorted(only_doc)
+                                if suggest_competency_code(p) == d
+                            ]
+                            # An alias suggestion must never hide unrelated differences.
+                            unmatched_plan = only_plan - {p['source_code'] for p in suggested_pairs}
+                            unmatched_doc = only_doc - {p['suggested_code'] for p in suggested_pairs}
+                            unambiguous = (len(suggested_pairs) == 1 and
+                                           not unmatched_plan and not unmatched_doc)
+                            findings.append(Finding(
+                                'competency_code_alias_review' if unambiguous else 'competency_relation_mismatch',
+                                'needs_review' if unambiguous else 'failed',
+                                (f'В УП и {doc.role.upper()} разные обозначения компетенции «{name}» '
+                                 f'в семестре {semester}. Требуется решение пользователя.'
+                                 if unambiguous else
+                                 f'Компетенции «{name}» в семестре {semester} различаются в УП и {doc.role.upper()}.'),
+                                {'semester': semester,
+                                 'only_in_curriculum': sorted(only_plan),
+                                 'only_in_document': sorted(only_doc),
+                                 'suggested_pairs': suggested_pairs,
+                                 'requires_user_decision': unambiguous,
+                                 'source_refs': refs}))
     return _result(rule, checks, findings)
 
 
@@ -613,13 +657,13 @@ def _canonical_formulation(value: str) -> str:
 
 def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                              evaluator: CompetencyEvaluator | None = None) -> RuleResult:
-    """R-07: canonical reference comparison with optional real semantic judgment.
+    """R-07: compare formulations of the same literal code without selecting a winner.
 
-    Different codes are never treated as equivalent. Without a semantic model,
-    a nontrivial text difference is marked for manual review, never passed.
+    CKMV and characteristic are observations, not automatically authoritative.
+    Distinct competency codes are handled separately by R-01.
     """
     checks, findings = 0, []
-    for pid, group in _program_groups(docs).items():
+    for _pid, group in _program_groups(docs).items():
         by_code: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         for doc in group:
             if doc.role not in {'rpd', 'rpp', 'ckmv', 'characteristic', 'curriculum'}:
@@ -628,39 +672,49 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                 code = _code(row.get('code'))
                 if code:
                     by_code[code].append((doc, row))
+
         for code, records in sorted(by_code.items()):
-            # Prefer CKMV as the comparative reference; characteristic is fallback.
-            baseline = next(((d, r) for role in ('ckmv', 'characteristic')
-                             for d, r in records if d.role == role and _code(r.get('formulation'))), None)
-            if baseline is None:
-                # Without an approved catalogue, cross-document text comparisons
-                # must not be presented as normative validity.
+            if len(records) < 2:
                 continue
-            bdoc, brow = baseline
-            base_text = brow['formulation']
-            for doc, row in records:
-                if doc is bdoc and row is brow:
-                    continue
-                checks += 1
-                text = row.get('formulation')
-                refs = [_source_ref(bdoc, brow), _source_ref(doc, row)]
-                if not isinstance(text, str) or not text.strip():
-                    findings.append(Finding('competency_formulation_missing', 'needs_review',
-                        f'Нет формулировки компетенции {code} в {doc.label}.',
-                        {'code': code, 'source_refs': refs}))
-                    continue
-                if _canonical_formulation(base_text) == _canonical_formulation(text):
-                    continue
-                outcome = evaluate_competency_pair(code, base_text, text, evaluator=evaluator,
-                                                  config=rule.get('llm', {}))
-                if outcome['status'] == 'equivalent':
-                    continue
-                status = 'failed' if outcome['status'] == 'changed' else 'needs_review'
-                findings.append(Finding('competency_formulation_mismatch' if status == 'failed' else 'competency_formulation_review',
-                    status, f'Формулировка компетенции {code} отличается от источника {bdoc.label}.',
-                    {'code': code, 'reference_text': base_text, 'document_text': text,
-                     'semantic_status': outcome['status'], 'reason': outcome['reason'],
-                     'source_refs': refs}))
+            variants = [
+                {'code': code, 'document_type': doc.role, 'document': doc.label,
+                 'formulation': row.get('formulation'), 'source_ref': _source_ref(doc, row)}
+                for doc, row in records
+            ]
+            comparisons = []
+            missing = False
+            # Compare all unique textual variants; no document is a normative baseline.
+            for i, (left_doc, left_row) in enumerate(records):
+                left = left_row.get('formulation')
+                for right_doc, right_row in records[i + 1:]:
+                    right = right_row.get('formulation')
+                    checks += 1
+                    if not isinstance(left, str) or not left.strip() or not isinstance(right, str) or not right.strip():
+                        missing = True
+                        continue
+                    if left == right:
+                        continue
+                    if _canonical_formulation(left) == _canonical_formulation(right):
+                        outcome = {'status': 'equivalent', 'reason': 'Различия только в регистре, пробелах или завершающей пунктуации.'}
+                    else:
+                        outcome = evaluate_competency_pair(
+                            code, left, right, evaluator=evaluator, config=rule.get('llm', {}))
+                    comparisons.append({
+                        'left_source_ref': _source_ref(left_doc, left_row),
+                        'right_source_ref': _source_ref(right_doc, right_row),
+                        'semantic_status': outcome['status'], 'reason': outcome['reason'],
+                    })
+            if missing or any(c['semantic_status'] != 'equivalent' for c in comparisons):
+                findings.append(Finding(
+                    'competency_formulation_missing' if missing else 'competency_formulation_review',
+                    'needs_review',
+                    f'Для компетенции {code} обнаружены отсутствующие или различающиеся формулировки. '
+                    'Требуется решение пользователя.',
+                    {'code': code, 'variants': variants, 'comparisons': comparisons,
+                     'requires_user_decision': True,
+                     'allow_custom_formulation': True,
+                     'source_refs': [variant['source_ref'] for variant in variants]},
+                ))
     return _result(rule, checks, findings)
 
 

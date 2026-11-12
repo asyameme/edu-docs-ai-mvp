@@ -377,6 +377,8 @@ class ReviewRepository:
                 base, [change for choice in choices for change in choice["changes"]]
             )
             state = selected.model_dump(mode="json")
+            if state.get("review") is None:
+                state["review"] = snapshot.review.model_dump(mode="json")
             state["review"]["decisions"] = choices
             selected = SnapshotV2.model_validate(state)
             version_id = uuid4()

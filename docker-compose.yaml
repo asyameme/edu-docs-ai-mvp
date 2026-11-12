@@ -15,7 +15,7 @@ x-backend: &backend
     CHROMA_URL: http://chroma:8000
     MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-524288000}
     PARSER_URL: ${PARSER_URL:-}
-    ANALYSIS_URL: ${ANALYSIS_URL:-}
+    ANALYSIS_URL: ${ANALYSIS_URL:-http://analysis:8001}
     ANALYSIS_ORIGINAL_BASE_URL: ${ANALYSIS_ORIGINAL_BASE_URL:-http://api:8000}
     ANALYSIS_TIMEOUT_SECONDS: ${ANALYSIS_TIMEOUT_SECONDS:-300}
     ANALYSIS_MAX_REQUEST_BYTES: ${ANALYSIS_MAX_REQUEST_BYTES:-20971520}
@@ -24,6 +24,21 @@ x-backend: &backend
   restart: unless-stopped
 
 services:
+  analysis:
+    build: ./backend
+    image: education-backend:stage2
+    command:
+      - uvicorn
+      - worker.analysis_api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+    environment:
+      ANALYSIS_ORIGINAL_BASE_URL: http://api:8000
+    expose:
+      - "8001"
+    restart: unless-stopped
   frontend:
     image: education-frontend:stage2
     build: ./frontend

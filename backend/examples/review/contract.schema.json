@@ -1162,7 +1162,7 @@
         "source_ref": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SourceRef"
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
             },
             {
               "type": "null"
@@ -2397,82 +2397,6 @@
       "title": "SourceLink",
       "type": "object"
     },
-    "SourceRef": {
-      "additionalProperties": false,
-      "description": "Указатель на место в исходном DOCX; текст фрагмента хранится отдельно.\n\nparagraph_index нумеруется с 1 по порядку абзацев тела документа, включая\nабзацы в таблицах, без колонтитулов и сносок. table/row/col также нумеруются\nс 1; row=1 — шапка таблицы. Указатель относится к версии файла, связанной\nс записью парсера.",
-      "properties": {
-        "file": {
-          "title": "File",
-          "type": "string"
-        },
-        "section": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Section"
-        },
-        "paragraph_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Paragraph Index"
-        },
-        "table": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Table"
-        },
-        "row": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Row"
-        },
-        "col": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Col"
-        }
-      },
-      "required": [
-        "file"
-      ],
-      "title": "SourceRef",
-      "type": "object"
-    },
     "Variant": {
       "additionalProperties": false,
       "properties": {
@@ -2490,15 +2414,13 @@
           "items": {
             "$ref": "#/$defs/Mutation"
           },
-          "minItems": 1,
           "title": "Changes",
           "type": "array"
         }
       },
       "required": [
         "id",
-        "label",
-        "changes"
+        "label"
       ],
       "title": "Variant",
       "type": "object"
@@ -2570,6 +2492,7 @@
     },
     "backend__contracts__document_v2__models__SourceRefV2": {
       "additionalProperties": false,
+      "description": "Координаты значения в исходном DOCX или XLSX.\n\nparagraph_index считает абзацы тела DOCX с 1, включая таблицы и исключая\nколонтитулы и сноски. Номера table, row и col также начинаются с 1;\nrow=1 обозначает заголовок таблицы. Для XLSX используются sheet_name и cell.\nТекст фрагмента хранится отдельно от ссылки.",
       "properties": {
         "file": {
           "title": "File",
@@ -2590,7 +2513,7 @@
         "paragraph_index": {
           "anyOf": [
             {
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             {

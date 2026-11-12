@@ -40,14 +40,17 @@ def test_analysis_schema_offers_only_v2_document_models():
     assert len(schema["properties"]["parsed"]["anyOf"]) == 6
 
 
-def test_backend_accepts_zero_coordinate_allowed_by_main_v2_without_shifting_it():
+def test_backend_rejects_zero_paragraph_index_consistently_with_main_v2():
     from backend.contracts.document_v2.models import parse_document
 
     data = payload()
     data["disciplines"][0]["source_ref"]["paragraph_index"] = 0
-    result = prepare(uuid4(), data)
-    assert result.documents[0].parsed.disciplines[0].source_ref.paragraph_index == 0
-    assert result.documents[0].parsed.model_dump() == parse_document(data).model_dump()
+
+    with pytest.raises(ValidationError):
+        prepare(uuid4(), data)
+
+    with pytest.raises(ValidationError):
+        parse_document(data)
 
 
 def test_analysis_envelope_does_not_add_another_program_id_to_document():

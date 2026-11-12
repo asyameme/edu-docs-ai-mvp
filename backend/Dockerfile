@@ -6,6 +6,7 @@ RUN pip install -r requirements.txt
 RUN useradd --create-home --uid 10001 appuser
 RUN mkdir -p /data/originals /data/artifacts && chown appuser:appuser /workspace /data/originals /data/artifacts
 COPY --chown=appuser:appuser app ./app
+COPY --chown=appuser:appuser worker ./worker
 COPY --chown=appuser:appuser contracts ./contracts
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser examples ./examples

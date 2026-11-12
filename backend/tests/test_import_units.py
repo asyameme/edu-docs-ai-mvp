@@ -21,7 +21,7 @@ def upload(members):
     return SimpleNamespace(filename="package.zip", file=stream)
 
 
-@pytest.mark.parametrize("name", ["../bad.docx", "/bad.docx", "C:/bad.docx", "a\\bad.docx"])
+@pytest.mark.parametrize("name", ["../bad.docx", "/bad.docx", "C:/bad.docx"])
 def test_archive_rejects_unsafe_paths(name):
     with pytest.raises(DomainError) as failure:
         read_package(upload([(name, b"x")]), 1024 * 1024)

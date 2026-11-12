@@ -62,7 +62,7 @@ class Mutation(Contract):
 class Variant(Contract):
     id: UUID
     label: str = Field(min_length=1)
-    changes: list[Mutation] = Field(min_length=1)
+    changes: list[Mutation] = Field(default_factory=list)
 
 
 class ReviewIssue(Contract):
