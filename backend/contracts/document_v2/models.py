@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Literal, Union
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -82,8 +82,8 @@ class Program(BaseEntity):
 class Discipline(BaseEntity):
     name: str
     semesters: list[int]
-    credit_units: int = Field(ge=1)
-    hours_total: int = Field(ge=0)
+    credit_units: int | None = Field(ge=1)
+    hours_total: int | None = Field(ge=0)
     hours_by_kind: dict[str, int]
     control_forms: list[str] = []
     prerequisites: list[str] = []
@@ -277,7 +277,7 @@ class RPDOutput(ContractModel):
 class RPPOutput(ContractModel):
     meta: RPPMeta
     disciplines: list[Discipline] = Field(min_length=1)
-    semester_workload: list[SemesterWorkload] = Field(min_length=1)
+    semester_workload: list[SemesterWorkload]
     document_sections: list[DocumentSection] = Field(default_factory=list)
     practice_stages: list[PracticeStage] = Field(default_factory=list)
     competencies: list[Competency] = Field(default_factory=list)
@@ -347,7 +347,14 @@ class CharacteristicOutput(ContractModel):
     competencies: list[Competency] = Field(default_factory=list)
     parse_issues: list[ParseIssue] = Field(default_factory=list)
 
-DocumentOutput = Annotated[Union[RPDOutput,RPPOutput,CurriculumOutput,MatrixOutput,CKMVOutput,CharacteristicOutput], Field(discriminator='meta.doc_type')] if False else Union[RPDOutput,RPPOutput,CurriculumOutput,MatrixOutput,CKMVOutput,CharacteristicOutput]
+DocumentOutput: TypeAlias = (
+    RPDOutput
+    | RPPOutput
+    | CurriculumOutput
+    | MatrixOutput
+    | CKMVOutput
+    | CharacteristicOutput
+)
 MODELS = {'RPD': RPDOutput,'RPP': RPPOutput,'CURRICULUM': CurriculumOutput,'MATRIX': MatrixOutput,'CKMV': CKMVOutput,'CHARACTERISTIC': CharacteristicOutput}
 def parse_document(payload: dict) -> DocumentOutput:
     kind = payload.get('meta',{}).get('doc_type')

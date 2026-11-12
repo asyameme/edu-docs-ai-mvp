@@ -119,14 +119,18 @@
           "type": "array"
         },
         "credit_units": {
-          "minimum": 1,
-          "title": "Credit Units",
-          "type": "integer"
+          "anyOf": [
+            {"minimum": 1, "type": "integer"},
+            {"type": "null"}
+          ],
+          "title": "Credit Units"
         },
         "hours_total": {
-          "minimum": 0,
-          "title": "Hours Total",
-          "type": "integer"
+          "anyOf": [
+            {"minimum": 0, "type": "integer"},
+            {"type": "null"}
+          ],
+          "title": "Hours Total"
         },
         "hours_by_kind": {
           "additionalProperties": {
@@ -711,7 +715,6 @@
       "items": {
         "$ref": "#/$defs/SemesterWorkload"
       },
-      "minItems": 1,
       "title": "Semester Workload",
       "type": "array"
     },
