@@ -641,11 +641,7 @@ function App() {
   const isGenerationPreview = previewMode === "generation";
   const hasDemoPreview = isChatPreview || isReconciliationPreview || isGenerationPreview;
   const processing = useImportJob();
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const closeSidebarButtonRef = useRef<HTMLButtonElement>(null);
-  const openSidebarButtonRef = useRef<HTMLButtonElement>(null);
-  const previousSidebarOpenRef = useRef(isSidebarOpen);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState("");
@@ -699,13 +695,6 @@ function App() {
   useEffect(() => {
     setAcceptedWarningIds([]);
   }, [processing.checkJob?.id]);
-
-  useEffect(() => {
-    if (previousSidebarOpenRef.current === isSidebarOpen) return;
-    previousSidebarOpenRef.current = isSidebarOpen;
-    if (isSidebarOpen) closeSidebarButtonRef.current?.focus();
-    else openSidebarButtonRef.current?.focus();
-  }, [isSidebarOpen]);
 
   async function addFiles(files: FileList | File[]) {
     if (processing.busy) return;
@@ -824,27 +813,8 @@ function App() {
   return (
     <div className="app-shell">
       <div className="workspace">
-        <aside
-          className={"sidebar" + (isSidebarOpen ? "" : " sidebar--closed")}
-          aria-label="Разделы приложения"
-          aria-hidden={!isSidebarOpen}
-          inert={!isSidebarOpen}
-        >
-          <div className="sidebar-heading">
-            <span>Рабочее пространство</span>
-            <button
-              ref={closeSidebarButtonRef}
-              className="sidebar-toggle"
-              type="button"
-              aria-label="Свернуть боковую панель"
-              aria-expanded={isSidebarOpen}
-              title="Свернуть боковую панель"
-              onClick={() => setIsSidebarOpen(false)}
-            >
-              ‹
-            </button>
-          </div>
-          <nav className="side-nav">
+        <main className="main-content">
+          <nav className="section-navigation" aria-label="Разделы приложения">
             {navigation.map((item) => (
               <button
                 type="button"
@@ -857,37 +827,6 @@ function App() {
               </button>
             ))}
           </nav>
-        </aside>
-
-        <main className="main-content">
-          {!isSidebarOpen && (
-            <div className="collapsed-navigation">
-              <button
-                ref={openSidebarButtonRef}
-                className="sidebar-toggle sidebar-toggle--open"
-                type="button"
-                aria-label="Открыть боковую панель"
-                aria-expanded={isSidebarOpen}
-                title="Открыть боковую панель"
-                onClick={() => setIsSidebarOpen(true)}
-              >
-                ☰
-              </button>
-              <nav className="side-nav side-nav--horizontal" aria-label="Разделы приложения">
-                {navigation.map((item) => (
-                  <button
-                    type="button"
-                    key={item}
-                    className={"nav-item" + (item === activeScreen ? " is-active" : "")}
-                    aria-current={item === activeScreen ? "page" : undefined}
-                    onClick={() => setActiveScreen(item)}
-                  >
-                    {item}
-                  </button>
-                ))}
-              </nav>
-            </div>
-          )}
           <div className="content-column">
             {activeScreen === "Чат" ? (
               <ChatScreen
