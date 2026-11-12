@@ -114,12 +114,15 @@ class Repository:
             )
             return [version_dto(row) for row in cursor.fetchall()]
 
-    def save(self, program_id, expected_version_id, key, snapshot=None, restore_id=None):
+    def save(
+        self, program_id, expected_version_id, key, snapshot=None, restore_id=None, signature=None
+    ):
         request = {
             "operation": "restore" if restore_id else "save",
             "expected_version_id": str(expected_version_id),
             "restore_id": str(restore_id) if restore_id else None,
             "snapshot": snapshot.model_dump(mode="json") if snapshot is not None else None,
+            "signature": signature,
         }
         fingerprint = hashlib.sha256(
             json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -174,11 +177,21 @@ class Repository:
                     fingerprint=fingerprint,
                     origin="restore",
                     restore_id=restore_id,
+                    actor_type="user" if signature else "system",
+                    actor_id=signature or "backend",
                 )
             from app.review_storage import insert_version
 
             return insert_version(
-                cursor, program_id, current, uuid4(), snapshot, key=key, fingerprint=fingerprint
+                cursor,
+                program_id,
+                current,
+                uuid4(),
+                snapshot,
+                key=key,
+                fingerprint=fingerprint,
+                actor_type="user" if signature else "system",
+                actor_id=signature or "backend",
             )
 
     def add_document(self, program_id, stored):

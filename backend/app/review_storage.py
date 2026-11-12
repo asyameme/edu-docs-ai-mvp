@@ -41,6 +41,8 @@ def insert_version(
     fingerprint=None,
     origin="save",
     restore_id=None,
+    actor_type="system",
+    actor_id="backend",
 ):
     from app.graph_storage import journal, load_graph, save_graph
 
@@ -77,7 +79,15 @@ def insert_version(
             fingerprint,
         ),
     ).fetchone()
-    journal(cur, program_id, version_id, before, row["snapshot"])
+    journal(
+        cur,
+        program_id,
+        version_id,
+        before,
+        row["snapshot"],
+        actor_type=actor_type,
+        actor_id=actor_id,
+    )
     cur.execute("UPDATE programs SET current_version_id=%s WHERE id=%s", (version_id, program_id))
     return version_dto(row)
 

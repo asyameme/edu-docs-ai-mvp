@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class Contract(BaseModel):
@@ -118,6 +118,15 @@ class ProgramCreate(Contract):
 
 class VersionRestore(Contract):
     expected_version_id: UUID
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class RelationV2(Relation):
@@ -236,6 +245,15 @@ class SnapshotV2(SnapshotData):
 class VersionCreate(Contract):
     expected_version_id: UUID
     snapshot: SnapshotV2
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
     @model_validator(mode="after")
     def review_is_server_owned(self) -> Self:

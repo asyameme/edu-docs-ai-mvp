@@ -186,7 +186,16 @@ class DecisionCreate(Contract):
     expected_version_id: UUID
     conflict_id: UUID
     variant_id: UUID
+    signature: str = Field(min_length=1, max_length=120)
     check_job_id: UUID | None = None
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class CheckCreate(Contract):
@@ -197,6 +206,15 @@ class ConfirmCreate(Contract):
     expected_version_id: UUID
     check_job_id: UUID
     accepted_warning_ids: list[UUID] = Field(default_factory=list)
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class AnalysisDocument(Contract):

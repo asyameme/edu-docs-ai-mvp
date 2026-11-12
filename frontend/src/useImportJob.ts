@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   loadSession,
+  requestSignature,
   saveSession,
   type CheckJob,
   type ImportJob,
@@ -362,13 +363,19 @@ export function useImportJob() {
   async function decide(conflictId: string, variantId: string) {
     const current = sessionRef.current;
     if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return;
-    reviewBusyRef.current = true;
-    setReviewBusy(true);
+    const signature = requestSignature();
+    if (signature !== null && signature !== "invalid") {
+      reviewBusyRef.current = true;
+      setReviewBusy(true);
+    } else {
+      setNotice(signature === "invalid" ? "Введите имя длиной от 1 до 120 символов." : "Для сохранения решения нужна подпись.");
+      return;
+    }
     try {
       const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions`, {
         method: "POST",
         headers: operationHeaders(),
-        body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, variant_id: variantId }),
+        body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, variant_id: variantId, signature }),
       });
       updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
       setReviewDetails(null);
@@ -407,8 +414,14 @@ export function useImportJob() {
   async function confirm(acceptedWarningIds: string[]) {
     const current = sessionRef.current;
     if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId || !checkJob || checkJob.status !== "completed") return;
-    reviewBusyRef.current = true;
-    setReviewBusy(true);
+    const signature = requestSignature();
+    if (signature !== null && signature !== "invalid") {
+      reviewBusyRef.current = true;
+      setReviewBusy(true);
+    } else {
+      setNotice(signature === "invalid" ? "Введите имя длиной от 1 до 120 символов." : "Для подтверждения нужна подпись.");
+      return;
+    }
     try {
       const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/confirm`, {
         method: "POST",
@@ -417,6 +430,7 @@ export function useImportJob() {
           expected_version_id: current.versionId,
           check_job_id: checkJob.id,
           accepted_warning_ids: acceptedWarningIds,
+          signature,
         }),
       });
       updateSession({ versionId: version.id });

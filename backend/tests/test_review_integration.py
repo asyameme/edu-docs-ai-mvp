@@ -66,6 +66,7 @@ def choose(http, root, job, variant_index=1):
         "expected_version_id": job["output_version_id"],
         "conflict_id": issue["id"],
         "variant_id": issue["variants"][variant_index]["id"],
+        "signature": "Тестовый пользователь",
     }
     key = uuid4().hex
     version = post(http, root + "/reviews/" + job["id"] + "/decisions", body, 201, key)
@@ -91,10 +92,16 @@ def test_complete_review_preserves_original_sources_versions_and_confirmation():
         assert version["snapshot"]["entities"][0]["attributes"]["hours_total"] == 144
         checked = run_check(http, root, job, version["id"])
         assert checked["status"] == "completed", checked
-        body = {"expected_version_id": version["id"], "check_job_id": checked["id"]}
+        body = {
+            "expected_version_id": version["id"],
+            "check_job_id": checked["id"],
+            "signature": "Тестовый пользователь",
+        }
         path = root + "/reviews/" + job["id"] + "/confirm"
         key = uuid4().hex
         confirmed = post(http, path, body, 201, key)
+        assert version["snapshot"]["review"]["decisions"][0]["author"] == body["signature"]
+        assert confirmed["snapshot"]["review"]["confirmation"]["author"] == body["signature"]
         assert post(http, path, body, 201, key)["id"] == confirmed["id"]
         assert http.get(root + "/versions/" + original["id"]).json() == original
         details = http.get(root + "/versions/" + confirmed["id"] + "/review").json()
@@ -116,12 +123,36 @@ def test_complete_review_preserves_original_sources_versions_and_confirmation():
         )
         assert artifact.status_code == 200
         assert artifact.text == "# Искусственный Markdown\n"
+        import psycopg
+
+        from app.config import get_settings
+        from app.review_logic import digest
+
+        settings = get_settings()
+        with psycopg.connect(
+            host=settings.postgres_host,
+            dbname=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password.get_secret_value(),
+        ) as conn:
+            for signed in (version, confirmed):
+                rows = conn.execute(
+                    "SELECT actor_type,actor_id FROM change_log WHERE version_id=%s",
+                    (signed["id"],),
+                ).fetchall()
+                assert rows
+                assert all(row == ("user", body["signature"]) for row in rows)
+            config, config_hash = conn.execute(
+                "SELECT parser_config,parser_config_hash FROM document_artifacts WHERE id=%s",
+                (source["artifact_id"],),
+            ).fetchone()
+            assert config_hash == digest(config)
         assert len(http.get(root + "/versions").json()) == 4
         assert http.get(root + "/imports/" + imported["id"]).json()["status"] == "completed"
         restored = post(
             http,
             root + "/versions/" + confirmed["id"] + "/restore",
-            {"expected_version_id": confirmed["id"]},
+            {"expected_version_id": confirmed["id"], "signature": "Тестовый пользователь"},
             201,
         )
         assert restored["snapshot"]["review"] is None
@@ -134,7 +165,11 @@ def test_confirmation_gates_warning_blocking_and_skipped_rules(filename):
         root, _, job = prepare(http, filename)
         version, _ = choose(http, root, job)
         checked = run_check(http, root, job, version["id"])
-        body = {"expected_version_id": version["id"], "check_job_id": checked["id"]}
+        body = {
+            "expected_version_id": version["id"],
+            "check_job_id": checked["id"],
+            "signature": "Тестовый пользователь",
+        }
         path = root + "/reviews/" + job["id"] + "/confirm"
         post(http, path, body, 409)
         if filename.startswith("warning"):
@@ -154,6 +189,7 @@ def test_stale_check_and_concurrent_choices_do_not_overwrite_history():
                 "expected_version_id": job["output_version_id"],
                 "conflict_id": issue["id"],
                 "variant_id": variant["id"],
+                "signature": "Тестовый пользователь",
             }
             for variant in issue["variants"]
         ]
@@ -181,13 +217,18 @@ def test_stale_check_and_concurrent_choices_do_not_overwrite_history():
                 "expected_version_id": version["id"],
                 "conflict_id": issue["id"],
                 "variant_id": opposite["id"],
+                "signature": "Тестовый пользователь",
             },
             201,
         )
         post(
             http,
             path + "/confirm",
-            {"expected_version_id": changed["id"], "check_job_id": checked["id"]},
+            {
+                "expected_version_id": changed["id"],
+                "check_job_id": checked["id"],
+                "signature": "Тестовый пользователь",
+            },
             409,
         )
         assert (
@@ -220,7 +261,11 @@ def test_analysis_empty_many_invalid_and_retry_results(filename):
             post(
                 http,
                 root + "/reviews/" + job["id"] + "/confirm",
-                {"expected_version_id": job["output_version_id"], "check_job_id": checked["id"]},
+                {
+                    "expected_version_id": job["output_version_id"],
+                    "check_job_id": checked["id"],
+                    "signature": "Тестовый пользователь",
+                },
                 201,
             )
 
@@ -233,7 +278,11 @@ def test_unresolved_conflict_foreign_ids_and_shared_operation_keys_are_rejected(
         post(
             http,
             path + "/confirm",
-            {"expected_version_id": job["output_version_id"], "check_job_id": checked["id"]},
+            {
+                "expected_version_id": job["output_version_id"],
+                "check_job_id": checked["id"],
+                "signature": "Тестовый пользователь",
+            },
             409,
         )
         details = http.get(root + "/versions/" + job["output_version_id"] + "/review").json()
@@ -245,6 +294,7 @@ def test_unresolved_conflict_foreign_ids_and_shared_operation_keys_are_rejected(
                 "expected_version_id": job["output_version_id"],
                 "conflict_id": issue["id"],
                 "variant_id": str(uuid4()),
+                "signature": "Тестовый пользователь",
             },
             422,
         )
@@ -270,6 +320,7 @@ def test_unresolved_conflict_foreign_ids_and_shared_operation_keys_are_rejected(
                 "expected_version_id": job["output_version_id"],
                 "conflict_id": issue["id"],
                 "variant_id": issue["variants"][0]["id"],
+                "signature": "Тестовый пользователь",
             },
             201,
             decision_key,
@@ -288,7 +339,11 @@ def test_concurrent_confirmation_creates_exactly_one_new_version():
         root, _, job = prepare(http)
         version, _ = choose(http, root, job)
         checked = run_check(http, root, job, version["id"])
-        body = {"expected_version_id": version["id"], "check_job_id": checked["id"]}
+        body = {
+            "expected_version_id": version["id"],
+            "check_job_id": checked["id"],
+            "signature": "Тестовый пользователь",
+        }
         path = root + "/reviews/" + job["id"] + "/confirm"
         with ThreadPoolExecutor(max_workers=2) as executor:
             responses = list(
@@ -308,7 +363,11 @@ def test_analysis_cannot_overwrite_a_version_saved_while_ml_was_running():
         manual = post(
             http,
             root + "/versions",
-            {"expected_version_id": current, "snapshot": {"metadata": {"manual": "preserve"}}},
+            {
+                "expected_version_id": current,
+                "snapshot": {"metadata": {"manual": "preserve"}},
+                "signature": "Тестовый пользователь",
+            },
             201,
         )
         final = wait(http, root + "/reviews/" + job["id"])

@@ -23,7 +23,7 @@ def test_failure_after_version_insert_rolls_back_version_and_head(monkeypatch):
         program = client.post("/api/v1/programs", json={"name": "Rollback acceptance"}).json()
         repo = Repository(app.state.resources.postgres)
 
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise RuntimeError("Injected failure after version INSERT")
 
         from app import graph_storage
@@ -47,6 +47,7 @@ def test_failure_after_version_insert_rolls_back_version_and_head(monkeypatch):
             json={
                 "expected_version_id": program["current_version_id"],
                 "snapshot": SnapshotV2().model_dump(mode="json"),
+                "signature": "Тестовый пользователь",
             },
             headers={"Idempotency-Key": str(uuid4())},
         )

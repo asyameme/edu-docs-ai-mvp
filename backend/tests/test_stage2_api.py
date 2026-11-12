@@ -67,7 +67,11 @@ def save(http, program, state, expected=None, key=None):
     return http.post(
         url(program) + "/versions",
         headers={"Idempotency-Key": key or str(uuid4())},
-        json={"expected_version_id": expected or program["current_version_id"], "snapshot": state},
+        json={
+            "expected_version_id": expected or program["current_version_id"],
+            "snapshot": state,
+            "signature": "Тестовый пользователь",
+        },
     )
 
 
@@ -105,7 +109,7 @@ def test_versions_are_immutable_and_restore_creates_new_version(http, program):
     restored = http.post(
         url(program) + "/versions/" + v2["id"] + "/restore",
         headers={"Idempotency-Key": str(uuid4())},
-        json={"expected_version_id": v3["id"]},
+        json={"expected_version_id": v3["id"], "signature": "Тестовый пользователь"},
     )
     assert restored.status_code == 201, restored.text
     assert restored.json()["number"] == 4
@@ -227,7 +231,11 @@ def test_missing_key_unknown_ids_and_invalid_snapshot_are_rejected(http, program
     assert (
         http.post(
             url(program) + "/versions",
-            json={"snapshot": snapshot(), "expected_version_id": program["current_version_id"]},
+            json={
+                "snapshot": snapshot(),
+                "expected_version_id": program["current_version_id"],
+                "signature": "Тестовый пользователь",
+            },
         ).status_code
         == 422
     )

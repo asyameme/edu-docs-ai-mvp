@@ -1,6 +1,5 @@
 """Бизнес-задачи анализа, неизменяемые решения и подтверждение выбранной версии."""
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
@@ -11,7 +10,7 @@ from psycopg.types.json import Jsonb
 from app.config import get_settings
 from app.domain import SnapshotV2
 from app.errors import DomainError
-from app.graph_storage import canonical_bytes, hydrate_job, pack_tree
+from app.graph_storage import hydrate_job, pack_tree
 from app.repository import Repository
 from app.review_contract import CheckResult
 from app.review_logic import (
@@ -261,7 +260,7 @@ class ReviewRepository:
                             job_id,
                             artifact["parser_revision"],
                             Jsonb(artifact["parser_config"]),
-                            hashlib.sha256(canonical_bytes(artifact["parser_config"])).hexdigest(),
+                            artifact["parser_config_hash"],
                             artifact["id"],
                             artifact["sha256"],
                             artifact["size_bytes"],
@@ -403,7 +402,7 @@ class ReviewRepository:
                     "check_job_id": str(issue["job_id"]),
                     "changes": changes,
                     "decided_at": datetime.now(UTC).isoformat(),
-                    "author": None,
+                    "author": body.signature,
                 }
             )
             selected = apply_changes(
@@ -414,7 +413,15 @@ class ReviewRepository:
             selected = SnapshotV2.model_validate(state)
             version_id = uuid4()
             return insert_version(
-                cur, program_id, current, version_id, selected, key=key, fingerprint=fingerprint
+                cur,
+                program_id,
+                current,
+                version_id,
+                selected,
+                key=key,
+                fingerprint=fingerprint,
+                actor_type="user",
+                actor_id=body.signature,
             )
 
     @staticmethod
@@ -489,14 +496,22 @@ class ReviewRepository:
                 "content_hash": hash_before,
                 "accepted_warning_ids": [str(v) for v in body.accepted_warning_ids],
                 "confirmed_at": datetime.now(UTC).isoformat(),
-                "author": None,
+                "author": body.signature,
             }
             snapshot = SnapshotV2.model_validate(state)
             version_id = uuid4()
             if content_hash(snapshot) != hash_before:
                 raise DomainError(409, "Содержимое не совпадает с проверенным")
             return insert_version(
-                cur, program_id, current, version_id, snapshot, key=key, fingerprint=fingerprint
+                cur,
+                program_id,
+                current,
+                version_id,
+                snapshot,
+                key=key,
+                fingerprint=fingerprint,
+                actor_type="user",
+                actor_id=body.signature,
             )
 
     def details(self, program_id, version_id, limit, offset):
