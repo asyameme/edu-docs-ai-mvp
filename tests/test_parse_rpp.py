@@ -191,9 +191,18 @@ class TestRppParser(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "РПП"):
             parse_rpp(ROOT / "tests/originals/РПД_матанализ1.docx")
 
-    def test_curriculum_reference_explains_missing_required_load(self):
-        with self.assertRaisesRegex(ValueError, "отсылает к УП"):
-            self.parse_document(practice_document(workload="reference"))
+    def test_curriculum_reference_preserves_partial_result(self):
+        output = self.parse_document(practice_document(workload="reference"))
+        discipline = output.disciplines[0]
+
+        self.assertIsNone(discipline.hours_total)
+        self.assertIsNone(discipline.credit_units)
+        self.assertEqual(output.semester_workload, [])
+        self.assertTrue(output.competencies)
+        self.assertTrue(any(
+            "отсылает к УП" in issue.message
+            for issue in output.parse_issues
+        ))
 
     def test_content_keeps_exact_hours_and_rejects_ranges(self):
         document = practice_document()

@@ -64,7 +64,7 @@ def finalize_rpp(output, document, file_name):
     topics, issues = extract_course_content(
         document,
         file_name,
-        semesters=discipline.semesters,
+        semesters=discipline.semesters or None,
         doc_type="RPP",
     )
     output.parse_issues.extend(issues)
@@ -111,10 +111,10 @@ def parse_rpp(file_path, *, program_id: str | None = None) -> RPPOutput:
     discipline, semester_workload, issues = build_practice_discipline(
         document, file_path.name, title_parts,
     )
-    if discipline is None or not semester_workload:
+    if discipline is None:
         details = "; ".join(issue.message for issue in issues)
         raise ValueError(
-            f"Для РПП v2 нужны общая и посеместровая нагрузки. {details}".strip()
+            f"Не удалось собрать практику. {details}".strip()
         )
 
     output = RPPOutput(

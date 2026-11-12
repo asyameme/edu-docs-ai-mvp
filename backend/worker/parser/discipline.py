@@ -1440,8 +1440,61 @@ def build_practice_discipline(document, file_name, title_parts):
     """Собрать практику и прочитанную посеместровую нагрузку."""
     records, issues = extract_practice_workload(document, file_name)
 
-    if not records:
+    parts = [
+        " ".join(text.split())
+        for text in title_parts
+        if text.strip()
+    ]
+    names = []
+
+    for index, text in enumerate(parts):
+        compact = re.sub(
+            r"\s+", "", text,
+        ).casefold().rstrip(":")
+
+        if compact in {
+            "практики",
+            "рабочаяпрограммапрактики",
+        }:
+            if index + 1 < len(parts):
+                names.append(parts[index + 1].strip(' «»"'))
+
+    if (
+        len(names) != 1
+        or normalize(names[0]).replace("\u0451", "е").startswith((
+            "язык",
+            "трудоемкость",
+            "регистрационный",
+            "аннотация",
+        ))
+    ):
+        issues.append(ParseIssue(
+            category="manual_review",
+            message="Не удалось прочитать название практики с титула",
+            source_ref=SourceRef(file=file_name, section="титул"),
+        ))
         return None, [], issues
+
+    if not records:
+        cover_credits = set()
+        for part in parts:
+            match = re.fullmatch(
+                r"трудоемкость в зачетных единицах:\s*([1-9][0-9]*)",
+                normalize(part).replace("\u0451", "е"),
+            )
+            if match:
+                cover_credits.add(int(match[1]))
+
+        credits = cover_credits.pop() if len(cover_credits) == 1 else None
+        discipline = Discipline(
+            name=names[0],
+            semesters=[],
+            credit_units=credits,
+            hours_total=None,
+            hours_by_kind={},
+            source_ref=SourceRef(file=file_name, section="титул"),
+        )
+        return discipline, [], issues
 
     totals = [
         item for item in records
@@ -1497,41 +1550,6 @@ def build_practice_discipline(document, file_name, title_parts):
                 "или выходят за 1-8"
             ),
             source_ref=ref,
-        ))
-        return None, [], issues
-
-    parts = [
-        " ".join(text.split())
-        for text in title_parts
-        if text.strip()
-    ]
-    names = []
-
-    for index, text in enumerate(parts):
-        compact = re.sub(
-            r"\s+", "", text,
-        ).casefold().rstrip(":")
-
-        if compact in {
-            "практики",
-            "рабочаяпрограммапрактики",
-        }:
-            if index + 1 < len(parts):
-                names.append(parts[index + 1].strip(' «»"'))
-
-    if (
-        len(names) != 1
-        or normalize(names[0]).replace("\u0451", "е").startswith((
-            "язык",
-            "трудоемкость",
-            "регистрационный",
-            "аннотация",
-        ))
-    ):
-        issues.append(ParseIssue(
-            category="manual_review",
-            message="Не удалось прочитать название практики с титула",
-            source_ref=SourceRef(file=file_name, section="титул"),
         ))
         return None, [], issues
 
