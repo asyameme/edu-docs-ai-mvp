@@ -189,7 +189,7 @@ def test_document_roundtrip_same_names_and_source_refs(http, program):
     assert saved["snapshot"]["entities"][0]["source_ref_ids"] == [saved_ref["id"]]
     repeated = save(http, program, state, expected=saved["id"])
     assert repeated.status_code == 201, repeated.text
-    assert repeated.json()["snapshot"]["source_refs"][0]["id"] != saved_ref["id"]
+    assert repeated.json()["snapshot"]["source_refs"][0]["id"] == saved_ref["id"]
     assert http.get(url(program) + "/versions/" + saved["id"]).json() == saved
     state["document_ids"] = []
     assert save(http, program, state, expected=repeated.json()["id"]).status_code == 422
@@ -202,6 +202,7 @@ def test_document_roundtrip_same_names_and_source_refs(http, program):
         ("unsupported.exe", b"arbitrary", 415),
         ("oversized.pdf", b"x" * (50 * 1024 * 1024 + 1), 413),
     ],
+    ids=["empty", "unsupported", "oversized"],
 )
 def test_invalid_uploads_do_not_create_documents(http, program, filename, content, status):
     response = http.post(url(program) + "/documents", files={"file": (filename, content)})

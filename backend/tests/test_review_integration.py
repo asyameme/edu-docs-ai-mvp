@@ -103,7 +103,8 @@ def test_complete_review_preserves_original_sources_versions_and_confirmation():
         assert details["issues"][0]["effective_status"] == "resolved"
         before_refs = {r["id"] for r in original["snapshot"]["source_refs"]}
         after_refs = {r["id"] for r in confirmed["snapshot"]["source_refs"]}
-        assert before_refs.isdisjoint(after_refs)
+        # Неизменяемые источники переиспользуются между версиями графа.
+        assert before_refs == after_refs
         source = confirmed["snapshot"]["source_refs"][0]
         artifact = http.get(
             root

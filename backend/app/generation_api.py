@@ -1,13 +1,17 @@
 """Запуск генерации, просмотр состояния и скачивание готового ZIP."""
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, model_validator
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
+from app.errors import DomainError
 from app.generation_repository import GenerationRepository
 from app.program_api import OperationKey, RepoDep
 
@@ -47,8 +51,37 @@ def create_generation(
 
 
 @router.get("/{job_id}")
-def read_generation(program_id: UUID, job_id: UUID, repo: RepoDep) -> GenerationRead:
-    return GenerationRepository(repo.pool).job(program_id, job_id)
+async def read_generation(
+    program_id: UUID, job_id: UUID, repo: RepoDep, request: Request
+) -> GenerationRead:
+    return await generation_status(
+        GenerationRepository(repo.pool), request.app.state.resources.temporal, program_id, job_id
+    )
+
+
+async def generation_status(jobs, temporal, program_id, job_id):
+    result = await asyncio.to_thread(jobs.job, program_id, job_id)
+    if result["status"] in {"completed", "failed"}:
+        return result
+    if temporal.namespace != result["_namespace"]:
+        raise DomainError(503, "Пространство имён генерации недоступно")
+    try:
+        state = await temporal.get_workflow_handle(result["_workflow_id"]).describe(
+            rpc_timeout=timedelta(seconds=3)
+        )
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return result
+        raise DomainError(503, "Текущий статус генерации временно недоступен") from error
+    if state.status == WorkflowExecutionStatus.RUNNING:
+        result["status"] = "processing"
+    else:
+        result = await asyncio.to_thread(jobs.job, program_id, job_id)
+        if result["status"] not in {"completed", "failed"}:
+            result.update(
+                status="failed", error="Процесс генерации прерван без сохранённого результата"
+            )
+    return result
 
 
 @router.get("/{job_id}/download")

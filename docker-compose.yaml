@@ -106,6 +106,7 @@ services:
     # Старый том нужен только миграции 0003; она читает его без удаления файлов.
     volumes:
       - original-files:/data/originals:ro
+      - artifact-files:/data/artifacts
     depends_on:
       postgres:
         condition: service_healthy

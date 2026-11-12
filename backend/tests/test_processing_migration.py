@@ -63,6 +63,8 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
     assert path.exists(), "Нужна одна начальная миграция итоговой схемы"
     script = ScriptDirectory(str(ROOT))
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0006_versioned_graph",
+        "0005_generation",
         "0004_relational",
         "0003_originals_bytea",
         "0002_stage4_review",
@@ -170,15 +172,27 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
                                 '33333333-3333-4333-8333-333333333333','page:1');
                         """)
                         relational.upgrade()
-                        assert connection.exec_driver_sql(
-                            "SELECT count(*) FROM entities"
-                        ).scalar() == 2
-                        assert connection.exec_driver_sql(
-                            "SELECT count(*) FROM source_links WHERE entity_id IS NOT NULL"
-                        ).scalar() == 2
-                        assert schema_definition(connection, schema) == schema_definition(
-                            connection, "public"
+                        assert (
+                            connection.exec_driver_sql("SELECT count(*) FROM entities").scalar()
+                            == 2
                         )
+                        assert (
+                            connection.exec_driver_sql(
+                                "SELECT count(*) FROM source_links WHERE entity_id IS NOT NULL"
+                            ).scalar()
+                            == 2
+                        )
+                        reference = "legacy_reference_" + uuid4().hex
+                        connection.exec_driver_sql(f'CREATE SCHEMA "{reference}"')
+                        connection.exec_driver_sql(f'SET LOCAL search_path TO "{reference}"')
+                        change.upgrade()
+                        stage4.upgrade()
+                        binary.upgrade()
+                        relational.upgrade()
+                        assert schema_definition(connection, schema) == schema_definition(
+                            connection, reference
+                        )
+                        connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
                         assert (
                             bytes(
                                 connection.exec_driver_sql(
@@ -205,9 +219,19 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
                     with connection.begin_nested() as trial:
                         binary.upgrade()
                         relational.upgrade()
+                        # Исторический срез 0004 сравниваем с независимым срезом 0004,
+                        # а не с действующей схемой, которая уже использует граф.
+                        reference = "legacy_reference_" + uuid4().hex
+                        connection.exec_driver_sql(f'CREATE SCHEMA "{reference}"')
+                        connection.exec_driver_sql(f'SET LOCAL search_path TO "{reference}"')
+                        change.upgrade()
+                        stage4.upgrade()
+                        binary.upgrade()
+                        relational.upgrade()
                         assert schema_definition(connection, schema) == schema_definition(
-                            connection, "public"
+                            connection, reference
                         )
+                        connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
                         trial.rollback()
                     with pytest.raises(sa.exc.DBAPIError), connection.begin_nested():
                         connection.exec_driver_sql("""

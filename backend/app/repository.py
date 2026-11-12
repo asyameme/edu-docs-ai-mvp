@@ -5,16 +5,27 @@ import json
 from uuid import uuid4
 
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from app.domain import SnapshotV2
 from app.errors import DomainError
 
 PROGRAM_COLUMNS = "id, name, current_version_id, created_at"
 VERSION_COLUMNS = """id, program_id, number, parent_version_id, restored_from_version_id,
-                     origin, created_at, snapshot"""
+                     origin, created_at, graph_snapshot(graph_state_id,review) AS snapshot"""
 DOCUMENT_COLUMNS = """id, program_id, original_name, format, media_type, size_bytes,
                       sha256, created_at"""
+
+
+def version_dto(row):
+    """Адаптация старого хранения к V2 не меняет внешний контракт или историю."""
+    if row and row["snapshot"].get("schema_version") == 1:
+        return {
+            **row,
+            "snapshot": SnapshotV2.model_validate(
+                {**row["snapshot"], "schema_version": 2}
+            ).model_dump(mode="json"),
+        }
+    return row
 
 
 class Repository:
@@ -36,10 +47,13 @@ class Repository:
             cursor.execute("SET LOCAL statement_timeout = '5s'")
             cursor.execute("INSERT INTO programs(id, name) VALUES (%s, %s)", (program_id, name))
             state = SnapshotV2().model_dump(mode="json")
+            from app.graph_storage import save_graph
+
+            graph = save_graph(cursor, program_id, state)
             cursor.execute(
-                """INSERT INTO program_versions(id, program_id, number, snapshot, origin)
+                """INSERT INTO program_versions(id, program_id, number, graph_state_id, origin)
                    VALUES (%s, %s, 1, %s, 'initial')""",
-                (version_id, program_id, Jsonb(state)),
+                (version_id, program_id, graph),
             )
             cursor.execute(
                 """UPDATE programs SET current_version_id = %s WHERE id = %s
@@ -83,7 +97,7 @@ class Repository:
                 + " FROM program_versions WHERE program_id=%s AND id=%s",
                 (program_id, version_id),
             )
-            return self.require(cursor.fetchone())
+            return version_dto(self.require(cursor.fetchone()))
 
     def versions(self, program_id, limit=50, offset=0):
         self.program(program_id)
@@ -98,7 +112,7 @@ class Repository:
                                ORDER BY number DESC LIMIT %s OFFSET %s""",
                 (program_id, limit, offset),
             )
-            return cursor.fetchall()
+            return [version_dto(row) for row in cursor.fetchall()]
 
     def save(self, program_id, expected_version_id, key, snapshot=None, restore_id=None):
         request = {
@@ -135,21 +149,21 @@ class Repository:
             if previous is not None:
                 if previous.pop("request_hash") != fingerprint:
                     raise DomainError(409, "Idempotency key was used for another request")
-                return previous
+                return version_dto(previous)
             if current != expected_version_id:
                 raise DomainError(409, "Current version changed; reload before saving")
             if restore_id:
                 cursor.execute(
-                    "SELECT snapshot FROM program_versions WHERE program_id=%s AND id=%s",
+                    "SELECT graph_snapshot(graph_state_id,review) AS snapshot FROM "
+                    "program_versions WHERE program_id=%s AND id=%s",
                     (program_id, restore_id),
                 )
                 restored = self.require(cursor.fetchone())["snapshot"]
-                from app.review_logic import copy_sources
                 from app.review_storage import insert_version
 
-                restored = {**restored, "review": None}
+                restored = {**restored, "schema_version": 2, "review": None}
                 version_id = uuid4()
-                snapshot = copy_sources(SnapshotV2.model_validate(restored), version_id)
+                snapshot = SnapshotV2.model_validate(restored)
                 return insert_version(
                     cursor,
                     program_id,
@@ -161,59 +175,10 @@ class Repository:
                     origin="restore",
                     restore_id=restore_id,
                 )
-            cursor.execute(
-                "SELECT number FROM program_versions WHERE program_id=%s AND id=%s",
-                (program_id, current),
-            )
-            number = cursor.fetchone()["number"] + 1
-            from app.review_logic import copy_sources
+            from app.review_storage import insert_version
 
-            version_id = uuid4()
-            snapshot = copy_sources(snapshot, version_id)
-            state = snapshot.model_dump(mode="json")
-            if snapshot.document_ids:
-                cursor.execute(
-                    "SELECT id FROM source_documents WHERE program_id=%s AND id=ANY(%s)",
-                    (program_id, snapshot.document_ids),
-                )
-                found = {row["id"] for row in cursor.fetchall()}
-                if found != set(snapshot.document_ids):
-                    raise DomainError(422, "Document is absent or belongs to another program")
-            cursor.execute(
-                """INSERT INTO program_versions
-                   (id, program_id, number, parent_version_id, restored_from_version_id,
-                    snapshot, origin, operation_key, request_hash)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING """
-                + VERSION_COLUMNS,
-                (
-                    version_id,
-                    program_id,
-                    number,
-                    current,
-                    restore_id,
-                    Jsonb(state),
-                    "restore" if restore_id else "save",
-                    key,
-                    fingerprint,
-                ),
-            )
-            result = cursor.fetchone()
-            self.attach_documents(cursor, program_id, version_id, snapshot.document_ids)
-            from app.relational_storage import insert_projection
-
-            insert_projection(cursor, version_id, snapshot)
-            cursor.execute(
-                "UPDATE programs SET current_version_id=%s WHERE id=%s", (version_id, program_id)
-            )
-            return result
-
-    @staticmethod
-    def attach_documents(cursor, program_id, version_id, document_ids):
-        for document_id in document_ids:
-            cursor.execute(
-                """INSERT INTO version_documents(program_id, version_id, document_id)
-                   VALUES (%s,%s,%s)""",
-                (program_id, version_id, document_id),
+            return insert_version(
+                cursor, program_id, current, uuid4(), snapshot, key=key, fingerprint=fingerprint
             )
 
     def add_document(self, program_id, stored):

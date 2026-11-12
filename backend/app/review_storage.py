@@ -1,11 +1,11 @@
-"""Транзакционная запись снимка и SQL-проекций его источников."""
+"""Атомарная запись версии графа, решений и предметных замечаний."""
 
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
 from app.errors import DomainError
-from app.repository import VERSION_COLUMNS
+from app.repository import VERSION_COLUMNS, version_dto
 
 
 def key_in_jobs(cur, program_id, key):
@@ -27,7 +27,7 @@ def previous_version(cur, program_id, key, fingerprint):
     if row:
         if row.pop("request_hash") != fingerprint:
             raise DomainError(409, "Ключ использован для другого запроса")
-        return row
+        return version_dto(row)
 
 
 def insert_version(
@@ -42,44 +42,50 @@ def insert_version(
     origin="save",
     restore_id=None,
 ):
+    from app.graph_storage import journal, load_graph, save_graph
+
     state = snapshot.model_dump(mode="json")
-    documents = cur.execute(
-        "SELECT id FROM source_documents WHERE program_id=%s AND id=ANY(%s)",
-        (program_id, snapshot.document_ids),
-    ).fetchall()
-    if {row["id"] for row in documents} != set(snapshot.document_ids):
-        raise DomainError(422, "Источник отсутствует или принадлежит другой программе")
+    parent = cur.execute(
+        "SELECT number,graph_state_id,review FROM program_versions WHERE program_id=%s AND id=%s",
+        (program_id, parent_id),
+    ).fetchone()
+    if parent is None:
+        raise DomainError(404, "Родительская версия не найдена")
+    before = load_graph(cur, parent["graph_state_id"], parent["review"])
+    if restore_id:
+        graph = cur.execute(
+            "SELECT graph_state_id FROM program_versions WHERE program_id=%s AND id=%s",
+            (program_id, restore_id),
+        ).fetchone()["graph_state_id"]
+    else:
+        graph = save_graph(cur, program_id, snapshot)
     row = cur.execute(
-        """INSERT INTO program_versions(id,program_id,number,parent_version_id,
-           restored_from_version_id,snapshot,origin,operation_key,request_hash)
-           SELECT %s,%s,number+1,%s,%s,%s,%s,%s,%s FROM program_versions
-           WHERE program_id=%s AND id=%s RETURNING """
-        + VERSION_COLUMNS,
+        "INSERT INTO "
+        "program_versions(id,program_id,number,parent_version_id,restored_from_version_id,"
+        "graph_state_id,review,origin,operation_key,request_hash) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING " + VERSION_COLUMNS,
         (
             version_id,
             program_id,
+            parent["number"] + 1,
             parent_id,
             restore_id,
-            Jsonb(state),
+            graph,
+            Jsonb(state["review"]) if state.get("review") else None,
             origin,
             key,
             fingerprint,
-            program_id,
-            parent_id,
         ),
     ).fetchone()
-    for document_id in snapshot.document_ids:
-        cur.execute(
-            "INSERT INTO version_documents VALUES(%s,%s,%s)", (program_id, version_id, document_id)
-        )
-    from app.relational_storage import insert_projection
-
-    insert_projection(cur, version_id, snapshot)
+    journal(cur, program_id, version_id, before, row["snapshot"])
     cur.execute("UPDATE programs SET current_version_id=%s WHERE id=%s", (version_id, program_id))
-    return row
+    return version_dto(row)
 
 
 def insert_issues(cur, program_id, job_id, version_id, issues):
+    cur.execute(
+        "UPDATE processing_jobs SET checked_version_id=%s WHERE id=%s", (version_id, job_id)
+    )
     for issue in issues:
         cur.execute(
             """INSERT INTO validation_issues(id,program_id,job_id,version_id,rule_code,

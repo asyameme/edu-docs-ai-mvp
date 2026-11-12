@@ -1,5 +1,6 @@
 """Бизнес-задачи анализа, неизменяемые решения и подтверждение выбранной версии."""
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
@@ -10,13 +11,13 @@ from psycopg.types.json import Jsonb
 from app.config import get_settings
 from app.domain import SnapshotV2
 from app.errors import DomainError
+from app.graph_storage import canonical_bytes, hydrate_job, pack_tree
 from app.repository import Repository
 from app.review_contract import CheckResult
 from app.review_logic import (
     apply_changes,
     changes_in_base_sources,
     content_hash,
-    copy_sources,
     digest,
 )
 from app.review_storage import insert_issues, insert_version, previous_version
@@ -41,19 +42,23 @@ class ReviewRepository:
     def version(cur, program_id, version_id):
         return Repository.require(
             cur.execute(
-                "SELECT * FROM program_versions WHERE program_id=%s AND id=%s",
+                "SELECT *,graph_snapshot(graph_state_id,review) AS snapshot FROM "
+                "program_versions WHERE program_id=%s AND id=%s",
                 (program_id, version_id),
             ).fetchone()
         )
 
     @staticmethod
     def require_review(cur, program_id, review_id):
-        return Repository.require(
-            cur.execute(
-                """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
+        return hydrate_job(
+            cur,
+            Repository.require(
+                cur.execute(
+                    """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
                AND type='validate' AND parameters->>'purpose'='prepare'""",
-                (program_id, review_id),
-            ).fetchone()
+                    (program_id, review_id),
+                ).fetchone()
+            ),
         )
 
     @staticmethod
@@ -99,6 +104,7 @@ class ReviewRepository:
                         (program_id, body.import_job_id),
                     ).fetchone()
                 )
+                source = hydrate_job(cur, source)
                 report = source["report"]
                 files = []
                 for member in source["parameters"]["documents"]:
@@ -130,6 +136,10 @@ class ReviewRepository:
                 if not files or report.get("outcome") not in {"completed", "partial"}:
                     raise DomainError(409, "Импорт не завершён")
                 base = self.version(cur, program_id, current)["snapshot"]
+                if base.get("schema_version") == 1:
+                    base = SnapshotV2.model_validate({**base, "schema_version": 2}).model_dump(
+                        mode="json"
+                    )
                 parameters.update(
                     import_job_id=str(body.import_job_id),
                     import_workflow_id=source["workflow_id"],
@@ -159,30 +169,36 @@ class ReviewRepository:
             if purpose == "prepare":
                 parameters["review_id"] = str(job_id)
             cur.execute(
-                """INSERT INTO processing_jobs(id,program_id,input_version_id,operation_key,
-                   request_hash,type,temporal_namespace,workflow_id,parameters)
-                   VALUES(%s,%s,%s,%s,%s,'validate',%s,%s,%s)""",
+                "INSERT INTO processing_jobs(id,program_id,input_version_id,"
+                "input_graph_state_id,operation_key,\n                   request_hash,"
+                "type,temporal_namespace,workflow_id,parameters)\n                   "
+                "VALUES(%s,%s,%s,(SELECT graph_state_id FROM program_versions WHERE "
+                "id=%s),%s,%s,'validate',%s,%s,%s)",
                 (
                     job_id,
                     program_id,
+                    version_id,
                     version_id,
                     key,
                     fingerprint,
                     self.settings.temporal_namespace,
                     f"review-{job_id}",
-                    Jsonb(parameters),
+                    Jsonb(pack_tree(cur, program_id, parameters)),
                 ),
             )
             return job_id
 
     def job(self, program_id, job_id):
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
-            return Repository.require(
-                cur.execute(
-                    """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
+            return hydrate_job(
+                cur,
+                Repository.require(
+                    cur.execute(
+                        """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
                    AND type='validate' AND parameters->>'purpose' IN ('prepare','check')""",
-                    (program_id, job_id),
-                ).fetchone()
+                        (program_id, job_id),
+                    ).fetchone()
+                ),
             )
 
     def job_by_id(self, job_id):
@@ -217,6 +233,9 @@ class ReviewRepository:
             ]
 
     def publish(self, job_id, result, artifacts=(), raw_result=None, raw_hash=None):
+        from app.audit_storage import save_response
+
+        raw_artifact = save_response(raw_result)
         job = self.job_by_id(job_id)
         program_id, purpose = job["program_id"], job["parameters"]["purpose"]
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
@@ -226,55 +245,57 @@ class ReviewRepository:
             ).fetchone()
             if locked["workflow_id"] != job["workflow_id"] or "outcome" in locked["report"]:
                 return locked["report"].get("outcome", "failed")
-            if purpose == "prepare" and current != job["input_version_id"]:
-                report = {
-                    "outcome": "conflict",
-                    "result": result,
-                    "raw_result": raw_result,
-                    "raw_result_hash": raw_hash,
-                    "message": "Версия изменилась во время анализа; результат сохранён",
-                }
-                cur.execute(
-                    "UPDATE processing_jobs SET report=%s WHERE id=%s", (Jsonb(report), job_id)
-                )
-                return "conflict"
-            output_id = None
             if purpose == "prepare":
                 for artifact in artifacts:
                     cur.execute(
-                        """INSERT INTO document_artifacts(
-                           id,program_id,document_id,producing_job_id,
-                           parser_revision,parser_config_hash,storage_key,sha256,size_bytes)
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        "INSERT INTO document_artifacts(\n                           id,"
+                        "program_id,document_id,producing_job_id,producing_attempt,kind,"
+                        "\n                           parser_revision,parser_config,"
+                        "parser_config_hash,hash_encoding,storage_key,sha256,"
+                        "size_bytes)\n                           VALUES(%s,%s,%s,%s,1,"
+                        "'markdown',%s,%s,%s,'raw-bytes',%s,%s,%s)",
                         (
                             UUID(artifact["id"]),
                             program_id,
                             UUID(artifact["document_id"]),
                             job_id,
                             artifact["parser_revision"],
-                            artifact["parser_config_hash"],
+                            Jsonb(artifact["parser_config"]),
+                            hashlib.sha256(canonical_bytes(artifact["parser_config"])).hexdigest(),
                             artifact["id"],
                             artifact["sha256"],
                             artifact["size_bytes"],
                         ),
                     )
-                output_id = uuid5(job_id, "analysis-version")
-                original = SnapshotV2.model_validate(result["candidate"])
-                snapshot = copy_sources(original, output_id)
-                refs = {
-                    str(a.id): str(b.id)
-                    for a, b in zip(original.source_refs, snapshot.source_refs, strict=True)
+            if purpose == "prepare" and current != job["input_version_id"]:
+                from app.graph_storage import save_graph
+
+                candidate = save_graph(
+                    cur, program_id, result["candidate"], producer=job_id, attempt=1
+                )
+                result = {
+                    **result,
+                    "candidate": {
+                        "__graph_state": str(candidate),
+                        "review": result["candidate"].get("review"),
+                    },
                 }
-                for issue in result["issues"]:
-                    issue["source_ref_ids"] = [refs[key] for key in issue["source_ref_ids"]]
-                    for variant in issue["variants"]:
-                        for change in variant["changes"]:
-                            for item_key in ("entity", "relation"):
-                                item = change.get(item_key)
-                                if item:
-                                    item["source_ref_ids"] = [
-                                        refs[key] for key in item["source_ref_ids"]
-                                    ]
+                report = {
+                    "outcome": "conflict",
+                    "result": result,
+                    "raw_result_artifact": raw_artifact,
+                    "raw_result_hash": raw_hash,
+                    "message": "Версия изменилась во время анализа; результат сохранён",
+                }
+                cur.execute(
+                    "UPDATE processing_jobs SET report=%s,output_graph_state_id=%s WHERE id=%s",
+                    (Jsonb(pack_tree(cur, program_id, report)), candidate, job_id),
+                )
+                return "conflict"
+            output_id = None
+            if purpose == "prepare":
+                output_id = uuid5(job_id, "analysis-version")
+                snapshot = SnapshotV2.model_validate(result["candidate"])
                 state = snapshot.model_dump(mode="json")
                 state["review"] = {
                     "review_id": str(job_id),
@@ -292,22 +313,34 @@ class ReviewRepository:
                 CheckResult.model_validate(result)
                 if digest(result["ruleset"]) != digest(job["parameters"]["ruleset"]):
                     raise ValueError("Check used another ruleset")
+            cur.execute(
+                "UPDATE processing_jobs SET output_version_id=%s,output_graph_state_id="
+                "(SELECT graph_state_id FROM program_versions WHERE "
+                "id=%s),checked_version_id=%s WHERE id=%s",
+                (output_id, output_id, issue_version, job_id),
+            )
             insert_issues(cur, program_id, job_id, issue_version, result["issues"])
             report = {
                 "outcome": "completed",
                 "result": result,
-                "raw_result": raw_result,
+                "raw_result_artifact": raw_artifact,
                 "raw_result_hash": raw_hash,
                 "completed_at": datetime.now(UTC).isoformat(),
             }
             cur.execute(
                 "UPDATE processing_jobs SET output_version_id=%s,report=%s WHERE id=%s",
-                (output_id, Jsonb(report), job_id),
+                (output_id, Jsonb(pack_tree(cur, program_id, report)), job_id),
             )
             return "completed"
 
     def fail(self, job_id, workflow_id, code, message):
         with self.pool.connection() as connection:
+            connection.execute(
+                "SELECT p.id FROM programs p JOIN processing_jobs j ON "
+                "j.program_id=p.id "
+                "WHERE j.id=%s FOR UPDATE OF p",
+                (job_id,),
+            )
             connection.execute(
                 """UPDATE processing_jobs SET report=%s WHERE id=%s AND workflow_id=%s
                    AND NOT report ? 'outcome'""",
@@ -380,18 +413,21 @@ class ReviewRepository:
             state["review"]["decisions"] = choices
             selected = SnapshotV2.model_validate(state)
             version_id = uuid4()
-            selected = copy_sources(selected, version_id)
             return insert_version(
                 cur, program_id, current, version_id, selected, key=key, fingerprint=fingerprint
             )
 
     @staticmethod
     def job_with_cursor(cur, program_id, job_id):
-        return Repository.require(
-            cur.execute(
-                "SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s AND type='validate'",
-                (program_id, job_id),
-            ).fetchone()
+        return hydrate_job(
+            cur,
+            Repository.require(
+                cur.execute(
+                    "SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s AND "
+                    "type='validate'",
+                    (program_id, job_id),
+                ).fetchone()
+            ),
         )
 
     def confirm(self, program_id, review_id, key, body):
@@ -457,7 +493,6 @@ class ReviewRepository:
             }
             snapshot = SnapshotV2.model_validate(state)
             version_id = uuid4()
-            snapshot = copy_sources(snapshot, version_id)
             if content_hash(snapshot) != hash_before:
                 raise DomainError(409, "Содержимое не совпадает с проверенным")
             return insert_version(

@@ -8,6 +8,7 @@ from psycopg.types.json import Jsonb
 
 from app.config import get_settings
 from app.errors import DomainError
+from app.graph_storage import hydrate_report, load_graph, parsed_artifact, save_graph
 from app.repository import Repository
 
 
@@ -112,6 +113,11 @@ class ImportRepository:
                 ).fetchone()
             )
             parameters, report = row["parameters"], row["report"]
+            if include_output:
+                report = hydrate_report(cur, report)
+                if row["output_graph_state_id"]:
+                    report["snapshot"] = load_graph(cur, row["output_graph_state_id"])
+
             ids = [UUID(d["document_id"]) for d in parameters["documents"]]
             originals = {
                 str(d["id"]): d
@@ -131,7 +137,9 @@ class ImportRepository:
                 "sha256": original["sha256"],
                 "status": "failed"
                 if result.get("error_code")
-                else ("completed" if result.get("output") else "pending"),
+                else (
+                    "completed" if result.get("output") or result.get("artifact_id") else "pending"
+                ),
                 "error_code": result.get("error_code"),
                 "error_message": result.get("error_message"),
             }
@@ -178,36 +186,80 @@ class ImportRepository:
             ).fetchall()
 
     def file_finished(self, job_id, document_id, attempt, output=None, code=None, message=None):
-        with self.pool.connection() as connection:
-            result = {"output": output, "error_code": code, "error_message": message}
-            connection.execute(
-                """UPDATE processing_jobs SET report=jsonb_set(
-                   report,'{files}',COALESCE(report->'files','{}'::jsonb)||%s)
-                   WHERE id=%s AND workflow_id=%s AND NOT report ? 'outcome'""",
-                (
-                    Jsonb({str(document_id): result}),
-                    job_id,
-                    workflow_identity(job_id, attempt),
-                ),
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            row = cur.execute(
+                "SELECT program_id FROM processing_jobs WHERE id=%s", (job_id,)
+            ).fetchone()
+            if row is None:
+                return
+            cur.execute("SELECT id FROM programs WHERE id=%s FOR UPDATE", (row["program_id"],))
+            job = cur.execute(
+                "SELECT * FROM processing_jobs WHERE id=%s FOR UPDATE", (job_id,)
+            ).fetchone()
+            if (
+                job["workflow_id"] != workflow_identity(job_id, attempt)
+                or "outcome" in job["report"]
+            ):
+                return
+            report = job["report"]
+            previous = report.get("files", {}).get(str(document_id))
+            if previous and previous.get("artifact_id"):
+                return
+            artifact = (
+                parsed_artifact(cur, job["program_id"], document_id, output, job_id, attempt)
+                if output
+                else None
             )
+            result = {
+                "artifact_id": str(artifact) if artifact else None,
+                "error_code": code,
+                "error_message": message,
+            }
+            report.setdefault("files", {})[str(document_id)] = result
+            cur.execute("UPDATE processing_jobs SET report=%s WHERE id=%s", (Jsonb(report), job_id))
 
     def finish(self, job_id, attempt, status, snapshot, issues):
-        with self.pool.connection() as connection:
-            connection.execute(
-                """UPDATE processing_jobs SET report=report||jsonb_build_object(
-                   'outcome',%s::text,'snapshot',%s::jsonb,'issues',%s::jsonb,'completed_at',now())
-                   WHERE id=%s AND workflow_id=%s AND NOT report ? 'outcome'""",
-                (
-                    status,
-                    Jsonb(snapshot),
-                    Jsonb(issues),
-                    job_id,
-                    workflow_identity(job_id, attempt),
-                ),
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            row = cur.execute(
+                "SELECT program_id FROM processing_jobs WHERE id=%s", (job_id,)
+            ).fetchone()
+            if row is None:
+                return
+            cur.execute("SELECT id FROM programs WHERE id=%s FOR UPDATE", (row["program_id"],))
+            job = cur.execute(
+                "SELECT * FROM processing_jobs WHERE id=%s FOR UPDATE", (job_id,)
+            ).fetchone()
+            if (
+                job["workflow_id"] != workflow_identity(job_id, attempt)
+                or "outcome" in job["report"]
+            ):
+                return
+            graph = (
+                save_graph(
+                    cur,
+                    job["program_id"],
+                    snapshot,
+                    producer=job_id,
+                    attempt=attempt,
+                    members={
+                        d["document_id"]: d["member_name"] for d in job["parameters"]["documents"]
+                    },
+                )
+                if snapshot
+                else None
+            )
+            report = job["report"]
+            report.update(
+                outcome=status, issues=issues, completed_at=datetime.now().astimezone().isoformat()
+            )
+            cur.execute(
+                "UPDATE processing_jobs SET report=%s,output_graph_state_id=%s WHERE id=%s",
+                (Jsonb(report), graph, job_id),
             )
 
     def retry(self, program_id, job_id, expected_workflow_id):
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM programs WHERE id=%s FOR UPDATE", (program_id,))
             row = Repository.require(
                 cur.execute(
                     """SELECT workflow_id,report FROM processing_jobs
@@ -221,10 +273,12 @@ class ImportRepository:
             successful = {
                 identity: result
                 for identity, result in row["report"].get("files", {}).items()
-                if result.get("output") and not result.get("error_code")
+                if (result.get("output") or result.get("artifact_id"))
+                and not result.get("error_code")
             }
             cur.execute(
-                "UPDATE processing_jobs SET workflow_id=%s,report=%s WHERE id=%s",
+                "UPDATE processing_jobs SET "
+                "workflow_id=%s,report=%s,output_graph_state_id=NULL WHERE id=%s",
                 (
                     workflow_identity(job_id, workflow_attempt(expected_workflow_id) + 1),
                     Jsonb({"files": successful}),

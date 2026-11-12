@@ -11,7 +11,6 @@ from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
-from psycopg.types.json import Jsonb
 from starlette.datastructures import UploadFile
 from test_generation_docx_patch import document_text, make_docx
 
@@ -36,11 +35,14 @@ def test_confirmed_version_generates_durable_zip_and_rejects_duplicate_key():
         program = client.post("/api/v1/programs", json={"name": "Генерация"}).json()
         program_id = UUID(program["id"])
         root = f"/api/v1/programs/{program_id}/generation"
-        assert client.post(
-            root,
-            json={"version_id": program["current_version_id"]},
-            headers={"Idempotency-Key": uuid4().hex},
-        ).status_code == 409
+        assert (
+            client.post(
+                root,
+                json={"version_id": program["current_version_id"]},
+                headers={"Idempotency-Key": uuid4().hex},
+            ).status_code
+            == 409
+        )
 
         stored = OriginalStorage(1024 * 1024).save(
             UploadFile(file=io.BytesIO(content), filename="Алгебра.docx")
@@ -53,27 +55,16 @@ def test_confirmed_version_generates_durable_zip_and_rejects_duplicate_key():
                 "SELECT id FROM source_documents WHERE program_id=%s AND sha256=%s",
                 (program_id, stored["sha256"]),
             ).fetchone()[0]
-            connection.execute(
-                "UPDATE processing_jobs SET report=%s WHERE id=%s",
-                (
-                    Jsonb(
-                        {
-                            "outcome": "completed",
-                            "files": {
-                                str(document_id): {
-                                    "output": {
-                                        "meta": {
-                                            "doc_type": "RPD",
-                                            "file_hash": stored["sha256"],
-                                        }
-                                    }
-                                }
-                            },
-                        }
-                    ),
-                    imported_id,
-                ),
-            )
+        imports = ImportRepository(app.state.resources.postgres)
+        output = {"meta": {"doc_type": "RPD", "file_hash": stored["sha256"]}}
+        imports.file_finished(imported_id, document_id, 1, output=output)
+        imports.finish(
+            imported_id,
+            1,
+            "completed",
+            SnapshotV2(document_ids=[document_id]).model_dump(mode="json"),
+            [],
+        )
         discipline, competency, relation, ref = [uuid4() for _ in range(4)]
         snapshot = SnapshotV2.model_validate(
             {
@@ -189,11 +180,14 @@ def test_confirmed_version_generates_durable_zip_and_rejects_duplicate_key():
             codes, rows = read_matrix_xlsx(archive.read("Матрица компетенций.xlsx"))
             assert codes == ("УК-1",)
             assert rows == [[1]]
-        assert client.post(
-            root,
-            json={"version_id": program["current_version_id"]},
-            headers={"Idempotency-Key": key},
-        ).status_code == 409
+        assert (
+            client.post(
+                root,
+                json={"version_id": program["current_version_id"]},
+                headers={"Idempotency-Key": key},
+            ).status_code
+            == 409
+        )
 
 
 @pytest.mark.skipif(
@@ -291,35 +285,35 @@ def test_generation_keeps_import_result_after_retry():
             workflow_id = connection.execute(
                 "SELECT workflow_id FROM processing_jobs WHERE id=%s", (import_id,)
             ).fetchone()[0]
-            snapshot = SnapshotV2.model_validate({
-                "document_ids": [document_id],
-                "entities": [
-                    {"id": uuid4(), "kind": "discipline", "attributes": {"name": "Алгебра"}},
-                    {"id": uuid4(), "kind": "competency", "attributes": {"code": "УК-1"}},
-                ],
-            })
-            connection.execute(
-                "UPDATE processing_jobs SET report=%s WHERE id=%s",
-                (
-                    Jsonb({
-                        "outcome": "partial",
-                        "snapshot": snapshot.model_dump(mode="json"),
-                        "files": {str(document_id): {"output": {
-                            "meta": {"doc_type": "RPD", "file_hash": stored["sha256"]}
-                        }}},
-                    }),
-                    import_id,
-                ),
+            snapshot = SnapshotV2.model_validate(
+                {
+                    "document_ids": [document_id],
+                    "entities": [
+                        {"id": uuid4(), "kind": "discipline", "attributes": {"name": "Алгебра"}},
+                        {"id": uuid4(), "kind": "competency", "attributes": {"code": "УК-1"}},
+                    ],
+                }
             )
+        imports.file_finished(
+            import_id,
+            document_id,
+            1,
+            output={"meta": {"doc_type": "RPD", "file_hash": stored["sha256"]}},
+        )
+        imports.finish(import_id, 1, "partial", snapshot.model_dump(mode="json"), [])
         generations = GenerationRepository(app.state.resources.postgres)
         job_id = generations.create(program_id, None, import_id, uuid4().hex)
         imports.retry(program_id, import_id, workflow_id)
         with app.state.resources.postgres.connection() as connection:
-            assert connection.execute(
-                "SELECT report ? 'snapshot' FROM processing_jobs WHERE id=%s", (import_id,)
-            ).fetchone()[0] is False
-        assert GenerationActivities(app.state.resources.postgres).build(
-            {"job_id": str(job_id)}
-        ) == "completed"
+            assert (
+                connection.execute(
+                    "SELECT report ? 'snapshot' FROM processing_jobs WHERE id=%s", (import_id,)
+                ).fetchone()[0]
+                is False
+            )
+        assert (
+            GenerationActivities(app.state.resources.postgres).build({"job_id": str(job_id)})
+            == "completed"
+        )
         with ZipFile(io.BytesIO(generations.package(program_id, job_id)["content"])) as archive:
             assert archive.read("РПД_Алгебра.docx") == content
