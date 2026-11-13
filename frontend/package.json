@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:signatures": "node --experimental-strip-types --test tests/signature.test.mjs",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview"
