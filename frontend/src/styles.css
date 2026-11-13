@@ -20,6 +20,20 @@
   box-sizing: border-box;
 }
 
+.program-signature {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
 body {
   min-width: 320px;
   min-height: 100vh;
