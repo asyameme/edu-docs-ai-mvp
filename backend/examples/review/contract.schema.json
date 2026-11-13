@@ -1,6 +1,45 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "AcademicHoursRange": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "range",
+          "title": "Kind",
+          "type": "string"
+        },
+        "min": {
+          "minimum": 0,
+          "title": "Min",
+          "type": "integer"
+        },
+        "max": {
+          "minimum": 0,
+          "title": "Max",
+          "type": "integer"
+        },
+        "unit": {
+          "const": "academic_hour",
+          "title": "Unit",
+          "type": "string"
+        },
+        "raw_text": {
+          "minLength": 1,
+          "title": "Raw Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "min",
+        "max",
+        "unit",
+        "raw_text"
+      ],
+      "title": "AcademicHoursRange",
+      "type": "object"
+    },
     "AnalysisDocument": {
       "additionalProperties": false,
       "properties": {
@@ -464,9 +503,16 @@
           "type": "string"
         },
         "hours": {
-          "minimum": 0,
-          "title": "Hours",
-          "type": "integer"
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "$ref": "#/$defs/AcademicHoursRange"
+            }
+          ],
+          "title": "Hours"
         },
         "module": {
           "anyOf": [
@@ -639,14 +685,28 @@
           "type": "array"
         },
         "credit_units": {
-          "minimum": 1,
-          "title": "Credit Units",
-          "type": "integer"
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Credit Units"
         },
         "hours_total": {
-          "minimum": 0,
-          "title": "Hours Total",
-          "type": "integer"
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Hours Total"
         },
         "hours_by_kind": {
           "additionalProperties": {
@@ -1477,6 +1537,48 @@
     "RPDOutput": {
       "additionalProperties": false,
       "properties": {
+        "education_languages": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Education Languages",
+          "type": "array"
+        },
+        "education_languages_source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "title_credit_units": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title Credit Units"
+        },
+        "title_credit_units_source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "meta": {
           "$ref": "#/$defs/RPDMeta"
         },
@@ -1610,6 +1712,48 @@
     "RPPOutput": {
       "additionalProperties": false,
       "properties": {
+        "education_languages": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Education Languages",
+          "type": "array"
+        },
+        "education_languages_source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "title_credit_units": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title Credit Units"
+        },
+        "title_credit_units_source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "meta": {
           "$ref": "#/$defs/RPPMeta"
         },
@@ -1625,7 +1769,6 @@
           "items": {
             "$ref": "#/$defs/SemesterWorkload"
           },
-          "minItems": 1,
           "title": "Semester Workload",
           "type": "array"
         },

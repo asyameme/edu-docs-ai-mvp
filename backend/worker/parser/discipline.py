@@ -1,6 +1,7 @@
 """Название дисциплины, варианты нагрузки, часы, ЗЕТ и пререквизиты."""
 
 import re
+from collections import Counter
 
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -8,6 +9,7 @@ from docx.text.paragraph import Paragraph
 from .common import (
     heading_level,
     normalize,
+    paragraph_indices,
     parse_workload_number,
     read_section,
 )
@@ -17,6 +19,66 @@ from backend.contracts.document_v2.models import (
     SemesterWorkload,
     SourceRef,
 )
+
+
+def read_title_details(document, title_blocks, output):
+    """Сохранить явно подписанные ЗЕТ и языки титула с их источниками."""
+    indices = paragraph_indices(document)
+    paragraphs = []
+    table_number = 0
+    for block in title_blocks:
+        if isinstance(block, Paragraph):
+            paragraphs.append((block, {}))
+            continue
+        table_number += 1
+        for row_number, row in enumerate(block.rows, 1):
+            for col, cell in enumerate(row.cells, 1):
+                coordinates = {"table": table_number, "row": row_number, "col": col}
+                paragraphs.extend((p, coordinates) for p in cell.paragraphs)
+
+    credits = {}
+    languages = {}
+    previous_language_label = False
+    seen = set()
+    for paragraph, coordinates in paragraphs:
+        if paragraph._p in seen:
+            continue
+        seen.add(paragraph._p)
+        text = normalize(paragraph.text).replace("ё", "е")
+        if not text:
+            continue
+        ref = SourceRef(
+            file=output.meta.file_name,
+            section="титул",
+            paragraph_index=indices[paragraph._p],
+            **coordinates,
+        )
+        amount = re.fullmatch(
+            r"трудоемкость(?: \(границы трудоемкости\))? в зачетных единицах:\s*([1-9]\d*)",
+            text,
+        )
+        if amount:
+            credits.setdefault(int(amount[1]), ref)
+
+        label = re.fullmatch(r"язык(?:и|\(и\))? обучения\s*(?::\s*(.*))?", text)
+        value = (label[1] or "") if label else text if previous_language_label else ""
+        previous_language_label = bool(label and not value)
+        if value and re.fullmatch(r"[а-я]+(?:\s*[,;/]\s*[а-я]+|\s+и\s+[а-я]+)*", value):
+            names = tuple(re.split(r"\s*[,;/]\s*|\s+и\s+", value))
+            languages.setdefault(names, ref)
+
+    if len(credits) == 1:
+        output.title_credit_units, output.title_credit_units_source_ref = next(iter(credits.items()))
+    if len(languages) == 1:
+        names, output.education_languages_source_ref = next(iter(languages.items()))
+        output.education_languages = list(names)
+    for values, label in ((credits, "ЗЕТ"), (languages, "языки обучения")):
+        if len(values) > 1:
+            output.parse_issues.append(ParseIssue(
+                category="ambiguous",
+                message=f"На титуле указаны разные значения поля «{label}»",
+                source_ref=next(iter(values.values())),
+            ))
 
 
 def organization_tables(document, file_name):
@@ -1396,15 +1458,11 @@ def extract_practice_workload(document, file_name):
         match = re.fullmatch(amount_pattern, amount)
 
         if match:
-            try:
-                record["credit_units"] = parse_workload_number(
-                    match.group(1)
-                )
-                record["hours_total"] = parse_workload_number(
-                    match.group(2)
-                )
-            except ValueError:
-                pass
+            for field, value in zip(("credit_units", "hours_total"), match.groups()):
+                try:
+                    record[field] = parse_workload_number(value)
+                except ValueError:
+                    continue
 
         if (
             record["credit_units"] is None
@@ -1506,24 +1564,23 @@ def build_practice_discipline(document, file_name, title_parts):
     ]
     ref = records[0]["source_ref"]
 
-    if len(totals) != 1:
+    total = totals[0] if len(totals) == 1 else None
+    if total is None:
         issues.append(ParseIssue(
             category="ambiguous" if totals else "not_found",
             message="Не удалось однозначно прочитать общий объем практики",
             source_ref=ref,
         ))
-        return None, [], issues
 
-    total = totals[0]
-
+    totals_by_field = {"credit_units": None, "hours_total": None}
     for field, minimum in (
         ("credit_units", 1),
         ("hours_total", 0),
     ):
-        value = total[field]
+        value = total[field] if total else None
 
         if value is None:
-            return None, [], issues
+            continue
 
         if value < minimum or value != value.to_integral_value():
             issues.append(ParseIssue(
@@ -1534,14 +1591,16 @@ def build_practice_discipline(document, file_name, title_parts):
                 ),
                 source_ref=total["source_ref"],
             ))
-            return None, [], issues
+            continue
+        totals_by_field[field] = int(value)
 
-    semesters = [item["semester"] for item in periods]
+    semester_counts = Counter(item["semester"] for item in periods)
+    semesters = sorted(semester for semester in semester_counts if 1 <= semester <= 8)
 
     if (
         not semesters
-        or any(not 1 <= value <= 8 for value in semesters)
-        or len(semesters) != len(set(semesters))
+        or len(semesters) != len(semester_counts)
+        or any(count > 1 for count in semester_counts.values())
     ):
         issues.append(ParseIssue(
             category="manual_review",
@@ -1551,14 +1610,16 @@ def build_practice_discipline(document, file_name, title_parts):
             ),
             source_ref=ref,
         ))
-        return None, [], issues
 
     semester_workload = []
     for item in periods:
+        semester = item["semester"]
+        if semester not in semesters or semester_counts[semester] != 1:
+            continue
         credits, hours = item["credit_units"], item["hours_total"]
         if credits is None or hours is None:
             continue  # Причина уже записана при извлечении.
-        if credits != credits.to_integral_value() or hours != hours.to_integral_value():
+        if any(value < 0 or value != value.to_integral_value() for value in (credits, hours)):
             issues.append(ParseIssue(
                 category="unexpected_format",
                 message="В контракте v2 нужны целые ЗЕТ и часы: " + item["raw"],
@@ -1566,21 +1627,22 @@ def build_practice_discipline(document, file_name, title_parts):
             ))
             continue
         semester_workload.append(SemesterWorkload(
-            semester=item["semester"],
+            semester=semester,
             credit_units=int(credits),
             hours_total=int(hours),
             source_ref=item["source_ref"],
         ))
 
+    total_ref = total["source_ref"] if total else SourceRef(file=file_name, section="титул")
+    if total:
+        total_ref = total_ref.model_copy(update={"section": f"титул; {total_ref.section}"})
     discipline = Discipline(
         name=names[0],
-        semesters=sorted(semesters),
-        credit_units=int(total["credit_units"]),
-        hours_total=int(total["hours_total"]),
+        semesters=semesters,
+        credit_units=totals_by_field["credit_units"],
+        hours_total=totals_by_field["hours_total"],
         hours_by_kind={},
-        source_ref=total["source_ref"].model_copy(update={
-            "section": f"титул; {total['source_ref'].section}",
-        }),
+        source_ref=total_ref,
     )
 
     return discipline, semester_workload, issues

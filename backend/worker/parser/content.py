@@ -10,9 +10,32 @@ from .common import (
     read_section,
 )
 from backend.contracts.document_v2.models import (
+    AcademicHoursRange,
     CourseTopic,
     ParseIssue,
 )
+
+
+def parse_topic_hours(raw: str) -> int | AcademicHoursRange:
+    """Прочитать точные часы или обе границы диапазона из ячейки."""
+    match = re.fullmatch(
+        r"(\d+)\s*[-\u2010-\u2015\u2212]\s*(\d+)"
+        r"(?:\s*(?:(?:академических\s+)?час(?:а|ов)?|ч\.))?",
+        normalize(raw),
+    )
+    if match:
+        return AcademicHoursRange(
+            kind="range",
+            min=int(match[1]),
+            max=int(match[2]),
+            unit="academic_hour",
+            raw_text=raw,
+        )
+
+    hours = parse_workload_number(" ".join(raw.split()))
+    if hours != hours.to_integral_value():
+        raise ValueError("Часы должны быть целым числом")
+    return int(hours)
 
 
 def course_content_columns(cells):
@@ -20,7 +43,7 @@ def course_content_columns(cells):
     patterns = {
         "topic": r"^(?:(?:наименование|название)\s+темы\b.*|тема)$",
         "activity": r"^вид(?:ы)?\s+(?:учебных\s+)?занятий$",
-        "hours": r"^(?:количество\s+часов|часы)$",
+        "hours": r"^(?:(?:количество|кол[-\u2010-\u2015]во)\s+часов|часы)$",
     }
     columns = {}
 
@@ -341,9 +364,9 @@ def extract_wide_course_table(table, source_ref):
                 )
                 continue
 
-            raw = " ".join(cell.text.split())
+            raw = cell.text
 
-            if not raw:
+            if not raw.strip():
                 report(
                     "empty_cell",
                     f"нет часов: тема {topic!r}, вид {activity!r}",
@@ -353,14 +376,11 @@ def extract_wide_course_table(table, source_ref):
                 continue
 
             try:
-                hours = parse_workload_number(raw)
+                hours = parse_topic_hours(raw)
             except ValueError:
-                hours = None
-
-            if hours is None or hours != hours.to_integral_value():
                 report(
                     "unexpected_format",
-                    f"часы {raw!r} нельзя записать целым числом: "
+                    f"не удалось прочитать часы {raw!r}: "
                     f"тема {topic!r}, вид {activity!r}",
                     row_number,
                     column,
@@ -370,7 +390,7 @@ def extract_wide_course_table(table, source_ref):
             topics.append(CourseTopic(
                 topic=topic,
                 activity=activity,
-                hours=int(hours),
+                hours=hours,
                 source_ref=source_ref.model_copy(update={
                     "row": row_number,
                     "col": column + 1,
@@ -497,7 +517,7 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
             columns = course_content_columns(row.cells)
 
             if columns is not None:
-                header = (index, columns, len(row.cells))
+                header = (index, columns, len(row.cells), row.grid_cols_before, row.grid_cols_after)
                 break
 
         if header is None:
@@ -520,17 +540,27 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
             )
             continue
 
-        header_index, columns, width = header
+        header_index, columns, width, leading, trailing = header
         topic_start, issue_start = len(topics), len(issues)
         seen_cells = set()
         hour_owners = {}
 
+        def matches_grid(row, cells):
+            if row.grid_cols_before != leading or len(cells) + row.grid_cols_after != width + trailing:
+                return False
+            if len(cells) == width:
+                return True
+            # Пустой край шапки может быть продолжением последней ячейки строки.
+            return len(cells) > width and all(
+                cell._tc is cells[width - 1]._tc or not cell.text.strip()
+                for cell in cells[width:]
+            )
+
         # Объединенные часы не распределяем между разными занятиями.
         for row in rows[header_index + 1:]:
-            if len(row.cells) != width:
-                continue
-
             cells = row.cells
+            if not matches_grid(row, cells):
+                continue
             owner = (
                 cells[columns["topic"]]._tc,
                 cells[columns["activity"]]._tc,
@@ -564,11 +594,7 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
 
                 continue
 
-            if (
-                len(cells) != width
-                or row.grid_cols_before
-                or row.grid_cols_after
-            ):
+            if not matches_grid(row, cells):
                 report(
                     "unexpected_format",
                     "строка не совпадает с сеткой шапки",
@@ -639,16 +665,13 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
                 )
                 continue
 
+            raw_hours = selected["hours"].text
             try:
-                hours = parse_workload_number(values["hours"])
+                hours = parse_topic_hours(raw_hours)
             except ValueError:
-                hours = None
-
-            if hours is None or hours != hours.to_integral_value():
                 report(
                     "unexpected_format",
-                    f"часы {values['hours']!r} нельзя записать целым "
-                    f"числом; тема {values['topic']!r}, "
+                    f"не удалось прочитать часы {raw_hours!r}; тема {values['topic']!r}, "
                     f"вид занятия {values['activity']!r}",
                     row_ref.model_copy(
                         update={"col": columns["hours"] + 1},
@@ -656,12 +679,13 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
                 )
                 continue
 
+            source_column = "hours" if isinstance(hours, AcademicHoursRange) else "topic"
             topics.append(CourseTopic(
                 topic=values["topic"],
                 activity=values["activity"],
-                hours=int(hours),
+                hours=hours,
                 source_ref=row_ref.model_copy(
-                    update={"col": columns["topic"] + 1},
+                    update={"col": columns[source_column] + 1},
                 ),
             ))
 

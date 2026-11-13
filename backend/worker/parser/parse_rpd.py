@@ -42,6 +42,7 @@ from .discipline import (
     extract_workload,
     organization_tables,
     organization_variant_rows,
+    read_title_details,
     select_workload_variant,
 )
 from backend.contracts.document_v2.models import (
@@ -136,6 +137,7 @@ def parse_rpd(
 
     # 1. Читаем титул до первого заголовка.
     title_parts = []
+    title_blocks = []
 
     for block in blocks:
         if isinstance(block, Paragraph):
@@ -150,6 +152,7 @@ def parse_rpd(
                 for row in block.rows
                 for cell in row.cells
             )
+        title_blocks.append(block)
 
     title = re.sub(
         r"\s+",
@@ -197,6 +200,7 @@ def parse_rpd(
         ),
         disciplines=[discipline],
     )
+    read_title_details(document, title_blocks, output)
 
     output.parse_issues.append(
         ParseIssue(
