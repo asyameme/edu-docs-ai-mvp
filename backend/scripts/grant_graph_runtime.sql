@@ -14,4 +14,6 @@ GRANT UPDATE ON programs,processing_jobs,graph_states,graph_entities,graph_relat
     graph_documents,graph_sources,graph_source_links TO :"runtime_user";
 GRANT DELETE ON graph_states,graph_entities,graph_relations,graph_documents,
     graph_sources,graph_source_links TO :"runtime_user";
+GRANT SELECT,INSERT ON chat_sessions,chat_turns TO :"runtime_user";
+GRANT UPDATE ON chat_sessions,chat_turns TO :"runtime_user";
 COMMIT;

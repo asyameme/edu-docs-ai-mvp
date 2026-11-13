@@ -63,6 +63,7 @@ def test_initial_and_stage4_migrations_preserve_v1_and_match_latest_schema(tmp_p
     assert path.exists(), "Нужна одна начальная миграция итоговой схемы"
     script = ScriptDirectory(str(ROOT))
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0007_chat",
         "0006_versioned_graph",
         "0005_generation",
         "0004_relational",

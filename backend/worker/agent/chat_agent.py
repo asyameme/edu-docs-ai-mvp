@@ -15,15 +15,17 @@ from .contracts import (
     EntitySearchResult,
     GraphProjection,
     SourceFragment,
+    ValidationFinding,
 )
 from .read_port import EntityKind, get_worker_read_port
-
 
 INSTRUCTIONS = """
 Ты чат-агент системы поддержки документации образовательной программы.
 
 - Для утверждений о состоянии программы используй результаты инструментов.
 - Не придумывай значения, связи, формулировки или ссылки на источники.
+- Если данные сокращены (truncated=true), используй summary/matched_context;
+  для нужного фрагмента передай в read_entity query с искомой формулировкой.
 - Если запрос неоднозначен, верни Clarification с конкретными вопросами.
 - Если пользователь просит изменить данные, сначала прочитай текущую сущность
   и верни ChangeProposal с текущими и предлагаемыми значениями и источниками.
@@ -34,7 +36,7 @@ INSTRUCTIONS = """
 
 
 def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
-    """Build a stable agent definition; backend supplies the configured model."""
+    """Создаёт агента; настроенную модель передаёт backend."""
 
     agent = Agent(
         model,
@@ -52,7 +54,7 @@ def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
         entity_kinds: list[EntityKind] | None = None,
         limit: Annotated[int, Field(ge=1, le=20)] = 10,
     ) -> EntitySearchResult:
-        """Find entities in the selected program version by name or content."""
+        """Находит сущности по имени или содержимому в выбранной версии программы."""
 
         return await get_worker_read_port().search_entities(
             program_id=ctx.deps.program_id,
@@ -66,13 +68,15 @@ def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
     async def read_entity(
         ctx: RunContext[ChatDeps],
         entity_id: UUID,
+        query: Annotated[str | None, Field(min_length=1, max_length=500)] = None,
     ) -> EntityReadResult:
-        """Read one entity, its direct relations, and its source references."""
+        """Читает сущность, её прямые связи и ссылки на источники."""
 
         return await get_worker_read_port().read_entity(
             program_id=ctx.deps.program_id,
             version_id=ctx.deps.version_id,
             entity_id=entity_id,
+            query=query,
         )
 
     @agent.tool
@@ -81,7 +85,7 @@ def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
         source_ref_id: UUID,
         context_paragraphs: Annotated[int, Field(ge=0, le=2)] = 1,
     ) -> SourceFragment:
-        """Read a source fragment and a small amount of surrounding context."""
+        """Читает фрагмент источника и небольшой окружающий контекст."""
 
         return await get_worker_read_port().read_source_fragment(
             program_id=ctx.deps.program_id,
@@ -96,13 +100,24 @@ def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
         entity_id: UUID,
         depth: Annotated[int, Field(ge=0, le=2)] = 1,
     ) -> GraphProjection:
-        """Read a bounded part of the graph around an entity."""
+        """Читает ограниченную часть графа вокруг сущности."""
 
         return await get_worker_read_port().read_graph_projection(
             program_id=ctx.deps.program_id,
             version_id=ctx.deps.version_id,
             entity_id=entity_id,
             depth=depth,
+        )
+
+    @agent.tool
+    async def get_validation_findings(
+        ctx: RunContext[ChatDeps],
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+    ) -> list[ValidationFinding]:
+        """Читает сохранённые замечания проверки выбранной версии."""
+
+        return await get_worker_read_port().get_validation_findings(
+            program_id=ctx.deps.program_id, version_id=ctx.deps.version_id, limit=limit
         )
 
     return agent

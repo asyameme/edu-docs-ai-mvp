@@ -6,10 +6,15 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from psycopg_pool import ConnectionPool
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from temporalio.client import Client
 from temporalio.worker import Worker
 
 from app.activities import diagnostic_echo
+from app.chat_dispatcher import ChatActivities, dispatch_chats
+from app.chat_model import chat_agent
+from app.chat_repository import ChatRepository
+from app.chat_workflow import ChatWorkflow
 from app.config import get_settings
 from app.generation_activities import GenerationActivities
 from app.generation_dispatcher import dispatch_generations
@@ -23,11 +28,16 @@ from app.review_dispatcher import dispatch_reviews
 from app.review_repository import ReviewRepository
 from app.review_workflow import ReviewWorkflow
 from app.workflows import DiagnosticWorkflow, ImportWorkflow, LegacyImportWorkflow
+from worker.agent.read_adapter import configure_read_port
 
 
 async def main() -> None:
     settings = get_settings()
-    client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+    client = await Client.connect(
+        settings.temporal_address,
+        namespace=settings.temporal_namespace,
+        plugins=[PydanticAIPlugin()],
+    )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -47,6 +57,12 @@ async def main() -> None:
     imports = ImportActivities(pool, settings)
     reviews = ReviewActivities(pool, settings)
     generations = GenerationActivities(pool)
+    chat_repository = ChatRepository(pool, settings.temporal_namespace)
+    chat_activities = ChatActivities(chat_repository)
+    if chat_agent:
+        configure_read_port(pool)
+    if chat_agent:
+        ChatWorkflow.__pydantic_ai_agents__ = [chat_agent]
     executor = ThreadPoolExecutor(max_workers=4)
     async with Worker(
         client,
@@ -58,6 +74,7 @@ async def main() -> None:
             ImportWorkflow,
             ReviewWorkflow,
             GenerationWorkflow,
+            *([ChatWorkflow] if chat_agent else []),
         ],
         activities=[
             diagnostic_echo,
@@ -72,6 +89,9 @@ async def main() -> None:
             reviews.failed,
             generations.build,
             generations.failed,
+            chat_activities.mark_running,
+            chat_activities.mark_failed,
+            chat_activities.save_result,
         ],
         activity_executor=executor,
         max_concurrent_activities=2,
@@ -98,6 +118,13 @@ async def main() -> None:
                 client, GenerationRepository(pool), settings.temporal_task_queue, stop
             )
         )
+        chat_dispatcher = (
+            asyncio.create_task(
+                dispatch_chats(client, chat_repository, settings.temporal_task_queue, stop)
+            )
+            if chat_agent
+            else asyncio.create_task(stop.wait())
+        )
         try:
             await stop.wait()
         finally:
@@ -105,6 +132,7 @@ async def main() -> None:
             await dispatcher
             await review_dispatcher
             await generation_dispatcher
+            await chat_dispatcher
     executor.shutdown(wait=True)
     pool.close()
 

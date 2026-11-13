@@ -30,25 +30,28 @@ class Contract(BaseModel):
         return value
 
 
+EntityKind = Literal[
+    "discipline",
+    "semester_load",
+    "competency",
+    "indicator",
+    "learning_outcome",
+    "control_form",
+    "assessment_tool",
+    "program",
+    "curriculum_item",
+    "course_topic",
+    "course_content",
+    "score_scale",
+    "document_section",
+    "practice_stage",
+    "professional_role",
+]
+
+
 class Entity(Contract):
     id: UUID
-    kind: Literal[
-        "discipline",
-        "semester_load",
-        "competency",
-        "indicator",
-        "learning_outcome",
-        "control_form",
-        "assessment_tool",
-        "program",
-        "curriculum_item",
-        "course_topic",
-        "course_content",
-        "score_scale",
-        "document_section",
-        "practice_stage",
-        "professional_role",
-    ]
+    kind: EntityKind
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source_ref_ids: list[UUID] = Field(default_factory=list)
 

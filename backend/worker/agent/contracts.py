@@ -9,7 +9,7 @@ from app.domain import Entity, RelationV2, SourceRefV2
 
 
 class ChatDeps(BaseModel):
-    """Small, serializable context passed to Pydantic AI under Temporal."""
+    """Компактный контекст, передаваемый Pydantic AI через Temporal."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,6 +22,7 @@ class EntitySearchHit(BaseModel):
 
     entity: Entity
     summary: str
+    truncated: bool = False
     source_refs: list[SourceRefV2] = Field(default_factory=list)
 
 
@@ -35,6 +36,8 @@ class EntityReadResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entity: Entity
+    matched_context: str | None = None
+    truncated: bool = False
     relations: list[RelationV2] = Field(default_factory=list)
     source_refs: list[SourceRefV2] = Field(default_factory=list)
 
@@ -49,13 +52,24 @@ class SourceFragment(BaseModel):
 
 
 class GraphProjection(BaseModel):
-    """Bounded graph context returned for one entity and its neighbors."""
+    """Ограниченная проекция графа вокруг сущности."""
 
     model_config = ConfigDict(extra="forbid")
 
     entities: list[Entity] = Field(default_factory=list)
     relations: list[RelationV2] = Field(default_factory=list)
     source_refs: list[SourceRefV2] = Field(default_factory=list)
+
+
+class ValidationFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    rule_code: str
+    type: str
+    severity: Literal["warning", "blocking"]
+    status: Literal["open", "needs_review"]
+    details: dict[str, JsonValue]
 
 
 class Answer(BaseModel):

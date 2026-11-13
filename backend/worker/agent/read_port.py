@@ -1,29 +1,17 @@
 """Read-only tool boundary implemented by the backend worker."""
 
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID
+
+from app.domain import EntityKind
 
 from .contracts import (
     EntityReadResult,
     EntitySearchResult,
     GraphProjection,
     SourceFragment,
+    ValidationFinding,
 )
-
-EntityKind = Literal[
-    "discipline",
-    "semester_load",
-    "competency",
-    "indicator",
-    "learning_outcome",
-    "control_form",
-    "assessment_tool",
-    "program",
-    "curriculum_item",
-    "course_topic",
-    "course_content",
-    "score_scale",
-]
 
 
 class ChatReadPort(Protocol):
@@ -45,6 +33,7 @@ class ChatReadPort(Protocol):
         program_id: UUID,
         version_id: UUID,
         entity_id: UUID,
+        query: str | None = None,
     ) -> EntityReadResult: ...
 
     async def read_source_fragment(
@@ -64,6 +53,10 @@ class ChatReadPort(Protocol):
         entity_id: UUID,
         depth: int,
     ) -> GraphProjection: ...
+
+    async def get_validation_findings(
+        self, *, program_id: UUID, version_id: UUID, limit: int
+    ) -> list[ValidationFinding]: ...
 
 
 _worker_read_port: ChatReadPort | None = None
