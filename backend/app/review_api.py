@@ -245,7 +245,7 @@ def download_artifact(
     with repo.pool.connection() as connection:
         row = connection.execute(
             "SELECT storage_key FROM document_artifacts WHERE program_id=%s "
-            "AND document_id=%s AND id=%s",
+            "AND document_id=%s AND id=%s AND kind='markdown'",
             (program_id, document_id, artifact_id),
         ).fetchone()
     if row is None:

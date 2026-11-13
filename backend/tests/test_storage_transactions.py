@@ -23,10 +23,12 @@ def test_failure_after_version_insert_rolls_back_version_and_head(monkeypatch):
         program = client.post("/api/v1/programs", json={"name": "Rollback acceptance"}).json()
         repo = Repository(app.state.resources.postgres)
 
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise RuntimeError("Injected failure after version INSERT")
 
-        monkeypatch.setattr(repo, "attach_documents", fail)
+        from app import graph_storage
+
+        monkeypatch.setattr(graph_storage, "journal", fail)
         with pytest.raises(RuntimeError, match="after version INSERT"):
             repo.save(
                 UUID(program["id"]),
@@ -45,6 +47,7 @@ def test_failure_after_version_insert_rolls_back_version_and_head(monkeypatch):
             json={
                 "expected_version_id": program["current_version_id"],
                 "snapshot": SnapshotV2().model_dump(mode="json"),
+                "signature": "Тестовый пользователь",
             },
             headers={"Idempotency-Key": str(uuid4())},
         )
@@ -97,7 +100,7 @@ def test_database_refuses_historical_snapshot_mutation():
         with pytest.raises(psycopg.errors.CheckViolation):
             with pool.connection() as connection:
                 connection.execute(
-                    "UPDATE program_versions SET snapshot = %s WHERE id=%s",
+                    "UPDATE program_versions SET review = %s WHERE id=%s",
                     (
                         '{"schema_version":1,"metadata":{"overwritten":true}}',
                         program["current_version_id"],

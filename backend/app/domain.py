@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class Contract(BaseModel):
@@ -30,25 +30,28 @@ class Contract(BaseModel):
         return value
 
 
+EntityKind = Literal[
+    "discipline",
+    "semester_load",
+    "competency",
+    "indicator",
+    "learning_outcome",
+    "control_form",
+    "assessment_tool",
+    "program",
+    "curriculum_item",
+    "course_topic",
+    "course_content",
+    "score_scale",
+    "document_section",
+    "practice_stage",
+    "professional_role",
+]
+
+
 class Entity(Contract):
     id: UUID
-    kind: Literal[
-        "discipline",
-        "semester_load",
-        "competency",
-        "indicator",
-        "learning_outcome",
-        "control_form",
-        "assessment_tool",
-        "program",
-        "curriculum_item",
-        "course_topic",
-        "course_content",
-        "score_scale",
-        "document_section",
-        "practice_stage",
-        "professional_role",
-    ]
+    kind: EntityKind
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source_ref_ids: list[UUID] = Field(default_factory=list)
 
@@ -118,6 +121,15 @@ class ProgramCreate(Contract):
 
 class VersionRestore(Contract):
     expected_version_id: UUID
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class RelationV2(Relation):
@@ -236,6 +248,15 @@ class SnapshotV2(SnapshotData):
 class VersionCreate(Contract):
     expected_version_id: UUID
     snapshot: SnapshotV2
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
     @model_validator(mode="after")
     def review_is_server_owned(self) -> Self:

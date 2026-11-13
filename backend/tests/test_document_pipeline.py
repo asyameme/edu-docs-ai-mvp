@@ -64,16 +64,21 @@ def test_v2_document_reaches_import_result_and_relational_history(kind):
             assert stored["metadata"]["parsed_documents"][document_id] == parsed
             with repo.pool.connection() as connection:
                 assert connection.execute(
-                    "SELECT count(*) FROM entities WHERE version_id=%s", (vid,)
+                    "SELECT count(*) FROM graph_entities g JOIN program_versions v ON "
+                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s", (vid,)
                 ).fetchone()[0] == len(snapshot.entities)
                 assert connection.execute(
-                    "SELECT count(*) FROM source_links WHERE version_id=%s", (vid,)
+                    "SELECT count(*) FROM graph_source_links g JOIN program_versions v ON "
+                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s", (vid,)
                 ).fetchone()[0] == len(snapshot.source_links)
                 if kind == "MATRIX":
                     assert sorted(
                         row[0]
                         for row in connection.execute(
-                            "SELECT matrix_value FROM relations WHERE version_id=%s", (vid,)
+                            "SELECT r.attributes->'matrix_value' FROM graph_relations g "
+                            "JOIN relation_revisions r ON r.revision_id=g.revision_id "
+                            "JOIN program_versions v ON v.graph_state_id=g.graph_state_id "
+                            "WHERE v.id=%s", (vid,)
                         )
                     ) == [0, 1]
 
@@ -99,13 +104,17 @@ def test_v2_package_keeps_documents_without_merging_observations():
         assert len([e for e in result.entities if e.kind == "discipline"]) == 2
 
 
-@pytest.mark.parametrize("invalid", ["boolean_cell", "unknown_version", "legacy_version"])
+@pytest.mark.parametrize(
+    "invalid", ["boolean_cell", "unknown_version", "legacy_version", "zero_paragraph"]
+)
 def test_invalid_v2_result_is_rejected_before_saving_parsed_output(invalid):
-    data = payload("MATRIX")
+    data = payload("RPD" if invalid == "zero_paragraph" else "MATRIX")
     if invalid == "boolean_cell":
         data["matrix_cells"][0]["value"] = False
     elif invalid == "legacy_version":
         data["meta"]["schema_version"] = 1
+    elif invalid == "zero_paragraph":
+        data["disciplines"][0]["source_ref"]["paragraph_index"] = 0
     else:
         data["meta"]["schema_version"] = 3
     original = b"contract-v2:" + json.dumps(data, ensure_ascii=False).encode()
@@ -127,9 +136,9 @@ def test_invalid_v2_result_is_rejected_before_saving_parsed_output(invalid):
 
 
 @pytest.mark.parametrize("explicit_version", [True, False])
-def test_v2_coordinate_allowed_by_main_survives_http_without_conversion(explicit_version):
+def test_v2_one_based_coordinate_survives_http_without_conversion(explicit_version):
     data = payload()
-    data["disciplines"][0]["source_ref"]["paragraph_index"] = 0
+    data["disciplines"][0]["source_ref"]["paragraph_index"] = 1
     if not explicit_version:
         data["meta"].pop("schema_version")
     original = b"contract-v2:" + json.dumps(data, ensure_ascii=False).encode()
@@ -149,5 +158,5 @@ def test_v2_coordinate_allowed_by_main_survives_http_without_conversion(explicit
         assert response.status_code == 200, response.text
         snapshot = SnapshotV2.model_validate(response.json())
         parsed = snapshot.metadata["parsed_documents"][job["files"][0]["document_id"]]
-        assert parsed["disciplines"][0]["source_ref"]["paragraph_index"] == 0
-        assert {json.loads(ref.locator)["paragraph_index"] for ref in snapshot.source_refs} == {0}
+        assert parsed["disciplines"][0]["source_ref"]["paragraph_index"] == 1
+        assert {json.loads(ref.locator)["paragraph_index"] for ref in snapshot.source_refs} == {1}

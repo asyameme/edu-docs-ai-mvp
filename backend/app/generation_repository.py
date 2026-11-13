@@ -11,30 +11,30 @@ from psycopg.types.json import Jsonb
 from app.config import get_settings
 from app.domain import SnapshotV2
 from app.errors import DomainError
+from app.graph_storage import load_graph
 from app.repository import Repository
 
 
-def _source_files(imported, snapshot):
-    members = {
-        item["document_id"]: item["member_name"]
-        for item in imported["parameters"]["documents"]
-    }
-    parsed = imported["report"].get("files", {})
+def _source_files(cur, graph_id):
+    rows = cur.execute(
+        "SELECT g.document_id,g.member_name,a.parsed_output FROM graph_documents g "
+        "LEFT JOIN document_artifacts a ON a.id=g.parsed_artifact_id "
+        "WHERE g.graph_state_id=%s ORDER BY g.position",
+        (graph_id,),
+    ).fetchall()
     sources = []
-    for document_id in snapshot.document_ids:
-        identity = str(document_id)
-        output = parsed.get(identity, {}).get("output")
-        if identity not in members or not output:
-            raise DomainError(409, "Не все документы версии разобраны")
-        meta = output.get("meta", {})
+    for row in rows:
+        meta = (row["parsed_output"] or {}).get("meta", {})
         if not meta.get("doc_type") or not meta.get("file_hash"):
-            raise DomainError(409, "У результата разбора нет типа или хэша документа")
-        sources.append({
-            "document_id": identity,
-            "member_name": members[identity],
-            "doc_type": meta["doc_type"],
-            "file_hash": meta["file_hash"],
-        })
+            raise DomainError(409, "Не все документы выбранного графа разобраны")
+        sources.append(
+            {
+                "document_id": str(row["document_id"]),
+                "member_name": row["member_name"],
+                "doc_type": meta["doc_type"],
+                "file_hash": meta["file_hash"],
+            }
+        )
     return sources
 
 
@@ -45,8 +45,10 @@ class GenerationRepository:
     def create(self, program_id, version_id, import_job_id, key):
         fingerprint = hashlib.sha256(
             json.dumps(
-                {"version_id": str(version_id) if version_id else None,
-                 "import_job_id": str(import_job_id) if import_job_id else None},
+                {
+                    "version_id": str(version_id) if version_id else None,
+                    "import_job_id": str(import_job_id) if import_job_id else None,
+                },
                 sort_keys=True,
             ).encode()
         ).hexdigest()
@@ -78,69 +80,57 @@ class GenerationRepository:
             ).fetchone():
                 raise DomainError(409, "Ключ уже использован для импорта")
             if version_id is not None:
-                row = Repository.require(
+                version = Repository.require(
                     cur.execute(
-                        "SELECT snapshot FROM program_versions WHERE program_id=%s AND id=%s",
+                        "SELECT graph_state_id,review FROM program_versions WHERE "
+                        "program_id=%s AND id=%s",
                         (program_id, version_id),
                     ).fetchone()
                 )
-                snapshot = SnapshotV2.model_validate(row["snapshot"])
+                graph_id = version["graph_state_id"]
+                snapshot = SnapshotV2.model_validate(load_graph(cur, graph_id, version["review"]))
                 if not snapshot.review or not snapshot.review.confirmation:
                     raise DomainError(409, "Для генерации версии нужно подтверждение")
                 input_version_id = version_id
-                source_import_id = snapshot.review.import_job_id
             else:
-                row = Repository.require(
+                imported = Repository.require(
                     cur.execute(
-                        "SELECT input_version_id,parameters,report FROM processing_jobs "
+                        "SELECT input_version_id,output_graph_state_id,report,parameters FROM "
+                        "processing_jobs "
                         "WHERE program_id=%s AND id=%s AND type='import'",
                         (program_id, import_job_id),
                     ).fetchone()
                 )
-                if row["report"].get("outcome") not in {"completed", "partial"}:
+                graph_id = imported["output_graph_state_id"]
+                if not graph_id or imported["report"].get("outcome") not in {
+                    "completed",
+                    "partial",
+                }:
                     raise DomainError(409, "Импорт ещё не завершён")
-                if any(
-                    not row["report"].get("files", {}).get(item["document_id"], {}).get("output")
-                    for item in row["parameters"]["documents"]
-                ):
-                    raise DomainError(409, "Не все документы архива разобраны")
-                if not row["report"].get("snapshot"):
-                    raise DomainError(409, "У импорта нет результата разбора")
-                snapshot = SnapshotV2.model_validate(row["report"]["snapshot"])
+                snapshot = SnapshotV2.model_validate(load_graph(cur, graph_id))
                 if set(snapshot.document_ids) != {
-                    UUID(item["document_id"])
-                    for item in row["parameters"]["documents"]
+                    UUID(d["document_id"]) for d in imported["parameters"]["documents"]
                 }:
                     raise DomainError(409, "Результат импорта не совпадает с документами")
-                input_version_id = row["input_version_id"]
-                source_import_id = import_job_id
+                input_version_id = imported["input_version_id"]
             if not snapshot.document_ids:
                 raise DomainError(409, "Нет исходных документов для генерации")
-            if version_id is not None:
-                row = Repository.require(
-                    cur.execute(
-                        "SELECT parameters,report FROM processing_jobs "
-                        "WHERE program_id=%s AND id=%s AND type='import'",
-                        (program_id, source_import_id),
-                    ).fetchone()
-                )
             parameters = {
                 "version_id": str(version_id) if version_id else None,
                 "import_job_id": str(import_job_id) if import_job_id else None,
-                "documents": _source_files(row, snapshot),
+                "documents": _source_files(cur, graph_id),
             }
-            if import_job_id is not None:
-                parameters["snapshot"] = snapshot.model_dump(mode="json")
             job_id = uuid4()
             cur.execute(
-                """INSERT INTO processing_jobs(
-                   id,program_id,input_version_id,operation_key,request_hash,type,
-                   temporal_namespace,workflow_id,parameters)
-                   VALUES(%s,%s,%s,%s,%s,'generate',%s,%s,%s)""",
+                "INSERT INTO processing_jobs(\n                   id,program_id,"
+                "input_version_id,input_graph_state_id,operation_key,request_hash,type,\n "
+                "                  temporal_namespace,workflow_id,parameters)\n           "
+                "        VALUES(%s,%s,%s,%s,%s,%s,'generate',%s,%s,%s)",
                 (
                     job_id,
                     program_id,
                     input_version_id,
+                    graph_id,
                     key,
                     fingerprint,
                     get_settings().temporal_namespace,
@@ -155,7 +145,8 @@ class GenerationRepository:
             row = Repository.require(
                 cur.execute(
                     "SELECT id,program_id,parameters->>'version_id' AS version_id,"
-                    "parameters->>'import_job_id' AS import_job_id,report,created_at "
+                    "parameters->>'import_job_id' AS import_job_id,report,created_at,"
+                    "workflow_id,temporal_namespace "
                     "FROM processing_jobs "
                     "WHERE program_id=%s AND id=%s AND type='generate'",
                     (program_id, job_id),
@@ -167,8 +158,9 @@ class GenerationRepository:
                 "program_id": row["program_id"],
                 "version_id": row["version_id"],
                 "import_job_id": row["import_job_id"],
-                "status": report.get("outcome")
-                or ("processing" if report.get("started_at") else "pending"),
+                "status": report.get("outcome") or "pending",
+                "_workflow_id": row["workflow_id"],
+                "_namespace": row["temporal_namespace"],
                 "error": report.get("error"),
                 "size_bytes": report.get("size_bytes"),
                 "sha256": report.get("sha256"),
@@ -184,6 +176,11 @@ class GenerationRepository:
 
     def input(self, job_id):
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT p.id FROM programs p JOIN processing_jobs j ON j.program_id=p.id "
+                "WHERE j.id=%s FOR UPDATE OF p",
+                (job_id,),
+            )
             job = Repository.require(
                 cur.execute(
                     "SELECT * FROM processing_jobs WHERE id=%s AND type='generate'", (job_id,)
@@ -191,21 +188,17 @@ class GenerationRepository:
             )
             if job["report"].get("outcome"):
                 return job["report"]["outcome"]
-            cur.execute(
-                """UPDATE processing_jobs SET report=report||%s::jsonb
-                   WHERE id=%s AND NOT report ? 'outcome'""",
-                (Jsonb({"started_at": datetime.now(UTC).isoformat()}), job_id),
-            )
-            if job["parameters"].get("import_job_id"):
-                snapshot = SnapshotV2.model_validate(job["parameters"]["snapshot"])
-            else:
-                version = Repository.require(
+            review = None
+            if job["parameters"].get("version_id"):
+                review = Repository.require(
                     cur.execute(
-                        "SELECT snapshot FROM program_versions WHERE program_id=%s AND id=%s",
-                        (job["program_id"], job["input_version_id"]),
+                        "SELECT review FROM program_versions WHERE id=%s",
+                        (job["input_version_id"],),
                     ).fetchone()
-                )
-                snapshot = SnapshotV2.model_validate(version["snapshot"])
+                )["review"]
+            snapshot = SnapshotV2.model_validate(
+                load_graph(cur, job["input_graph_state_id"], review)
+            )
             originals = cur.execute(
                 """SELECT id,original_name,format,content,sha256 FROM source_documents
                    WHERE program_id=%s AND id=ANY(%s)""",
@@ -218,9 +211,15 @@ class GenerationRepository:
     def finish(self, job_id, content):
         checksum = hashlib.sha256(content).hexdigest()
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT p.id FROM programs p JOIN processing_jobs j ON j.program_id=p.id "
+                "WHERE j.id=%s FOR UPDATE OF p",
+                (job_id,),
+            )
             job = Repository.require(
                 cur.execute(
-                    "SELECT program_id,parameters->>'version_id' AS version_id,"
+                    "SELECT program_id,input_graph_state_id,parameters->>'version_id' AS "
+                    "version_id,"
                     "parameters->>'import_job_id' AS import_job_id,report FROM processing_jobs "
                     "WHERE id=%s FOR UPDATE",
                     (job_id,),
@@ -229,12 +228,13 @@ class GenerationRepository:
             if "outcome" in job["report"]:
                 return job["report"]["outcome"]
             cur.execute(
-                """INSERT INTO generated_packages(
-                   job_id,program_id,version_id,import_job_id,content,size_bytes,sha256)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+                "INSERT INTO generated_packages(\n                   job_id,program_id,"
+                "graph_state_id,version_id,import_job_id,content,size_bytes,sha256)\n     "
+                "              VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     job_id,
                     job["program_id"],
+                    job["input_graph_state_id"],
                     job["version_id"],
                     job["import_job_id"],
                     content,
@@ -260,6 +260,12 @@ class GenerationRepository:
 
     def fail(self, job_id, message):
         with self.pool.connection() as connection:
+            connection.execute(
+                "SELECT p.id FROM programs p JOIN processing_jobs j ON "
+                "j.program_id=p.id "
+                "WHERE j.id=%s FOR UPDATE OF p",
+                (job_id,),
+            )
             connection.execute(
                 """UPDATE processing_jobs SET report=report||%s::jsonb
                    WHERE id=%s AND NOT report ? 'outcome'""",

@@ -75,7 +75,7 @@ export type ReviewIssue = {
   requires_decision: boolean;
   variants: ReviewVariant[];
   effective_status?: string;
-  decision?: { variant_id: string } | null;
+  decision?: { variant_id: string; author: string | null } | null;
 };
 
 export type ReviewSnapshot = {
@@ -92,6 +92,10 @@ export type ReviewSnapshot = {
     section: string | null;
     locator: string;
   }>;
+  review?: {
+    decisions: Array<{ conflict_id: string; variant_id: string; author: string | null }>;
+    confirmation: { author: string | null } | null;
+  } | null;
 };
 
 export type ReviewDetails = {
@@ -104,7 +108,7 @@ export type ReviewDetails = {
   issues_count: number;
   issues: ReviewIssue[];
   confirmed: boolean;
-  confirmation: { accepted_warning_ids: string[] } | null;
+  confirmation: { accepted_warning_ids: string[]; author: string | null } | null;
   check_job_id: string | null;
   check_report: CheckReport | null;
 };
@@ -178,4 +182,29 @@ export function saveSession(session: ImportSession) {
   catch {
     // Загрузка работает и при запрете локального хранилища браузера.
   }
+}
+
+let memorySignature: string | null = null;
+
+export function requestSignature(): string | null | "invalid" {
+  if (memorySignature) return memorySignature;
+  try {
+    const saved = localStorage.getItem("education-signature")?.trim();
+    if (saved && saved.length <= 120) {
+      memorySignature = saved;
+      return saved;
+    }
+  } catch {
+    // Подпись остаётся доступна до перезагрузки страницы.
+  }
+  const entered = window.prompt("Введите имя для подписи решений и подтверждений (до 120 символов):");
+  if (entered === null) return null;
+  const signature = entered.trim();
+  if (!signature || signature.length > 120) return "invalid";
+  memorySignature = signature;
+  try { localStorage.setItem("education-signature", signature); }
+  catch {
+    // При запрете локального хранилища подпись действует до перезагрузки страницы.
+  }
+  return signature;
 }

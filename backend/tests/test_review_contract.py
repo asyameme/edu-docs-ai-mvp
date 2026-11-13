@@ -154,6 +154,7 @@ def test_ordinary_save_does_not_allow_review_or_confirmation_from_the_client():
         VersionCreate.model_validate(
             {
                 "expected_version_id": uuid4(),
+                "signature": "Тестовый пользователь",
                 "snapshot": {"schema_version": 2, "review": {
                     "review_id": uuid4(), "import_job_id": uuid4(),
                     "analysis_version_id": uuid4(),

@@ -10,10 +10,18 @@ from app.review_contract import PrepareRequest
 
 
 def test_version_save_accepts_v2_and_rejects_v1():
-    result = VersionCreate(expected_version_id=uuid4(), snapshot={"schema_version": 2})
+    result = VersionCreate(
+        expected_version_id=uuid4(),
+        snapshot={"schema_version": 2},
+        signature="Тестовый пользователь",
+    )
     assert isinstance(result.snapshot, SnapshotV2)
     with pytest.raises(ValidationError):
-        VersionCreate(expected_version_id=uuid4(), snapshot={"schema_version": 1})
+        VersionCreate(
+            expected_version_id=uuid4(),
+            snapshot={"schema_version": 1},
+            signature="Тестовый пользователь",
+        )
 
 
 def test_public_snapshot_schemas_have_only_v2():

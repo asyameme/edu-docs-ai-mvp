@@ -7,8 +7,10 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool, PoolTimeout
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from temporalio.client import Client
 
+from app.chat_api import router as chat_router
 from app.config import get_settings
 from app.errors import DomainError
 from app.generation_api import router as generation_router
@@ -40,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.temporal_address,
         namespace=settings.temporal_namespace,
         lazy=True,
+        plugins=[PydanticAIPlugin()],
     )
     http = httpx.AsyncClient(timeout=2, trust_env=False)
     pool.open()
@@ -78,6 +81,7 @@ app.include_router(program_router)
 app.include_router(import_router)
 app.include_router(review_router)
 app.include_router(generation_router)
+app.include_router(chat_router)
 
 
 @app.exception_handler(DomainError)
