@@ -112,6 +112,32 @@ class TestRpdParser(unittest.TestCase):
         self.assertEqual(issues, [])
         self.assertEqual([(topic.topic, topic.hours) for topic in topics], [("Кинематика", 8)])
 
+    def test_content_table_without_hours_keeps_topics_and_source_rows(self):
+        document = Document()
+        document.add_paragraph("2.2. Структура и содержание учебных занятий")
+        table = document.add_table(rows=3, cols=3)
+        for row, values in zip(table.rows, (
+            ("№ п/п", "Наименование темы (раздела, части)", "Вид учебных занятий"),
+            ("1", "Кинематика", "лекции"),
+            ("1", "Кинематика", "практические занятия"),
+        )):
+            for cell, value in zip(row.cells, values):
+                cell.text = value
+        table.cell(1, 1).merge(table.cell(2, 1)).text = "Кинематика"
+
+        topics, issues = extract_course_content(document, "physics.docx")
+        self.assertEqual(
+            [(topic.topic, topic.activity, topic.hours) for topic in topics],
+            [("Кинематика", "лекции", None), ("Кинематика", "практические занятия", None)],
+        )
+        self.assertEqual(
+            [(topic.source_ref.table, topic.source_ref.row, topic.source_ref.col) for topic in topics],
+            [(1, 2, 2), (1, 3, 2)],
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].category, "manual_review")
+        self.assertEqual(issues[0].source_ref.table, 1)
+
     def test_headerless_ects_scale_preserves_source_values(self):
         document = Document()
         document.add_paragraph("3.1.3. Методика и критерии оценивания")

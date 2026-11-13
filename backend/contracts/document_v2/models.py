@@ -158,7 +158,7 @@ class AcademicHoursRange(ContractModel):
 class CourseTopic(BaseEntity):
     topic: str
     activity: str
-    hours: Annotated[int, Field(ge=0)] | AcademicHoursRange
+    hours: Annotated[int, Field(ge=0)] | AcademicHoursRange | None
     module: str | None = None
 
 

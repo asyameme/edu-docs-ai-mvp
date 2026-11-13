@@ -510,6 +510,9 @@
             },
             {
               "$ref": "#/$defs/AcademicHoursRange"
+            },
+            {
+              "type": "null"
             }
           ],
           "title": "Hours"
