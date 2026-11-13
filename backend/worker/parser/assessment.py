@@ -554,6 +554,26 @@ def score_scale_columns(cells):
     return columns
 
 
+def _headerless_ects_columns(rows):
+    """Распознать шкалу без шапки по полному ряду ECTS A–F."""
+    if len(rows) != 6:
+        return None
+    for row, letter in zip(rows, "ABCDEF"):
+        cells = row.cells
+        if (
+            len(cells) != 3
+            or row.grid_cols_before
+            or row.grid_cols_after
+            or cells[1].text.strip().upper() != letter
+            or normalize(cells[2].text) not in {
+                "отлично", "хорошо", "удовлетворительно", "неудовлетворительно",
+            }
+            or not cells[0].text.strip()
+        ):
+            return None
+    return {"criterion": 0, "grade_ects": 1, "grade_spbu": 2}
+
+
 def extract_score_scale(document, file_name):
     """Прочитать таблицы оценок, ECTS, баллов и критериев."""
     def is_heading(paragraph):
@@ -623,6 +643,11 @@ def extract_score_scale(document, file_name):
             if columns is not None:
                 header = (index, columns, len(row.cells))
                 break
+
+        if header is None:
+            columns = _headerless_ects_columns(block.rows)
+            if columns is not None:
+                header = (-1, columns, 3)
 
         if header is None:
             report(
@@ -786,7 +811,7 @@ def extract_score_scale(document, file_name):
                     else None
                 )
 
-            if values["criterion"] is not None:
+            if values["criterion"] is not None and header_index >= 0:
                 label = " ".join(
                     block.rows[header_index]
                     .cells[columns["criterion"]]

@@ -406,6 +406,31 @@ def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResu
     return _result(rule, checks, findings)
 
 
+def _title_credit_units(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
+    checks, findings = 0, []
+    for doc in docs:
+        if doc.role not in {"rpd", "rpp"}:
+            continue
+        title = doc.data.get("title_credit_units")
+        for discipline in _records(doc, "$.disciplines[*]"):
+            table = discipline.get("credit_units")
+            if type(title) is not int or type(table) is not int:
+                continue
+            table_ref = _source_ref(doc, discipline)
+            if table_ref.get("table") is None and table_ref.get("section") == "титул":
+                continue  # Для РПП без локальной нагрузки ЗЕТ уже взяты с титула.
+            checks += 1
+            if title != table:
+                title_ref = _source_ref(doc, {"source_ref": doc.data.get("title_credit_units_source_ref")})
+                findings.append(Finding(
+                    "title_credit_units_mismatch",
+                    "failed",
+                    f"{doc.label}: на титуле {title} ЗЕТ, в разделе нагрузки {table} ЗЕТ.",
+                    {"left_value": title, "right_value": table, "source_refs": [title_ref, table_ref]},
+                ))
+    return _result(rule, checks, findings)
+
+
 def _semester_workload_totals(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     """R-03/R-05: итоги практики равны суммам по отдельным семестрам."""
     checks, findings = 0, []
@@ -414,6 +439,17 @@ def _semester_workload_totals(rule: Mapping[str, Any], docs: Sequence[Document])
         if not workloads:
             continue
         for discipline in _records(doc,"$.disciplines[*]"):
+            if "semesters" in discipline and (
+                {row.get("semester") for row in workloads} != _semesters(discipline, "semesters")
+            ):
+                checks += 1
+                findings.append(Finding(
+                    "incomplete_semester_workload",
+                    "needs_review",
+                    f"{doc.label}: недостаточно посеместровых данных для сверки итогов.",
+                    {"source_refs": [_source_ref(doc, discipline)]},
+                ))
+                continue
             for key in ("hours_total", "credit_units"):
                 values = [w.get(key) for w in workloads]
                 total = discipline.get(key)
@@ -526,7 +562,8 @@ def _education_language(rule: Mapping[str, Any], docs: Sequence[Document]) -> Ru
             for lang in language if isinstance(language,list) else [language]:
                 checks += 1
                 if str(lang).strip().casefold() not in known:
-                    findings.append(Finding("language_not_allowed","failed",f"Язык {lang!r} в {doc.label} не разрешён характеристикой программы.",{"source_refs": [_source_ref(program),_source_ref(doc)]}))
+                    language_ref = _source_ref(doc, {"source_ref": doc.data.get("education_languages_source_ref")})
+                    findings.append(Finding("language_not_allowed","failed",f"Язык {lang!r} в {doc.label} не разрешён характеристикой программы.",{"source_refs": [_source_ref(program, info), language_ref]}))
     return _result(rule,checks,findings)
 
 
@@ -707,6 +744,7 @@ HANDLERS = {
     "sum_components_equals_total": _sum_hours,
     "hours_against_curriculum": _hours_against_curriculum,
     "credit_hours": _credit_hours,
+    "title_credit_units": _title_credit_units,
     "semester_workload_totals": _semester_workload_totals,
     "outcome_indicator_links": _outcome_indicator_links,
     "indicator_hierarchy": _indicator_hierarchy,

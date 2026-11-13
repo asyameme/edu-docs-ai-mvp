@@ -153,10 +153,7 @@ def to_graph(document, program_id: str | None = None,) -> EducationalGraph:
                 topic_key,
                 topic.source_ref,
                 {
-                    'topic': topic.topic,
-                    'activity': topic.activity,
-                    'hours': topic.hours,
-                    'module': topic.module,
+                    **topic.model_dump(mode="json", exclude={"source_ref"}),
                     'discipline_name': discipline.name,
                 }
             )

@@ -59,6 +59,37 @@ class ValidationWithoutMatrixTests(unittest.TestCase):
         self.assertEqual(run_validation([doc("ckmv")],rule("R-13")).results[0].status,"skipped")
         self.assertEqual(run_validation([doc("characteristic"),doc("rpd")],rule("R-14")).results[0].status,"skipped")
 
+    def test_hours_sum_includes_seminars_and_lab_hours(self):
+        rpd = doc("rpd", disciplines=[{
+            "hours_total": 108,
+            "hours_by_kind": {"лекции": 40, "семинары": 32, "лабораторные работы": 36},
+        }])
+        self.assertEqual(run_validation([rpd], rule("R-03")).results[0].status, "passed")
+        rpd["disciplines"][0]["hours_total"] = 109
+        result = run_validation([rpd], rule("R-03")).results[0]
+        self.assertEqual(result.findings[0].code, "hours_sum_mismatch")
+
+    def test_title_credit_mismatch_reports_both_sources(self):
+        title = {"file": "rpd.docx", "section": "титул", "paragraph_index": 6}
+        table = {"file": "rpd.docx", "section": "2.1.1", "table": 2, "row": 7}
+        rpd = doc(
+            "rpd", title_credit_units=6, title_credit_units_source_ref=title,
+            disciplines=[{"credit_units": 3, "source_ref": table}],
+        )
+        result = run_validation([rpd], rule("R-05-title")).results[0]
+        self.assertEqual(result.findings[0].code, "title_credit_units_mismatch")
+        self.assertEqual(result.findings[0].evidence["source_refs"], [title, table])
+
+    def test_partial_semester_workload_requires_review(self):
+        rpp = doc(
+            "rpp",
+            disciplines=[{"semesters": [2, 3], "hours_total": 216, "credit_units": 6}],
+            semester_workload=[{"semester": 2, "hours_total": 108, "credit_units": 3}],
+        )
+        result = run_validation([rpp], rule("R-03-RPP")).results[0]
+        self.assertEqual(result.status, "needs_review")
+        self.assertEqual(result.findings[0].code, "incomplete_semester_workload")
+
 
 if __name__ == "__main__":
     unittest.main()
