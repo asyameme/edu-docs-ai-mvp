@@ -183,28 +183,3 @@ export function saveSession(session: ImportSession) {
     // Загрузка работает и при запрете локального хранилища браузера.
   }
 }
-
-let memorySignature: string | null = null;
-
-export function requestSignature(): string | null | "invalid" {
-  if (memorySignature) return memorySignature;
-  try {
-    const saved = localStorage.getItem("education-signature")?.trim();
-    if (saved && saved.length <= 120) {
-      memorySignature = saved;
-      return saved;
-    }
-  } catch {
-    // Подпись остаётся доступна до перезагрузки страницы.
-  }
-  const entered = window.prompt("Введите имя для подписи решений и подтверждений (до 120 символов):");
-  if (entered === null) return null;
-  const signature = entered.trim();
-  if (!signature || signature.length > 120) return "invalid";
-  memorySignature = signature;
-  try { localStorage.setItem("education-signature", signature); }
-  catch {
-    // При запрете локального хранилища подпись действует до перезагрузки страницы.
-  }
-  return signature;
-}

@@ -889,6 +889,14 @@ function App() {
             </div>
           )}
           <div className="content-column">
+            {!isDemoMode && processing.program && (
+              <div className="program-signature" role="group" aria-label="Подпись программы">
+                <span>Подпись: <strong>{processing.signature ?? "не указана"}</strong></span>
+                <button className="secondary-button" type="button" onClick={processing.changeSignature} disabled={processing.reviewBusy}>
+                  {processing.signature ? "Сменить подпись" : "Указать подпись"}
+                </button>
+              </div>
+            )}
             {activeScreen === "Чат" ? (
               <ChatScreen
                 versionNumber={versionNumber}
