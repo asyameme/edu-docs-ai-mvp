@@ -59,6 +59,13 @@ class ValidationWithoutMatrixTests(unittest.TestCase):
         self.assertEqual(run_validation([doc("ckmv")],rule("R-13")).results[0].status,"skipped")
         self.assertEqual(run_validation([doc("characteristic"),doc("rpd")],rule("R-14")).results[0].status,"skipped")
 
+    def test_r08_dangling_indicator_competency_is_independent_structural_failure(self):
+        rpd=doc("rpd",competencies=[{"code":"ПК-1"}],indicators=[{"code":"ПК-1.1","competency_code":"ПК-2"}])
+        result=run_validation([rpd],rule("R-08-local-reference")).results[0]
+        self.assertEqual(result.status,"failed")
+        self.assertEqual(result.findings[0].code,"dangling_reference")
+        self.assertIn("R-08-local-reference",[item.rule_id for item in run_validation([rpd],rule("R-08-local-reference")).results])
+
 
 if __name__ == "__main__":
     unittest.main()

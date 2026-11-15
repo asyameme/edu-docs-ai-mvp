@@ -23,7 +23,7 @@ else:  # Поддерживаем и прямой запуск validator.py.
 
 try:
     import yaml
-except ImportError:  # PyYAML устанавливается из backend/requirements.txt
+except ImportError:
     yaml = None
 
 
@@ -307,6 +307,30 @@ def _references(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult
                 findings.append(Finding("dangling_reference", "failed", f"Ссылка {inputs['source_value_field']}={value!r} не найдена в целевом списке.", {
                     "source_refs": [_source_ref(doc, row)], "known_target_keys": sorted((item for item in targets if item is not None), key=str),
                 }))
+    return _result(rule, checks, findings)
+
+
+def _competency_code_candidates(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
+    """R-01 suggestions across distinct codes. Suggestions never merge records."""
+    checks, findings = 0, []
+    for group in _program_groups(docs).values():
+        records = []
+        for doc in group:
+            for row in _records(doc, '$.competencies[*]'):
+                code, text = _code(row.get('code')), row.get('formulation')
+                if code and isinstance(text, str) and text.strip():
+                    records.append((doc, row, code, _canonical_formulation(text)))
+        for index, (left_doc, left, left_code, left_text) in enumerate(records):
+            for right_doc, right, right_code, right_text in records[index + 1:]:
+                if left_code == right_code or left_text != right_text:
+                    continue
+                checks += 1
+                findings.append(Finding('competency_code_match_candidate', 'needs_review',
+                    f'Компетенции с кодами {left_code} и {right_code} имеют одинаковые формулировки. Проверьте соответствие вручную.',
+                    {'left_code': left_code, 'right_code': right_code,
+                     'left_formulation': left.get('formulation'), 'right_formulation': right.get('formulation'),
+                     'decision_required': True, 'automatic_merge': False,
+                     'source_refs': [_source_ref(left_doc, left), _source_ref(right_doc, right)]}))
     return _result(rule, checks, findings)
 
 
@@ -634,38 +658,29 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                 if code:
                     by_code[code].append((doc, row))
         for code, records in sorted(by_code.items()):
-            # Prefer CKMV as the comparative reference; characteristic is fallback.
-            baseline = next(((d, r) for role in ('ckmv', 'characteristic')
-                             for d, r in records if d.role == role and _code(r.get('formulation'))), None)
-            if baseline is None:
-                # Without an approved catalogue, cross-document text comparisons
-                # must not be presented as normative validity.
-                continue
-            bdoc, brow = baseline
-            base_text = brow['formulation']
-            for doc, row in records:
-                if doc is bdoc and row is brow:
-                    continue
-                checks += 1
-                text = row.get('formulation')
-                refs = [_source_ref(bdoc, brow), _source_ref(doc, row)]
-                if not isinstance(text, str) or not text.strip():
-                    findings.append(Finding('competency_formulation_missing', 'needs_review',
-                        f'Нет формулировки компетенции {code} в {doc.label}.',
-                        {'code': code, 'source_refs': refs}))
-                    continue
-                if _canonical_formulation(base_text) == _canonical_formulation(text):
-                    continue
-                outcome = evaluate_competency_pair(code, base_text, text, evaluator=evaluator,
-                                                  config=rule.get('llm', {}))
-                if outcome['status'] == 'equivalent':
-                    continue
-                status = 'failed' if outcome['status'] == 'changed' else 'needs_review'
-                findings.append(Finding('competency_formulation_mismatch' if status == 'failed' else 'competency_formulation_review',
-                    status, f'Формулировка компетенции {code} отличается от источника {bdoc.label}.',
-                    {'code': code, 'reference_text': base_text, 'document_text': text,
-                     'semantic_status': outcome['status'], 'reason': outcome['reason'],
-                     'source_refs': refs}))
+            for index, (bdoc, brow) in enumerate(records):
+                for doc, row in records[index + 1:]:
+                    base_text = brow.get('formulation')
+                    checks += 1
+                    text = row.get('formulation')
+                    refs = [_source_ref(bdoc, brow), _source_ref(doc, row)]
+                    if not isinstance(text, str) or not text.strip() or not isinstance(base_text, str) or not base_text.strip():
+                        findings.append(Finding('competency_formulation_missing', 'needs_review',
+                            f'Нет формулировки компетенции {code} в одном из документов.',
+                            {'code': code, 'source_refs': refs}))
+                        continue
+                    if _canonical_formulation(base_text) == _canonical_formulation(text):
+                        continue
+                    outcome = evaluate_competency_pair(code, base_text, text, evaluator=evaluator,
+                                                      config=rule.get('llm', {}))
+                    if outcome['status'] == 'equivalent':
+                        continue
+                    status = 'failed' if outcome['status'] == 'changed' else 'needs_review'
+                    findings.append(Finding('competency_formulation_mismatch' if status == 'failed' else 'competency_formulation_review',
+                        status, f'Формулировка компетенции {code} различается в документах {bdoc.label} и {doc.label}.',
+                        {'code': code, 'left_text': base_text, 'right_text': text,
+                         'semantic_status': outcome['status'], 'reason': outcome['reason'],
+                         'decision_required': True, 'source_refs': refs}))
     return _result(rule, checks, findings)
 
   
@@ -703,6 +718,7 @@ def _semantic_indicator_consistency(
 
 HANDLERS = {
     "competency_consistency": _competency_consistency,
+    "competency_code_candidates": _competency_code_candidates,
     "competency_formulations": _competency_formulations,
     "sum_components_equals_total": _sum_hours,
     "hours_against_curriculum": _hours_against_curriculum,

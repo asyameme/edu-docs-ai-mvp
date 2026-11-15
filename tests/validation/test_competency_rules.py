@@ -86,6 +86,27 @@ class CompetencyRulesTests(unittest.TestCase):
         rpd=document('rpd',competencies=[{'code':'A','formulation':'Another'}]);rpd['meta']['program_id']='P2'
         self.assertEqual(run_validation([ref,rpd],only('R-07')).results[0].status,'skipped')
 
+    def test_01_different_codes_are_candidates_not_merges(self):
+        left=document('rpd',competencies=[{'code':'A','formulation':'Способен анализировать текст'}])
+        right=document('ckmv',competencies=[{'code':'B','formulation':'Способен анализировать текст'}])
+        result=run_validation([left,right],only('R-01-code-candidates')).results[0]
+        self.assertEqual(result.findings[0].code,'competency_code_match_candidate')
+        self.assertTrue(result.findings[0].evidence['decision_required'])
+        self.assertFalse(result.findings[0].evidence['automatic_merge'])
+
+    def test_07_compares_all_sources_without_catalogue_baseline(self):
+        left=document('rpd',competencies=[{'code':'A','formulation':'Начальная формулировка'}])
+        right=document('rpp',competencies=[{'code':'A','formulation':'Изменённая формулировка'}])
+        result=run_validation([left,right],only('R-07'),competency_evaluator=lambda *_:{'status':'changed','reason':'Отличие'})
+        self.assertEqual(result.results[0].findings[0].code,'competency_formulation_mismatch')
+
+    def test_08_missing_local_competency_reference(self):
+        rpd=document('rpd',competencies=[{'code':'ПК-1'}],indicators=[{'code':'И-1','competency_code':'ПК-2','source_ref':{'paragraph':7}}])
+        result=run_validation([rpd],only('R-08-local-reference')).results[0]
+        self.assertEqual(result.status,'failed')
+        self.assertEqual(result.findings[0].code,'dangling_reference')
+        self.assertEqual(result.findings[0].evidence['source_refs'][0]['paragraph'],7)
+
 
 if __name__=='__main__':
     unittest.main()
