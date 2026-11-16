@@ -90,9 +90,14 @@ class ReviewRepository:
                 (program_id, key),
             ).fetchone():
                 raise DomainError(409, "Ключ использован для сохранения версии")
-            if not self.settings.analysis_url:
+            if not self.settings.analysis_url and not self.settings.local_validation_enabled:
                 raise DomainError(503, "ML-анализ не настроен; фиктивный результат не создаётся")
-            parameters = {"purpose": purpose, "review_id": str(review_id) if review_id else None}
+            executor = "http" if self.settings.analysis_url else "local"
+            parameters = {
+                "purpose": purpose,
+                "review_id": str(review_id) if review_id else None,
+                "executor": executor,
+            }
             if purpose == "prepare":
                 if current != body.expected_version_id:
                     raise DomainError(409, "Текущая версия изменилась")
@@ -144,13 +149,25 @@ class ReviewRepository:
                     import_workflow_id=source["workflow_id"],
                     input={"base_snapshot": base, "documents": files},
                 )
+                if executor == "local":
+                    from app.validation_bridge import validation_implementation_revision
+                    from worker.validation.validator import load_rules
+
+                    parameters["local_rules"] = load_rules()
+                    parameters["implementation_revision"] = validation_implementation_revision()
                 version_id = current
             else:
                 review = self.require_review(cur, program_id, review_id)
+                executor = review["parameters"].get("executor", "http")
+                parameters["executor"] = executor
                 if body.version_id != current:
                     raise DomainError(409, "Проверять нужно текущую версию")
                 snapshot = self.checked_snapshot(self.version(cur, program_id, current), review_id)
                 ruleset = review["report"]["result"]["ruleset"]
+                if executor == "local":
+                    parameters["implementation_revision"] = review["parameters"].get(
+                        "implementation_revision"
+                    )
                 parameters.update(
                     content_hash=content_hash(snapshot),
                     ruleset=ruleset,
@@ -572,4 +589,8 @@ class ReviewRepository:
             "confirmation": snapshot.review.confirmation,
             "check_job_id": latest["id"] if latest else None,
             "check_report": latest["report"].get("result") if latest else None,
+            "prepare_report": {
+                key: value for key, value in review["report"]["result"].items()
+                if key not in {"candidate", "artifacts"}
+            },
         }

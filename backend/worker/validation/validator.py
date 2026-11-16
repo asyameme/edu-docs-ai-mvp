@@ -39,6 +39,7 @@ class ValidationError(Exception):
 class Document:
     data: Mapping[str, Any]
     label: str
+    document_id: str | None = None
 
     @property
     def role(self) -> str | None:
@@ -132,8 +133,11 @@ def _records(document: Document, path: str) -> list[Mapping[str, Any]]:
 def _source_ref(document: Document, row: Mapping[str, Any] | None = None) -> dict[str, Any]:
     ref = row.get("source_ref") if row else None
     if isinstance(ref, Mapping):
-        return {"file": document.label, **ref}
-    return {"file": document.label}
+        return {"file": document.label, **ref, **({"document_id": document.document_id} if document.document_id else {})}
+    return {
+        "file": document.label,
+        **({"document_id": document.document_id} if document.document_id else {}),
+    }
 
 
 def _role_docs(documents: Sequence[Document], role: str) -> list[Document]:

@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 from uuid import uuid4
-
 
 SemanticEvaluator = Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
 
@@ -49,7 +49,7 @@ def evaluate_semantic_payload(
 ) -> Mapping[str, Any]:
     """Вызывает внедрённый оценщик или LiteLLM и возвращает разобранный JSON-объект."""
     if evaluator is not None:
-        return evaluator(payload, config)
+        return evaluator(payload, {**config, "_system_prompt": system_prompt})
 
     try:
         from dotenv import load_dotenv
@@ -84,6 +84,7 @@ def evaluate_semantic_payload(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0,
+        "num_retries": 0,
         "max_tokens": int(config.get("max_tokens", 1800)),
         "timeout": float(config.get("timeout_seconds", 60)),
     }

@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import json
 import os
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 CompetencyEvaluator = Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
 
@@ -28,6 +30,8 @@ def _model_evaluator(payload: Mapping[str, Any], config: Mapping[str, Any]) -> M
     if not model or not key:
         raise RuntimeError('Не настроены модель и ключ LLM')
     args = {'model': model, 'api_key': key, 'temperature': 0,
+        'num_retries': 0,
+        'timeout': float(config.get('timeout_seconds', 45)),
         'messages': [{'role': 'system', 'content': _SYSTEM_PROMPT},
                      {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}]}
     if base:

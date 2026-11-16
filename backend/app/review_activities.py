@@ -10,11 +10,19 @@ from pydantic import ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.document_adapter import to_snapshot_v2
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.review_contract import AnalysisV1, CheckRequest, CheckResult, PrepareRequest
 from app.review_logic import apply_changes, digest, map_analysis_ids
 from app.review_repository import ReviewRepository
+from app.validation_bridge import (
+    project_snapshot_documents,
+    run_local_check,
+    validation_implementation_revision,
+    validation_ruleset,
+)
+from worker.validation.validator import Document, load_rules
 
 
 class ReviewActivities:
@@ -78,41 +86,81 @@ class ReviewActivities:
             return job["report"]["outcome"]
         purpose = job["parameters"]["purpose"]
         try:
-            if not self.settings.analysis_url:
-                raise ValueError("Analysis service is not configured")
-            data = {
-                "schema_version": 1,
-                "operation": purpose,
-                "job_id": str(job["id"]),
-                "program_id": str(job["program_id"]),
-                "version_id": str(job["input_version_id"]),
-                **job["parameters"]["input"],
-            }
-            data = (
-                (PrepareRequest if purpose == "prepare" else CheckRequest)
-                .model_validate(data)
-                .model_dump(mode="json")
-            )
-            with httpx.Client(
-                timeout=self.settings.analysis_timeout_seconds, trust_env=False
-            ) as client:
-                with client.stream(
-                    "POST",
-                    self.settings.analysis_url.rstrip("/")
-                    + ("/analyze" if purpose == "prepare" else "/check"),
-                    json=data,
-                    headers={"Idempotency-Key": str(job["id"])},
-                ) as response:
-                    if response.status_code == 429 or response.status_code >= 500:
-                        raise ApplicationError("ML временно недоступен", type="AnalysisTemporary")
-                    response.raise_for_status()
-                    chunks, size = [], 0
-                    for chunk in response.iter_bytes():
-                        size += len(chunk)
-                        if size > self.settings.analysis_max_response_bytes:
-                            raise ValueError("Analysis response exceeds configured limit")
-                        chunks.append(chunk)
-                    raw = json.loads(b"".join(chunks))
+            if job["parameters"].get("executor", "http") == "local":
+                input_data = job["parameters"]["input"]
+                rules = job["parameters"].get("local_rules") or load_rules()
+                expected_implementation = job["parameters"].get("implementation_revision")
+                if expected_implementation != validation_implementation_revision():
+                    raise ValueError(
+                        "Ревизия локального валидатора изменилась после создания задания"
+                    )
+                inputs = [
+                    Document(item["parsed"], str(item["document_id"]), str(item["document_id"]))
+                    for item in input_data["documents"]
+                ]
+                ruleset = validation_ruleset(rules, inputs)
+                if purpose == "prepare":
+                    files = [
+                        {"document_id": item["document_id"], "output": item["parsed"]}
+                        for item in input_data["documents"]
+                    ]
+                    candidate, _ = to_snapshot_v2(job["program_id"], files)
+                    result = run_local_check(
+                        input_data["documents"],
+                        SnapshotV2.model_validate(candidate),
+                        job["id"],
+                        config=rules,
+                        ruleset=ruleset,
+                    )
+                    raw = {**result, "candidate": candidate, "artifacts": []}
+                else:
+                    snapshot = SnapshotV2.model_validate(input_data["snapshot"])
+                    documents = project_snapshot_documents(input_data["documents"], snapshot)
+                    raw = run_local_check(
+                        documents,
+                        snapshot,
+                        job["id"],
+                        config=input_data["ruleset"]["config"],
+                        ruleset=input_data["ruleset"],
+                    )
+            else:
+                if not self.settings.analysis_url:
+                    raise ValueError("Analysis service is not configured")
+                data = {
+                    "schema_version": 1,
+                    "operation": purpose,
+                    "job_id": str(job["id"]),
+                    "program_id": str(job["program_id"]),
+                    "version_id": str(job["input_version_id"]),
+                    **job["parameters"]["input"],
+                }
+                data = (
+                    (PrepareRequest if purpose == "prepare" else CheckRequest)
+                    .model_validate(data)
+                    .model_dump(mode="json")
+                )
+                with httpx.Client(
+                    timeout=self.settings.analysis_timeout_seconds, trust_env=False
+                ) as client:
+                    with client.stream(
+                        "POST",
+                        self.settings.analysis_url.rstrip("/")
+                        + ("/analyze" if purpose == "prepare" else "/check"),
+                        json=data,
+                        headers={"Idempotency-Key": str(job["id"])},
+                    ) as response:
+                        if response.status_code == 429 or response.status_code >= 500:
+                            raise ApplicationError(
+                                "ML временно недоступен", type="AnalysisTemporary"
+                            )
+                        response.raise_for_status()
+                        chunks, size = [], 0
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if size > self.settings.analysis_max_response_bytes:
+                                raise ValueError("Analysis response exceeds configured limit")
+                            chunks.append(chunk)
+                        raw = json.loads(b"".join(chunks))
             artifacts = []
             if purpose == "prepare":
                 parsed = AnalysisV1.model_validate(raw)
@@ -120,8 +168,11 @@ class ReviewActivities:
                 expected = {UUID(item["document_id"]) for item in documents}
                 if set(parsed.candidate.document_ids) != expected:
                     raise ValueError("Analysis changed document membership")
-                types = {item["parsed"]["meta"]["doc_type"] for item in documents}
-                if not set(parsed.ruleset.required_document_types).issubset(types):
+                types = {item["parsed"]["meta"]["doc_type"].casefold() for item in documents}
+                required_types = {
+                    value.casefold() for value in parsed.ruleset.required_document_types
+                }
+                if not required_types.issubset(types):
                     raise ValueError("Required documents are absent")
                 result = map_analysis_ids(
                     parsed, job["id"], job["parameters"]["input"]["base_snapshot"]

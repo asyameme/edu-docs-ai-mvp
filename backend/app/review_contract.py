@@ -76,6 +76,8 @@ class ReviewIssue(Contract):
     source_ref_ids: list[UUID] = Field(default_factory=list)
     requires_decision: bool = False
     variants: list[Variant] = Field(default_factory=list)
+    evidence: dict[str, JsonValue] = Field(default_factory=dict)
+    checks: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def variants_are_distinct(self) -> Self:
@@ -105,7 +107,8 @@ class Ruleset(Contract):
 class RuleCoverage(Contract):
     rule_code: str = Field(min_length=1)
     rule_revision: str = Field(min_length=1)
-    status: Literal["passed", "failed", "skipped", "not_applicable"]
+    status: Literal["passed", "failed", "needs_review", "skipped", "not_applicable"]
+    checks: int | None = Field(default=None, ge=0)
     reason: str | None = None
 
 
@@ -129,11 +132,12 @@ class CheckResult(Contract):
             if (
                 result is None
                 or result.rule_revision != issue.rule_revision
-                or result.status != "failed"
+                or result.status not in {"failed", "needs_review"}
             ):
                 raise ValueError("Issue contradicts rule coverage")
         if any(
-            item.status == "failed" and not any(i.rule_code == item.rule_code for i in self.issues)
+            item.status in {"failed", "needs_review"}
+            and not any(i.rule_code == item.rule_code for i in self.issues)
             for item in self.coverage
         ):
             raise ValueError("Failed rule requires an explanation")

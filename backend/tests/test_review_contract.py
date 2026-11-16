@@ -155,10 +155,14 @@ def test_ordinary_save_does_not_allow_review_or_confirmation_from_the_client():
             {
                 "expected_version_id": uuid4(),
                 "signature": "Тестовый пользователь",
-                "snapshot": {"schema_version": 2, "review": {
-                    "review_id": uuid4(), "import_job_id": uuid4(),
-                    "analysis_version_id": uuid4(),
-                }},
+                "snapshot": {
+                    "schema_version": 2,
+                    "review": {
+                        "review_id": uuid4(),
+                        "import_job_id": uuid4(),
+                        "analysis_version_id": uuid4(),
+                    },
+                },
             }
         )
 
@@ -167,9 +171,50 @@ def test_v1_saved_version_is_not_a_supported_read_contract():
     with pytest.raises(ValidationError):
         VersionRead.model_validate(
             {
-                "id": uuid4(), "program_id": uuid4(), "number": 1,
-                "parent_version_id": None, "restored_from_version_id": None,
-                "origin": "initial", "created_at": datetime.now(UTC),
+                "id": uuid4(),
+                "program_id": uuid4(),
+                "number": 1,
+                "parent_version_id": None,
+                "restored_from_version_id": None,
+                "origin": "initial",
+                "created_at": datetime.now(UTC),
                 "snapshot": {"schema_version": 1},
             }
         )
+
+
+def test_check_result_preserves_manual_review_coverage():
+    from app.review_contract import CheckResult
+
+    result = CheckResult.model_validate(
+        {
+            "ruleset": {
+                "id": "local",
+                "revision": "r1",
+                "config": {},
+                "required_rules": ["R-01"],
+                "required_document_types": ["rpd"],
+            },
+            "coverage": [
+                {
+                    "rule_code": "R-01",
+                    "rule_revision": "r1",
+                    "status": "needs_review",
+                    "reason": "Не хватает данных",
+                }
+            ],
+            "issues": [
+                {
+                    "id": uuid4(),
+                    "rule_code": "R-01",
+                    "rule_revision": "r1",
+                    "type": "data_missing",
+                    "severity": "warning",
+                    "status": "needs_review",
+                    "message": "Нужна ручная проверка",
+                    "source_ref_ids": [],
+                }
+            ],
+        }
+    )
+    assert result.coverage[0].status == "needs_review"
