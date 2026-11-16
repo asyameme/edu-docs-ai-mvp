@@ -272,23 +272,49 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
   const sourceRefs = new Map(snapshot.source_refs.map((source) => [source.id, source]));
   const documentNames = new Map((job?.files ?? []).map((file) => [file.document_id, file.member_name]));
   const documentCount = job?.files.length ?? snapshot.source_refs.length;
-  const sourceDescription = (ids: string[]) => {
+  const sourceDescription = (
+    ids: string[],
+    documentIds: string[] = [],
+    fieldPaths: string[] = [],
+  ) => {
     const sources = ids.map((id) => sourceRefs.get(id)).filter((source) => source !== undefined);
-    const names = [...new Set(sources.map((source) => documentNames.get(source.document_id)).filter((name) => name !== undefined))];
+    const sourceDocumentIds = [...new Set([
+      ...documentIds,
+      ...sources.map((source) => source.document_id),
+    ])];
+    const names = [...new Set(
+      sourceDocumentIds
+        .map((id) => documentNames.get(id))
+        .filter((name) => name !== undefined),
+    )];
     const sections = [...new Set(sources.map((source) => source.section).filter((section) => section !== null))];
     return {
       source: names.length ? names.join(" · ") : "Источник пакета документов",
-      location: sections.length ? sections.join(" · ") : "Фрагмент исходного документа",
+      location: sections.length
+        ? sections.join(" · ")
+        : fieldPaths.length
+          ? fieldPaths.join(" · ")
+          : "Фрагмент исходного документа",
     };
   };
   const findings = details.issues.filter((issue) => issue.requires_decision)
     .map((issue) => {
       const choices = issue.variants.map((variant) => {
         const changeSourceIds = variant.changes.flatMap((change) => [
-          ...(change.entity?.source_ref_ids ?? []),
-          ...(change.relation?.source_ref_ids ?? []),
+          ...("entity" in change ? change.entity.source_ref_ids : []),
+          ...("relation" in change ? change.relation.source_ref_ids : []),
         ]);
-        const location = sourceDescription(changeSourceIds.length ? changeSourceIds : issue.source_ref_ids);
+        const changeDocumentIds = variant.changes.flatMap((change) =>
+          change.op === "set_document_value" ? [change.document_id] : [],
+        );
+        const fieldPaths = variant.changes.flatMap((change) =>
+          "field_path" in change ? [change.field_path] : [],
+        );
+        const location = sourceDescription(
+          changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
+          changeDocumentIds.length ? changeDocumentIds : issue.source_document_ids ?? [],
+          fieldPaths,
+        );
         return { id: variant.id, value: variant.label, ...location };
       });
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
@@ -304,7 +330,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       };
     });
   const reviewIssues = details.issues.map((issue: ReviewIssue) => {
-    const source = sourceDescription(issue.source_ref_ids);
+    const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
     return {
       id: issue.id,
       severity: issue.severity === "blocking" ? "error" as const : "warning" as const,

@@ -99,12 +99,13 @@
       "title": "AnalysisDocument",
       "type": "object"
     },
-    "AnalysisV1": {
+    "AnalysisV2": {
       "additionalProperties": false,
+      "description": "Document-level reconciliation result; it must not contain a graph.",
       "properties": {
         "schema_version": {
-          "const": 1,
-          "default": 1,
+          "const": 2,
+          "default": 2,
           "title": "Schema Version",
           "type": "integer"
         },
@@ -125,9 +126,6 @@
           "title": "Issues",
           "type": "array"
         },
-        "candidate": {
-          "$ref": "#/$defs/SnapshotV2"
-        },
         "artifacts": {
           "items": {
             "$ref": "#/$defs/MarkdownArtifact"
@@ -138,10 +136,9 @@
       },
       "required": [
         "ruleset",
-        "coverage",
-        "candidate"
+        "coverage"
       ],
-      "title": "AnalysisV1",
+      "title": "AnalysisV2",
       "type": "object"
     },
     "AssessmentToolV2": {
@@ -746,6 +743,42 @@
       "title": "Discipline",
       "type": "object"
     },
+    "DocumentMutation": {
+      "additionalProperties": false,
+      "description": "A selected field value in one parsed document, before graph assembly.",
+      "properties": {
+        "op": {
+          "const": "set_document_value",
+          "title": "Op",
+          "type": "string"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "field_path": {
+          "minLength": 1,
+          "title": "Field Path",
+          "type": "string"
+        },
+        "expected_old_value": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "value": {
+          "$ref": "#/$defs/JsonValue",
+          "default": null
+        }
+      },
+      "required": [
+        "op",
+        "document_id",
+        "field_path",
+        "expected_old_value"
+      ],
+      "title": "DocumentMutation",
+      "type": "object"
+    },
     "DocumentSection": {
       "additionalProperties": false,
       "properties": {
@@ -1291,12 +1324,12 @@
       "title": "PracticeStage",
       "type": "object"
     },
-    "PrepareRequest": {
+    "PrepareRequestV2": {
       "additionalProperties": false,
       "properties": {
         "schema_version": {
-          "const": 1,
-          "default": 1,
+          "const": 2,
+          "default": 2,
           "title": "Schema Version",
           "type": "integer"
         },
@@ -1321,9 +1354,6 @@
           "title": "Version Id",
           "type": "string"
         },
-        "base_snapshot": {
-          "$ref": "#/$defs/SnapshotV2"
-        },
         "documents": {
           "items": {
             "$ref": "#/$defs/AnalysisDocument"
@@ -1337,10 +1367,9 @@
         "job_id",
         "program_id",
         "version_id",
-        "base_snapshot",
         "documents"
       ],
-      "title": "PrepareRequest",
+      "title": "PrepareRequestV2",
       "type": "object"
     },
     "ProfessionalRole": {
@@ -2143,6 +2172,14 @@
           "title": "Source Ref Ids",
           "type": "array"
         },
+        "source_document_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Source Document Ids",
+          "type": "array"
+        },
         "requires_decision": {
           "default": false,
           "title": "Requires Decision",
@@ -2184,6 +2221,11 @@
           "format": "uuid",
           "title": "Analysis Version Id",
           "type": "string"
+        },
+        "graph_ready": {
+          "default": true,
+          "title": "Graph Ready",
+          "type": "boolean"
         },
         "decisions": {
           "items": {
@@ -2558,7 +2600,14 @@
         },
         "changes": {
           "items": {
-            "$ref": "#/$defs/Mutation"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Mutation"
+              },
+              {
+                "$ref": "#/$defs/DocumentMutation"
+              }
+            ]
           },
           "minItems": 1,
           "title": "Changes",
@@ -2741,10 +2790,10 @@
   },
   "oneOf": [
     {
-      "$ref": "#/$defs/PrepareRequest"
+      "$ref": "#/$defs/PrepareRequestV2"
     },
     {
-      "$ref": "#/$defs/AnalysisV1"
+      "$ref": "#/$defs/AnalysisV2"
     },
     {
       "$ref": "#/$defs/CheckRequest"

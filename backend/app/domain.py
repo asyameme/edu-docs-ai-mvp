@@ -182,6 +182,7 @@ class ReviewState(Contract):
     review_id: UUID
     import_job_id: UUID
     analysis_version_id: UUID
+    graph_ready: bool = True
     decisions: list[ReviewDecision] = Field(default_factory=list)
     confirmation: ReviewConfirmation | None = None
 
