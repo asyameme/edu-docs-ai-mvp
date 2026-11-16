@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -82,8 +82,8 @@ class Program(BaseEntity):
 class Discipline(BaseEntity):
     name: str
     semesters: list[int]
-    credit_units: int = Field(ge=1)
-    hours_total: int = Field(ge=0)
+    credit_units: int | None = Field(ge=1)
+    hours_total: int | None = Field(ge=0)
     hours_by_kind: dict[str, int]
     control_forms: list[str] = []
     prerequisites: list[str] = []
@@ -141,10 +141,24 @@ class CurriculumItem(BaseEntity):
     block: str
 
 
+class AcademicHoursRange(ContractModel):
+    kind: Literal["range"]
+    min: int = Field(ge=0, strict=True)
+    max: int = Field(ge=0, strict=True)
+    unit: Literal["academic_hour"]
+    raw_text: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_bounds(self):
+        if self.min > self.max:
+            raise ValueError("Нижняя граница часов больше верхней")
+        return self
+
+
 class CourseTopic(BaseEntity):
     topic: str
     activity: str
-    hours: int = Field(ge=0)
+    hours: Annotated[int, Field(ge=0)] | AcademicHoursRange | None
     module: str | None = None
 
 
@@ -261,7 +275,14 @@ class AssessmentToolV2(AssessmentTool):
     description: str | None = None
     task_examples: list[str] = Field(default_factory=list)
 
-class RPDOutput(ContractModel):
+class WorkingProgramOutput(ContractModel):
+    education_languages: list[str] = Field(default_factory=list)
+    education_languages_source_ref: SourceRef | None = None
+    title_credit_units: int | None = Field(default=None, ge=1)
+    title_credit_units_source_ref: SourceRef | None = None
+
+
+class RPDOutput(WorkingProgramOutput):
     meta: RPDMeta
     disciplines: list[Discipline] = Field(min_length=1)
     competencies: list[Competency] = Field(default_factory=list)
@@ -274,10 +295,10 @@ class RPDOutput(ContractModel):
     score_scale: list[ScoreScaleItem] = Field(default_factory=list)
     parse_issues: list[ParseIssue] = Field(default_factory=list)
 
-class RPPOutput(ContractModel):
+class RPPOutput(WorkingProgramOutput):
     meta: RPPMeta
     disciplines: list[Discipline] = Field(min_length=1)
-    semester_workload: list[SemesterWorkload] = Field(min_length=1)
+    semester_workload: list[SemesterWorkload]
     document_sections: list[DocumentSection] = Field(default_factory=list)
     practice_stages: list[PracticeStage] = Field(default_factory=list)
     competencies: list[Competency] = Field(default_factory=list)
@@ -347,7 +368,14 @@ class CharacteristicOutput(ContractModel):
     competencies: list[Competency] = Field(default_factory=list)
     parse_issues: list[ParseIssue] = Field(default_factory=list)
 
-DocumentOutput = Annotated[Union[RPDOutput,RPPOutput,CurriculumOutput,MatrixOutput,CKMVOutput,CharacteristicOutput], Field(discriminator='meta.doc_type')] if False else Union[RPDOutput,RPPOutput,CurriculumOutput,MatrixOutput,CKMVOutput,CharacteristicOutput]
+DocumentOutput: TypeAlias = (
+    RPDOutput
+    | RPPOutput
+    | CurriculumOutput
+    | MatrixOutput
+    | CKMVOutput
+    | CharacteristicOutput
+)
 MODELS = {'RPD': RPDOutput,'RPP': RPPOutput,'CURRICULUM': CurriculumOutput,'MATRIX': MatrixOutput,'CKMV': CKMVOutput,'CHARACTERISTIC': CharacteristicOutput}
 def parse_document(payload: dict) -> DocumentOutput:
     kind = payload.get('meta',{}).get('doc_type')

@@ -275,13 +275,29 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
   const sourceRefs = new Map(snapshot.source_refs.map((source) => [source.id, source]));
   const documentNames = new Map((job?.files ?? []).map((file) => [file.document_id, file.member_name]));
   const documentCount = job?.files.length ?? snapshot.source_refs.length;
-  const sourceDescription = (ids: string[]) => {
+  const sourceDescription = (
+    ids: string[],
+    documentIds: string[] = [],
+    fieldPaths: string[] = [],
+  ) => {
     const sources = ids.map((id) => sourceRefs.get(id)).filter((source) => source !== undefined);
     const sourceDocuments = [...new Map(sources.map((source) => [source.document_id, source])).values()];
     const documentLabels = sourceDocuments.map((source) => ({
       id: source.document_id,
       name: documentNames.get(source.document_id) ?? "Источник пакета документов",
     }));
+    const sourceDocumentIds = [...new Set([
+      ...documentIds,
+      ...sources.map((source) => source.document_id),
+    ])];
+    for (const id of sourceDocumentIds) {
+      if (!documentLabels.some((item) => item.id === id)) {
+        documentLabels.push({
+          id,
+          name: documentNames.get(id) ?? "Источник пакета документов",
+        });
+      }
+    }
     const nameCounts = new Map<string, number>();
     for (const item of documentLabels) nameCounts.set(item.name, (nameCounts.get(item.name) ?? 0) + 1);
     const names = documentLabels.map((item) =>
@@ -290,17 +306,31 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
     const sections = [...new Set(sources.map((source) => source.section).filter((section) => section !== null))];
     return {
       source: names.length ? names.join(" · ") : "Источник пакета документов",
-      location: sections.length ? sections.join(" · ") : "Фрагмент исходного документа",
+      location: sections.length
+        ? sections.join(" · ")
+        : fieldPaths.length
+          ? fieldPaths.join(" · ")
+          : "Фрагмент исходного документа",
     };
   };
   const findings = details.issues.filter((issue) => issue.requires_decision)
     .map((issue) => {
       const choices = issue.variants.map((variant) => {
         const changeSourceIds = variant.changes.flatMap((change) => [
-          ...(change.entity?.source_ref_ids ?? []),
-          ...(change.relation?.source_ref_ids ?? []),
+          ...("entity" in change ? change.entity.source_ref_ids : []),
+          ...("relation" in change ? change.relation.source_ref_ids : []),
         ]);
-        const location = sourceDescription(changeSourceIds.length ? changeSourceIds : issue.source_ref_ids);
+        const changeDocumentIds = variant.changes.flatMap((change) =>
+          change.op === "set_document_value" ? [change.document_id] : [],
+        );
+        const fieldPaths = variant.changes.flatMap((change) =>
+          "field_path" in change ? [change.field_path] : [],
+        );
+        const location = sourceDescription(
+          changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
+          changeDocumentIds.length ? changeDocumentIds : issue.source_document_ids ?? [],
+          fieldPaths,
+        );
         return { id: variant.id, value: variant.label, ...location };
       });
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
@@ -316,7 +346,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       };
     });
   const reviewIssues = details.issues.map((issue: ReviewIssue) => {
-    const source = sourceDescription(issue.source_ref_ids);
+    const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
     const reason = issue.evidence?.reason ?? issue.evidence?.model_reason;
     const sourceLimitations = issue.evidence?.source_mapping_limitations;
     return {

@@ -81,9 +81,9 @@ def practice_document(
     document.add_paragraph("2.2. Структура и содержание практики")
     table = document.add_table(rows=3, cols=3)
     for row, values in zip(table.rows, (
-        ("Тема", "Вид занятий", "Часы"),
+        ("Тема", "Вид занятий", "Кол-во часов"),
         ("Вводный инструктаж", "в присутствии преподавателя", "2"),
-        ("Работа над проектом", "самостоятельная работа", "2-4"),
+        ("Работа над проектом", "самостоятельная работа", "12–16 академических часов"),
     )):
         for cell, text in zip(row.cells, values):
             cell.text = text
@@ -191,25 +191,40 @@ class TestRppParser(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "РПП"):
             parse_rpp(ROOT / "tests/originals/РПД_матанализ1.docx")
 
-    def test_curriculum_reference_explains_missing_required_load(self):
-        with self.assertRaisesRegex(ValueError, "отсылает к УП"):
-            self.parse_document(practice_document(workload="reference"))
+    def test_curriculum_reference_preserves_partial_result(self):
+        output = self.parse_document(practice_document(workload="reference"))
+        discipline = output.disciplines[0]
 
-    def test_content_keeps_exact_hours_and_rejects_ranges(self):
+        self.assertIsNone(discipline.hours_total)
+        self.assertIsNone(discipline.credit_units)
+        self.assertEqual(output.semester_workload, [])
+        self.assertTrue(output.competencies)
+        self.assertTrue(any(
+            "отсылает к УП" in issue.message
+            for issue in output.parse_issues
+        ))
+
+    def test_content_preserves_exact_hours_and_numeric_range_bounds(self):
         document = practice_document()
         topics, issues = extract_course_content(
             document, "practice.docx", doc_type="RPP",
         )
-        self.assertEqual([(item.topic, item.hours) for item in topics], [
-            ("Вводный инструктаж", 2),
-        ])
-        self.assertTrue(any(
-            issue.category == "unexpected_format" and "2-4" in issue.message
-            for issue in issues
-        ))
+        self.assertEqual(len(topics), 2)
+        self.assertEqual(topics[0].hours, 2)
+        self.assertEqual(topics[1].topic, "Работа над проектом")
+        self.assertEqual(topics[1].source_ref.col, 3)
+        self.assertFalse(any(issue.category == "unexpected_format" for issue in issues))
         output = self.parse_document(document)
-        self.assertEqual(len(output.course_content), 1)
-        self.assertEqual(output.course_content[0].hours, 2)
+        saved = output.model_dump(mode="json")["course_content"]
+        self.assertEqual(saved[0]["hours"], 2)
+        self.assertEqual(saved[1]["hours"], {
+            "kind": "range",
+            "min": 12,
+            "max": 16,
+            "unit": "academic_hour",
+            "raw_text": "12–16 академических часов",
+        })
+        self.assertEqual(RPPOutput.model_validate_json(output.model_dump_json()), output)
 
     def test_checked_form_does_not_select_unchecked_exam(self):
         forms, issues = extract_practice_control_forms(
@@ -303,8 +318,14 @@ class TestRppParser(unittest.TestCase):
         ))
 
     def test_fractional_total_is_not_rounded_for_integer_model(self):
-        with self.assertRaisesRegex(ValueError, r"credit_units=3\.5"):
-            self.parse_document(practice_document(workload="fractional"))
+        output = self.parse_document(practice_document(workload="fractional"))
+        discipline = output.disciplines[0]
+        self.assertEqual(discipline.hours_total, 126)
+        self.assertIsNone(discipline.credit_units)
+        self.assertEqual(discipline.semesters, [2])
+        self.assertEqual(output.semester_workload, [])
+        self.assertTrue(output.learning_outcomes)
+        self.assertTrue(any("credit_units=3.5" in issue.message for issue in output.parse_issues))
 
 
 if __name__ == "__main__":

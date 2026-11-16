@@ -16,11 +16,11 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile as StoredUpload
 
-from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.import_archive import read_package
 from app.import_repository import ImportRepository
 from app.import_status import read_status
+from app.parser_document import ParserDocument
 from app.program_api import OperationKey, RepoDep, StorageDep
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/imports", tags=["Imports"])
@@ -45,6 +45,18 @@ class ImportRead(BaseModel):
     files: list[ImportFileRead]
     created_at: datetime
     updated_at: datetime
+
+
+class ParsedDocumentRead(BaseModel):
+    document_id: UUID
+    member_name: str
+    sha256: str
+    parsed: ParserDocument
+
+
+class ImportResultRead(BaseModel):
+    job_id: UUID
+    documents: list[ParsedDocumentRead]
 
 
 @router.post("", status_code=202)
@@ -129,8 +141,18 @@ async def retry_import(
 
 
 @router.get("/{job_id}/result")
-def read_result(program_id: UUID, job_id: UUID, repo: RepoDep) -> SnapshotV2:
+def read_result(program_id: UUID, job_id: UUID, repo: RepoDep) -> ImportResultRead:
     job = ImportRepository(repo.pool).read(program_id, job_id, include_output=True)
-    if job["snapshot"] is None:
+    documents = [
+        {
+            "document_id": item["document_id"],
+            "member_name": item["member_name"],
+            "sha256": item["sha256"],
+            "parsed": item["output"],
+        }
+        for item in job["files"]
+        if item.get("output") is not None and not item.get("error_code")
+    ]
+    if not documents or job["status"] not in {"completed", "partial"}:
         raise DomainError(409, "Результат разбора ещё не готов или обработка завершилась ошибкой")
-    return SnapshotV2.model_validate(job["snapshot"])
+    return ImportResultRead(job_id=job["id"], documents=documents)

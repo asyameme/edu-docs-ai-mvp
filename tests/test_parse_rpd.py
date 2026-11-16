@@ -2,7 +2,13 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
 from backend.contracts.document_v2.models import RPDOutput
+from backend.worker.parser.assessment import extract_score_scale
+from backend.worker.parser.content import extract_course_content
 from backend.worker.parser.parse_rpd import parse_rpd
 
 
@@ -76,6 +82,79 @@ class TestRpdParser(unittest.TestCase):
         self.assertEqual(discipline.credit_units, 3)
         self.assertEqual(discipline.hours_total, 206)
         self.assertEqual(sum(discipline.hours_by_kind.values()), 206)
+        self.assertEqual(output.title_credit_units, 6)
+        self.assertIsNotNone(output.title_credit_units_source_ref.paragraph_index)
+
+    def test_language_from_title_is_kept_for_validation(self):
+        output = parse_rpd(
+            ROOT / "tests/stage_1/case_6/РПД_БД.docx",
+            program_id=PROGRAM_ID,
+        )
+        self.assertEqual(output.education_languages, ["французский"])
+        self.assertIsNotNone(output.education_languages_source_ref.paragraph_index)
+
+    def test_content_with_consistently_omitted_trailing_cells(self):
+        document = Document()
+        document.add_paragraph("2.2. Структура и содержание учебных занятий")
+        table = document.add_table(rows=2, cols=4)
+        for row, values in zip(table.rows, (
+            ("Тема", "Вид занятий", "Количество часов"),
+            ("Кинематика", "лекции", "8"),
+        )):
+            for cell, value in zip(row.cells, values):
+                cell.text = value
+            row._tr.remove(row.cells[-1]._tc)
+            trailing = OxmlElement("w:gridAfter")
+            trailing.set(qn("w:val"), "1")
+            row._tr.get_or_add_trPr().append(trailing)
+
+        topics, issues = extract_course_content(document, "physics.docx")
+        self.assertEqual(issues, [])
+        self.assertEqual([(topic.topic, topic.hours) for topic in topics], [("Кинематика", 8)])
+
+    def test_content_table_without_hours_keeps_topics_and_source_rows(self):
+        document = Document()
+        document.add_paragraph("2.2. Структура и содержание учебных занятий")
+        table = document.add_table(rows=3, cols=3)
+        for row, values in zip(table.rows, (
+            ("№ п/п", "Наименование темы (раздела, части)", "Вид учебных занятий"),
+            ("1", "Кинематика", "лекции"),
+            ("1", "Кинематика", "практические занятия"),
+        )):
+            for cell, value in zip(row.cells, values):
+                cell.text = value
+        table.cell(1, 1).merge(table.cell(2, 1)).text = "Кинематика"
+
+        topics, issues = extract_course_content(document, "physics.docx")
+        self.assertEqual(
+            [(topic.topic, topic.activity, topic.hours) for topic in topics],
+            [("Кинематика", "лекции", None), ("Кинематика", "практические занятия", None)],
+        )
+        self.assertEqual(
+            [(topic.source_ref.table, topic.source_ref.row, topic.source_ref.col) for topic in topics],
+            [(1, 2, 2), (1, 3, 2)],
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].category, "manual_review")
+        self.assertEqual(issues[0].source_ref.table, 1)
+
+    def test_headerless_ects_scale_preserves_source_values(self):
+        document = Document()
+        document.add_paragraph("3.1.3. Методика и критерии оценивания")
+        table = document.add_table(rows=6, cols=3)
+        grades = ("отлично", "хорошо", "хорошо", "удовлетворительно",
+                  "удовлетворительно", "неудовлетворительно")
+        for row, letter, grade in zip(table.rows, "ABCDEF", grades):
+            row.cells[0].text = f"Критерий {letter}"
+            row.cells[1].text = letter
+            row.cells[2].text = grade
+
+        items, issues = extract_score_scale(document, "scale.docx")
+        self.assertEqual(issues, [])
+        self.assertEqual([item.grade_spbu for item in items], list(grades))
+        self.assertEqual([item.grade_ects for item in items], list("ABCDEF"))
+        self.assertEqual([item.criterion for item in items], [f"Критерий {x}" for x in "ABCDEF"])
+        self.assertEqual([item.source_ref.row for item in items], list(range(1, 7)))
 
     def test_changed_competencies_are_preserved(self):
         output = parse_rpd(
