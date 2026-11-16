@@ -11,10 +11,18 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.document_adapter import to_snapshot_v2
+from app.document_reconciliation import validate_document_mutation_variants
 from app.domain import SnapshotV2
 from app.errors import DomainError
-from app.review_contract import AnalysisV1, CheckRequest, CheckResult, PrepareRequest
-from app.review_logic import apply_changes, digest, map_analysis_ids
+from app.review_contract import (
+    AnalysisV1,
+    AnalysisV2,
+    CheckRequest,
+    CheckResult,
+    PrepareRequest,
+    PrepareRequestV2,
+)
+from app.review_logic import apply_changes, digest, map_analysis_ids, map_analysis_v2_ids
 from app.review_repository import ReviewRepository
 from app.validation_bridge import (
     project_snapshot_documents,
@@ -87,6 +95,8 @@ class ReviewActivities:
         purpose = job["parameters"]["purpose"]
         try:
             if job["parameters"].get("executor", "http") == "local":
+                if purpose == "prepare" and job["parameters"].get("schema_version", 1) == 2:
+                    raise ValueError("Документный анализ AnalysisV2 требует настроенный /analyze")
                 input_data = job["parameters"]["input"]
                 rules = job["parameters"].get("local_rules") or load_rules()
                 expected_implementation = job["parameters"].get("implementation_revision")
@@ -126,19 +136,31 @@ class ReviewActivities:
             else:
                 if not self.settings.analysis_url:
                     raise ValueError("Analysis service is not configured")
+                input_data = job["parameters"]["input"]
+                if purpose == "check" and job["parameters"].get("project_check_documents"):
+                    snapshot = SnapshotV2.model_validate(input_data["snapshot"])
+                    input_data = {
+                        **input_data,
+                        "documents": project_snapshot_documents(
+                            input_data["documents"], snapshot
+                        ),
+                    }
                 data = {
-                    "schema_version": 1,
+                    "schema_version": job["parameters"].get("schema_version", 1),
                     "operation": purpose,
                     "job_id": str(job["id"]),
                     "program_id": str(job["program_id"]),
                     "version_id": str(job["input_version_id"]),
-                    **job["parameters"]["input"],
+                    **input_data,
                 }
-                data = (
-                    (PrepareRequest if purpose == "prepare" else CheckRequest)
-                    .model_validate(data)
-                    .model_dump(mode="json")
+                request_model = (
+                    PrepareRequestV2
+                    if purpose == "prepare" and data["schema_version"] == 2
+                    else PrepareRequest
+                    if purpose == "prepare"
+                    else CheckRequest
                 )
+                data = request_model.model_validate(data).model_dump(mode="json")
                 with httpx.Client(
                     timeout=self.settings.analysis_timeout_seconds, trust_env=False
                 ) as client:
@@ -163,24 +185,47 @@ class ReviewActivities:
                         raw = json.loads(b"".join(chunks))
             artifacts = []
             if purpose == "prepare":
-                parsed = AnalysisV1.model_validate(raw)
                 documents = job["parameters"]["input"]["documents"]
-                expected = {UUID(item["document_id"]) for item in documents}
-                if set(parsed.candidate.document_ids) != expected:
-                    raise ValueError("Analysis changed document membership")
-                types = {item["parsed"]["meta"]["doc_type"].casefold() for item in documents}
-                required_types = {
-                    value.casefold() for value in parsed.ruleset.required_document_types
-                }
-                if not required_types.issubset(types):
-                    raise ValueError("Required documents are absent")
-                result = map_analysis_ids(
-                    parsed, job["id"], job["parameters"]["input"]["base_snapshot"]
-                )
-                for issue in result["issues"]:
-                    for variant in issue["variants"]:
-                        apply_changes(result["candidate"], variant["changes"])
-                artifacts = self.save_artifacts(result)
+                if job["parameters"].get("schema_version", 1) == 2:
+                    parsed = AnalysisV2.model_validate(raw)
+                    required_types = {
+                        value.casefold() for value in parsed.ruleset.required_document_types
+                    }
+                    actual_types = {
+                        item["parsed"]["meta"]["doc_type"].casefold() for item in documents
+                    }
+                    if not required_types.issubset(actual_types):
+                        raise ValueError("Required documents are absent")
+                    if any(issue.source_ref_ids for issue in parsed.issues):
+                        raise ValueError("AnalysisV2 findings must identify source documents")
+                    result = map_analysis_v2_ids(parsed, job["id"], documents)
+                    original = {item["document_id"]: item["parsed"] for item in documents}
+                    variants = [
+                        [change.model_dump(mode="json") for change in variant.changes]
+                        for issue in parsed.issues
+                        for variant in issue.variants
+                    ]
+                    validate_document_mutation_variants(original, variants)
+                    result["schema_version"] = 2
+                    artifacts = self.save_artifacts(result)
+                else:
+                    parsed = AnalysisV1.model_validate(raw)
+                    expected = {UUID(item["document_id"]) for item in documents}
+                    if set(parsed.candidate.document_ids) != expected:
+                        raise ValueError("Analysis changed document membership")
+                    types = {item["parsed"]["meta"]["doc_type"].casefold() for item in documents}
+                    required_types = {
+                        value.casefold() for value in parsed.ruleset.required_document_types
+                    }
+                    if not required_types.issubset(types):
+                        raise ValueError("Required documents are absent")
+                    result = map_analysis_ids(
+                        parsed, job["id"], job["parameters"]["input"]["base_snapshot"]
+                    )
+                    for issue in result["issues"]:
+                        for variant in issue["variants"]:
+                            apply_changes(result["candidate"], variant["changes"])
+                    artifacts = self.save_artifacts(result)
             else:
                 result = CheckResult.model_validate(raw).model_dump(mode="json")
                 snapshot = SnapshotV2.model_validate(job["parameters"]["input"]["snapshot"])

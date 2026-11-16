@@ -344,6 +344,26 @@ def test_local_check_does_not_guess_between_duplicate_locators_in_one_document(m
     ]
 
 
+def test_recheck_preserves_unchanged_unknown_numeric_field():
+    document_id, entity_id, ref_id = uuid4(), uuid4(), uuid4()
+    document = {"document_id": str(document_id), "parsed": {"disciplines": [{
+        "credit_units": None, "source_ref": {"row": 2},
+    }]}}
+    snapshot = SnapshotV2.model_validate({
+        "document_ids": [document_id], "entities": [{
+            "id": entity_id, "kind": "discipline", "attributes": {"credit_units": None},
+            "source_ref_ids": [ref_id],
+        }], "source_refs": [{
+            "id": ref_id, "document_id": document_id, "locator": '{"row":2}',
+        }], "source_links": [{
+            "id": uuid4(), "target_kind": "entity", "target_id": entity_id,
+            "source_ref_id": ref_id, "field_path": "/attributes/credit_units",
+            "observed_value": {"value": None},
+        }],
+    })
+    assert project_snapshot_documents([document], snapshot) == [document]
+
+
 def test_source_identity_cannot_be_overwritten_by_original_filename():
     document_id = str(uuid4())
     result = _source_ref(
@@ -556,6 +576,158 @@ def test_recheck_projects_supported_field_edits_without_mutating_parser_input():
     snapshot.source_links[0].observed_value["value"] = 1
     with pytest.raises(ValueError, match="числовое значение"):
         project_snapshot_documents([original], snapshot)
+
+
+@pytest.mark.parametrize("chat_value", [180, 108])
+def test_recheck_keeps_document_choice_and_projects_final_chat_value(chat_value):
+    from app.validation_bridge import project_snapshot_documents
+
+    document_id, entity_id, ref_id, link_id = [uuid4() for _ in range(4)]
+    review_id, import_id, analysis_id = [uuid4() for _ in range(3)]
+    original = {
+        "document_id": str(document_id),
+        "parsed": {
+            "meta": {"doc_type": "RPD"},
+            "disciplines": [{"name": "Алгебра", "hours_total": 108, "source_ref": {"row": 2}}],
+        },
+    }
+    snapshot = SnapshotV2.model_validate(
+        {
+            "document_ids": [document_id],
+            "entities": [
+                {
+                    "id": entity_id,
+                    "kind": "discipline",
+                    "attributes": {"hours_total": chat_value},
+                    "source_ref_ids": [ref_id],
+                }
+            ],
+            "relations": [],
+            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"row":2}'}],
+            "source_links": [
+                {
+                    "id": link_id,
+                    "target_kind": "entity",
+                    "target_id": entity_id,
+                    "field_path": "/attributes/hours_total",
+                    "source_ref_id": ref_id,
+                    "observed_value": {"value": 108},
+                }
+            ],
+            "review": {
+                "review_id": review_id,
+                "import_job_id": import_id,
+                "analysis_version_id": analysis_id,
+                "graph_ready": True,
+                "decisions": [
+                    {
+                        "conflict_id": uuid4(),
+                        "variant_id": uuid4(),
+                        "check_job_id": review_id,
+                        "changes": [
+                            {
+                                "op": "set_document_value",
+                                "document_id": str(document_id),
+                                "field_path": "/disciplines/0/hours_total",
+                                "expected_old_value": 108,
+                                "value": 144,
+                            }
+                        ],
+                        "decided_at": "2026-11-16T00:00:00Z",
+                    },
+                    {
+                        "conflict_id": uuid4(),
+                        "variant_id": uuid4(),
+                        "check_job_id": review_id,
+                        "changes": [
+                            {
+                                "op": "set_attribute",
+                                "target_kind": "entity",
+                                "target_id": str(entity_id),
+                                "field_path": "/attributes/hours_total",
+                                "expected_old_value": 144,
+                                "value": chat_value,
+                            }
+                        ],
+                        "decided_at": "2026-11-16T00:01:00Z",
+                    },
+                ],
+            },
+        }
+    )
+
+    projected = project_snapshot_documents([original], snapshot)
+
+    assert projected[0]["parsed"]["disciplines"][0]["hours_total"] == chat_value
+    assert original["parsed"]["disciplines"][0]["hours_total"] == 108
+
+
+def test_recheck_keeps_supported_document_choice_for_other_source_fields():
+    from app.validation_bridge import project_snapshot_documents
+
+    document_id, entity_id, ref_id, link_id = [uuid4() for _ in range(4)]
+    review_id, import_id, analysis_id = [uuid4() for _ in range(3)]
+    original = {
+        "document_id": str(document_id),
+        "parsed": {
+            "meta": {"doc_type": "RPD"},
+            "competencies": [
+                {"code": "УК-1", "formulation": "Исходная", "source_ref": {"row": 2}}
+            ],
+        },
+    }
+    snapshot = SnapshotV2.model_validate(
+        {
+            "document_ids": [document_id],
+            "entities": [
+                {
+                    "id": entity_id,
+                    "kind": "competency",
+                    "attributes": {"formulation": "Выбранная"},
+                    "source_ref_ids": [ref_id],
+                }
+            ],
+            "relations": [],
+            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"row":2}'}],
+            "source_links": [
+                {
+                    "id": link_id,
+                    "target_kind": "entity",
+                    "target_id": entity_id,
+                    "field_path": "/attributes/formulation",
+                    "source_ref_id": ref_id,
+                    "observed_value": {"value": "Исходная"},
+                }
+            ],
+            "review": {
+                "review_id": review_id,
+                "import_job_id": import_id,
+                "analysis_version_id": analysis_id,
+                "graph_ready": True,
+                "decisions": [
+                    {
+                        "conflict_id": uuid4(),
+                        "variant_id": uuid4(),
+                        "check_job_id": review_id,
+                        "changes": [
+                            {
+                                "op": "set_document_value",
+                                "document_id": str(document_id),
+                                "field_path": "/competencies/0/formulation",
+                                "expected_old_value": "Исходная",
+                                "value": "Выбранная",
+                            }
+                        ],
+                        "decided_at": "2026-11-16T00:00:00Z",
+                    }
+                ],
+            },
+        }
+    )
+
+    projected = project_snapshot_documents([original], snapshot)
+
+    assert projected[0]["parsed"]["competencies"][0]["formulation"] == "Выбранная"
 
 
 @pytest.mark.parametrize("module_name", ["semantic_competency", "semantic_llm"])

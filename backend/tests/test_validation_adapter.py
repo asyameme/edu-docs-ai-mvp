@@ -14,7 +14,7 @@ def _report():
                 checks=3,
                 findings=[
                     Finding(
-                        code="R-03",
+                        code="hours_mismatch",
                         status="failed",
                         message="Сумма 96 не равна 108",
                         evidence={"discipline": "MLOps"},
@@ -42,12 +42,13 @@ def test_findings_map_to_issue_records():
     by_status = {issue["status"]: issue for issue in issues}
     assert set(by_status) == {"open", "needs_review"}
     assert by_status["open"]["rule_code"] == "R-03"
-    assert by_status["open"]["type"] == "sum_components_equals_total"
-    assert by_status["open"]["severity"] == "warning"
+    assert by_status["open"]["type"] == "hours_mismatch"
+    assert by_status["open"]["severity"] == "blocking"
+    assert by_status["needs_review"]["severity"] == "warning"
     assert by_status["open"]["rule_revision"] == "3"
     assert by_status["needs_review"]["details"]["message"] == "Возможное расхождение"
 
 
 def test_severity_counts_for_chat_summary():
     issues = findings_to_issues(_report(), {"rules": []})
-    assert count_by_severity(issues) == {"warning": 2}
+    assert count_by_severity(issues) == {"blocking": 1, "warning": 1}

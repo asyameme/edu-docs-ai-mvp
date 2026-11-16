@@ -10,12 +10,18 @@ from pydantic import ValidationError
 
 from app.domain import SnapshotV2
 from app.errors import DomainError
-from app.review_contract import AnalysisV1, CheckRequest, CheckResult, Mutation, PrepareRequest
+from app.review_contract import (
+    AnalysisV2,
+    CheckRequest,
+    CheckResult,
+    Mutation,
+    PrepareRequestV2,
+)
 from app.review_logic import (
     apply_changes,
     content_hash,
     copy_sources,
-    map_analysis_ids,
+    map_analysis_v2_ids,
     pointer_parts,
 )
 
@@ -152,8 +158,8 @@ def test_hash_preserves_unknown_zero_and_source_precision_as_distinct_values():
 @pytest.mark.parametrize(
     "name,model",
     [
-        ("prepare-request", PrepareRequest),
-        ("analysis-response", AnalysisV1),
+        ("prepare-request", PrepareRequestV2),
+        ("analysis-response", AnalysisV2),
         ("check-request", CheckRequest),
         ("check-response", CheckResult),
     ],
@@ -175,31 +181,19 @@ def test_overlapping_field_choices_cannot_overwrite_a_previous_choice():
         apply_changes(state, changes)
 
 
-def test_id_mapping_does_not_rewrite_original_values_or_document_identity():
+def test_v2_id_mapping_does_not_rewrite_values_or_document_identity():
     path = Path(__file__).parents[1] / "examples" / "review" / "analysis-response.json"
     data = json.loads(path.read_text(encoding="utf-8"))
-    old_entity = data["candidate"]["entities"][0]["id"]
-    document = data["candidate"]["document_ids"][0]
-    data["candidate"]["entities"][0]["id"] = document
-    data["candidate"]["entities"][0]["attributes"]["external_id"] = document
-    for link in data["candidate"]["source_links"]:
-        if link["target_id"] == old_entity:
-            link["target_id"] = document
-    for issue in data["issues"]:
-        for variant in issue["variants"]:
-            for change_value in variant["changes"]:
-                if change_value["target_id"] == old_entity:
-                    change_value["target_id"] = document
-    parsed = AnalysisV1.model_validate(data)
-    mapped = map_analysis_ids(parsed, uuid4(), {"entities": [], "relations": []})
-    assert mapped["candidate"]["document_ids"] == [document]
-    assert mapped["candidate"]["source_refs"][0]["document_id"] == document
-    assert mapped["candidate"]["entities"][0]["id"] != document
-    assert mapped["candidate"]["entities"][0]["attributes"]["external_id"] == document
-    assert (
-        mapped["issues"][0]["variants"][0]["changes"][0]["target_id"]
-        == mapped["candidate"]["entities"][0]["id"]
-    )
+    document = data["issues"][0]["source_document_ids"][0]
+    data["issues"][0]["id"] = document
+    parsed = AnalysisV2.model_validate(data)
+    mapped = map_analysis_v2_ids(parsed, uuid4(), [{"document_id": document}])
+    change = mapped["issues"][0]["variants"][1]["changes"][0]
+    assert mapped["issues"][0]["id"] != document
+    assert mapped["issues"][0]["source_document_ids"] == [document]
+    assert change["document_id"] == document
+    assert change["expected_old_value"] == 108
+    assert change["value"] == 144
 
 
 def test_whole_object_operation_cannot_masquerade_as_an_unrelated_field_write():

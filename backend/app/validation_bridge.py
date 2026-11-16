@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from app.document_reconciliation import apply_document_mutations
 from app.review_contract import CheckResult
 from app.review_logic import digest
 from worker.validation.validator import Document, load_rules, run_validation
@@ -103,9 +104,13 @@ def project_snapshot_documents(documents, snapshot):
     for item in data["source_links"]:
         source_links[(item["target_kind"], str(item["target_id"]), item["field_path"])].append(item)
 
+    document_changes = []
     if snapshot.review:
         for decision in snapshot.review.decisions:
             for change in decision.changes:
+                if change.get("op") == "set_document_value":
+                    document_changes.append(change)
+                    continue
                 if change.get("op") != "set_attribute":
                     raise ValueError(
                         "Повторная проверка пока не поддерживает структурные изменения"
@@ -122,9 +127,17 @@ def project_snapshot_documents(documents, snapshot):
                         "Повторная проверка поддерживает только часы и зачётные единицы"
                     )
 
+    outputs = apply_document_mutations(outputs, document_changes)
+
+    def same_locator(ref, locator):
+        # Нормализованный граф дополняет координаты null-полями схемы.
+        return isinstance(ref, dict) and {
+            key: item for key, item in ref.items() if item is not None
+        } == {key: item for key, item in locator.items() if item is not None}
+
     def update_record(value, locator, field, new_value):
         if isinstance(value, dict):
-            if value.get("source_ref") == locator:
+            if same_locator(value.get("source_ref"), locator):
                 if field not in value:
                     raise ValueError(f"В исходных данных нет поля {field}")
                 value[field] = new_value
@@ -133,6 +146,23 @@ def project_snapshot_documents(documents, snapshot):
         if isinstance(value, list):
             return sum(update_record(child, locator, field, new_value) for child in value)
         return 0
+
+    def record_values(value, locator, field):
+        if isinstance(value, dict):
+            if same_locator(value.get("source_ref"), locator):
+                return [value[field]] if field in value else []
+            return [
+                found
+                for child in value.values()
+                for found in record_values(child, locator, field)
+            ]
+        if isinstance(value, list):
+            return [
+                found
+                for child in value
+                for found in record_values(child, locator, field)
+            ]
+        return []
 
     for link in data["source_links"]:
         if link["field_path"] == "$":
@@ -144,32 +174,44 @@ def project_snapshot_documents(documents, snapshot):
             raise ValueError("Не удалось восстановить исходное поле для повторной проверки")
         old_value = link["observed_value"].get("value")
         new_value = target.get("attributes", {}).get(link["field_path"].split("/")[-1])
-        if old_value == new_value and isinstance(old_value, bool) == isinstance(new_value, bool):
-            continue
         parts = link["field_path"].split("/")
         supported_fields = {"/attributes/hours_total", "/attributes/credit_units"}
-        if (
-            link["target_kind"] != "entity"
-            or len(parts) != 3
-            or parts[1] != "attributes"
-            or link["field_path"] not in supported_fields
-        ):
+        is_supported = (
+            link["target_kind"] == "entity"
+            and len(parts) == 3
+            and parts[1] == "attributes"
+            and link["field_path"] in supported_fields
+        )
+        field = parts[2].replace("~1", "/").replace("~0", "~") if len(parts) > 2 else ""
+        try:
+            locator = json.loads(ref["locator"])
+        except json.JSONDecodeError as error:
+            raise ValueError("Источник не содержит координаты для повторной проверки") from error
+        if not is_supported:
+            unchanged = old_value == new_value and isinstance(old_value, bool) == isinstance(
+                new_value, bool
+            )
+            if unchanged:
+                continue
+            values = record_values(document, locator, field)
+            if len(values) == 1 and values[0] == new_value and type(values[0]) is type(new_value):
+                continue
             raise ValueError("Повторная проверка поддерживает только часы и зачётные единицы")
+        if old_value is None and new_value is None:
+            # Неизвестное исходное число остаётся неизвестным, это не правка пользователя.
+            continue
         if (
             isinstance(new_value, bool)
             or not isinstance(new_value, (int, float))
             or not math.isfinite(new_value)
         ):
             raise ValueError("Часы и зачётные единицы должны иметь конечное числовое значение")
-        field = parts[2].replace("~1", "/").replace("~0", "~")
-        try:
-            locator = json.loads(ref["locator"])
-        except json.JSONDecodeError as error:
-            raise ValueError("Источник не содержит координаты для повторной проверки") from error
         count = update_record(document, locator, field, new_value)
         if count != 1:
             raise ValueError("Источник поля неоднозначен для повторной проверки")
-    return [{"document_id": identity, "parsed": output} for identity, output in outputs.items()]
+    return [
+        {**item, "parsed": outputs[str(item["document_id"])]} for item in documents
+    ]
 
 
 def validation_ruleset(config, documents):
@@ -180,11 +222,13 @@ def validation_ruleset(config, documents):
         raise ValueError("Нет документов поддерживаемых типов для проверки")
     return {
         "id": "education-backend-validation",
-        "revision": digest({
-            "implementation": validation_implementation_revision(),
-            "config": config,
-            "required_document_types": required_documents,
-        }),
+        "revision": digest(
+            {
+                "implementation": validation_implementation_revision(),
+                "config": config,
+                "required_document_types": required_documents,
+            }
+        ),
         "config": config,
         "required_rules": [rule["id"] for rule in enabled],
         "required_document_types": required_documents,
@@ -194,6 +238,7 @@ def validation_ruleset(config, documents):
 def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
     """Проверяет сохранённые документы и связывает замечания с их источниками."""
     config = config or load_rules()
+
     def attach_identity(value, document_id):
         if isinstance(value, dict):
             for child in value.values():
@@ -233,6 +278,7 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
     report = run_validation(
         inputs,
         active_config,
+        phase="graph_validation",
         semantic_evaluator=budget.semantic,
         competency_evaluator=budget.competency,
     ).to_dict()
@@ -290,7 +336,8 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
                 file_alias = evidence.get("file")
                 evidence_document_id = evidence.get("document_id")
                 locator = {
-                    key: value for key, value in evidence.items()
+                    key: value
+                    for key, value in evidence.items()
                     if key not in {"file", "document_id"}
                 }
                 locator_key = json.dumps(
@@ -302,10 +349,7 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
                     else document_aliases.get(str(file_alias), set())
                 )
                 matched_refs = set().union(
-                    *(
-                        refs.get((document_id, locator_key), set())
-                        for document_id in document_ids
-                    )
+                    *(refs.get((document_id, locator_key), set()) for document_id in document_ids)
                 )
                 if len(matched_refs) == 1:
                     ref_id = matched_refs.pop()
@@ -314,13 +358,11 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
                     source_label = file_alias or evidence_document_id
                     if len(matched_refs) > 1:
                         source_mapping_limitations.append(
-                            f"Источник {source_label} неоднозначен "
-                            "по координатам"
+                            f"Источник {source_label} неоднозначен по координатам"
                         )
                     else:
                         source_mapping_limitations.append(
-                            f"Не найден точный источник {source_label} "
-                            "по координатам"
+                            f"Не найден точный источник {source_label} по координатам"
                         )
                 if ref_id is not None and ref_id not in source_ids:
                     source_ids.append(ref_id)

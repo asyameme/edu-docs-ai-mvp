@@ -76,8 +76,9 @@ class ImportRepository:
                        ORDER BY created_at,id LIMIT 1""",
                     (program_id, item["sha256"]),
                 ).fetchone()
-                if previous:
+                if previous and previous["id"] not in used:
                     document_id = previous["id"]
+                    used.add(document_id)
                 else:
                     document_id = item["id"]
                     Repository.insert_document(cur, program_id, item)
@@ -234,6 +235,7 @@ class ImportRepository:
                 or "outcome" in job["report"]
             ):
                 return
+            legacy_import = job["report"].get("legacy_import") is True
             graph = (
                 save_graph(
                     cur,
@@ -245,7 +247,7 @@ class ImportRepository:
                         d["document_id"]: d["member_name"] for d in job["parameters"]["documents"]
                     },
                 )
-                if snapshot
+                if snapshot and legacy_import
                 else None
             )
             report = job["report"]

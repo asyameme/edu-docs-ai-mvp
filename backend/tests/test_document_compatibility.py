@@ -113,6 +113,30 @@ def test_conflicting_documents_stay_separate_with_stable_scoped_ids():
     assert len({e["id"] for e in disciplines}) == 2
 
 
+def test_selected_document_value_keeps_original_observation_and_parsed_artifact():
+    from app.document_adapter import to_snapshot_v2
+
+    program, document = uuid4(), uuid4()
+    original = payload()
+    selected = deepcopy(original)
+    selected["disciplines"][0]["hours_total"] = 144
+    snapshot, _ = to_snapshot_v2(
+        program,
+        [{"document_id": document, "output": selected}],
+        original_files=[{"document_id": document, "parsed": original}],
+    )
+    result = SnapshotV2.model_validate(snapshot)
+    entity = next(item for item in result.entities if item.kind == "discipline")
+    link = next(
+        item
+        for item in result.source_links
+        if item.target_id == entity.id and item.field_path == "/attributes/hours_total"
+    )
+    assert entity.attributes["hours_total"] == 144
+    assert link.observed_value == {"value": 108}
+    assert "parsed_documents" not in result.metadata
+
+
 def test_different_v2_types_keep_fields_and_explicit_unknown_values():
     old = payload()
     old["disciplines"][0]["source_ref"].pop("paragraph_index")

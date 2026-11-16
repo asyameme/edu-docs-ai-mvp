@@ -74,6 +74,11 @@ def pack_tree(cur, program_id, value):
         value.get("schema_version") in (1, 2)
         and {"entities", "relations", "source_refs", "document_ids"} <= value.keys()
     ):
+        if (
+            value.get("schema_version") == 2
+            and (value.get("review") or {}).get("graph_ready") is False
+        ):
+            return {"__pending_graph": True, "review": value.get("review")}
         state = save_graph(cur, program_id, value)
         return {"__graph_state": str(state), "review": value.get("review")}
     if "document_id" in value and isinstance(value.get("parsed"), dict):
@@ -106,6 +111,17 @@ def unpack_tree(cur, value):
         return [unpack_tree(cur, item) for item in value]
     if not isinstance(value, dict):
         return value
+    if value.get("__pending_graph") is True and set(value) == {"__pending_graph", "review"}:
+        return {
+            "schema_version": 2,
+            "metadata": {},
+            "document_ids": [],
+            "entities": [],
+            "relations": [],
+            "source_refs": [],
+            "source_links": [],
+            "review": value["review"],
+        }
     if set(value) == {"__graph_state", "review"}:
         return load_graph(cur, value["__graph_state"], value["review"])
     if set(value) == {"__parsed_artifact"}:

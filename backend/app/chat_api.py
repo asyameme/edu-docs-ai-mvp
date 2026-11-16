@@ -12,9 +12,11 @@ from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from temporalio.client import WorkflowExecutionStatus
 
 from app.chat_repository import ChatRepository
+from app.chat_write import ChatWriteRepository
 from app.config import get_settings
 from app.domain import Contract
 from app.errors import DomainError
+from app.program_api import OperationKey
 from worker.agent.contracts import ChatOutput
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/chat", tags=["Chat"])
@@ -25,6 +27,28 @@ RESULT_ADAPTER = TypeAdapter(ChatResult)
 
 class SessionCreate(Contract):
     version_id: UUID | None = None
+
+
+class ProposalAccept(Contract):
+    expected_version_id: UUID
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def signature_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Нужна подпись пользователя")
+        return value.strip()
+
+
+@router.post("/sessions/{session_id}/runs/{turn_id}/accept", status_code=201)
+def accept_proposal(
+    program_id: UUID, session_id: UUID, turn_id: UUID, body: ProposalAccept,
+    operation_key: OperationKey, request: Request,
+):
+    return ChatWriteRepository(request.app.state.resources.postgres).accept(
+        program_id, session_id, turn_id, body, operation_key
+    )
 
 
 class MessageCreate(Contract):

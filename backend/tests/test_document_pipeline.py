@@ -14,6 +14,7 @@ from test_import_processing import archive, wait
 
 from app.domain import SnapshotV2
 from app.main import app
+from app.parser_adapter import to_snapshot
 from app.repository import Repository
 from app.review_logic import copy_sources
 from app.review_storage import insert_version
@@ -43,13 +44,15 @@ def test_v2_document_reaches_import_result_and_relational_history(kind):
         assert job["status"] == "completed", job
         response = http.get(path + "/result")
         assert response.status_code == 200, response.text
-        snapshot = SnapshotV2.model_validate(response.json())
+        result = response.json()
         document_id = job["files"][0]["document_id"]
-        parsed = snapshot.metadata["parsed_documents"][document_id]
+        parsed = result["documents"][0]["parsed"]
         assert parsed["meta"]["schema_version"] == 2
         assert parsed["meta"]["file_hash"] == sha256(original).hexdigest()
         assert parsed["meta"]["program_id"] == "26/5003/1"
         assert http.get(root + f"/documents/{document_id}/download").content == original
+        snapshot, _ = to_snapshot(program["id"], [{"document_id": document_id, "output": parsed}])
+        snapshot = SnapshotV2.model_validate(snapshot)
     with TestClient(app):
         repo = Repository(app.state.resources.postgres)
         version_id = uuid4()
@@ -65,11 +68,13 @@ def test_v2_document_reaches_import_result_and_relational_history(kind):
             with repo.pool.connection() as connection:
                 assert connection.execute(
                     "SELECT count(*) FROM graph_entities g JOIN program_versions v ON "
-                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s", (vid,)
+                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s",
+                    (vid,),
                 ).fetchone()[0] == len(snapshot.entities)
                 assert connection.execute(
                     "SELECT count(*) FROM graph_source_links g JOIN program_versions v ON "
-                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s", (vid,)
+                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s",
+                    (vid,),
                 ).fetchone()[0] == len(snapshot.source_links)
                 if kind == "MATRIX":
                     assert sorted(
@@ -78,7 +83,8 @@ def test_v2_document_reaches_import_result_and_relational_history(kind):
                             "SELECT r.attributes->'matrix_value' FROM graph_relations g "
                             "JOIN relation_revisions r ON r.revision_id=g.revision_id "
                             "JOIN program_versions v ON v.graph_state_id=g.graph_state_id "
-                            "WHERE v.id=%s", (vid,)
+                            "WHERE v.id=%s",
+                            (vid,),
                         )
                     ) == [0, 1]
 
@@ -99,9 +105,16 @@ def test_v2_package_keeps_documents_without_merging_observations():
         assert job["status"] == "completed", job
         state = http.get(path + "/result")
         assert state.status_code == 200, state.text
-        result = SnapshotV2.model_validate(state.json())
-        assert len(result.metadata["parsed_documents"]) == 2
-        assert len([e for e in result.entities if e.kind == "discipline"]) == 2
+        result = state.json()
+        assert len(result["documents"]) == 2
+        snapshot, _ = to_snapshot(
+            program["id"],
+            [
+                {"document_id": item["document_id"], "output": item["parsed"]}
+                for item in result["documents"]
+            ],
+        )
+        assert len([e for e in snapshot["entities"] if e["kind"] == "discipline"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -156,7 +169,6 @@ def test_v2_one_based_coordinate_survives_http_without_conversion(explicit_versi
         assert job["status"] == "completed", job
         response = http.get(path + "/result")
         assert response.status_code == 200, response.text
-        snapshot = SnapshotV2.model_validate(response.json())
-        parsed = snapshot.metadata["parsed_documents"][job["files"][0]["document_id"]]
+        parsed = response.json()["documents"][0]["parsed"]
         assert parsed["disciplines"][0]["source_ref"]["paragraph_index"] == 1
-        assert {json.loads(ref.locator)["paragraph_index"] for ref in snapshot.source_refs} == {1}
+        assert "snapshot" not in response.json()
