@@ -144,7 +144,25 @@ def read_section(
         and is_heading(block)
     ]
 
-    if len(starts) != 1:
+    def heading_key(index):
+        return re.sub(
+            r"^(\d+(?:\.\d+)*)(?:\.\s*|\s+)(?=[^\d\s])",
+            r"\1 ",
+            normalize(blocks[index].text),
+        )
+
+    ambiguous = any(
+        heading_key(previous) != heading_key(current)
+        or any(
+            not isinstance(block, Paragraph)
+            or block.text.strip()
+            or block._p.xpath(".//w:drawing | .//w:pict | .//w:object | .//w:sym | .//m:oMath")
+            for block in blocks[previous + 1:current]
+        )
+        for previous, current in zip(starts, starts[1:])
+    )
+
+    if not starts or ambiguous:
         return [], [ParseIssue(
             category="not_found" if not starts else "ambiguous",
             message=(
@@ -177,7 +195,7 @@ def read_section(
     )
     result = []
 
-    for block in blocks[start + 1:]:
+    for block in blocks[starts[-1] + 1:]:
         if isinstance(block, Paragraph):
             current_level = level(block)
             if (
