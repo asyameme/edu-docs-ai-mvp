@@ -10,6 +10,7 @@ from docx.oxml.ns import qn
 from backend.contracts.document_v2.models import RPDOutput
 from backend.worker.parser.assessment import extract_score_scale
 from backend.worker.parser.content import extract_course_content
+from backend.worker.parser.discipline import extract_workload
 from backend.worker.parser.parse_rpd import parse_rpd
 
 
@@ -85,6 +86,51 @@ class TestRpdParser(unittest.TestCase):
         self.assertEqual(sum(discipline.hours_by_kind.values()), 206)
         self.assertEqual(output.title_credit_units, 6)
         self.assertIsNotNone(output.title_credit_units_source_ref.paragraph_index)
+
+    def test_workload_with_shifted_merged_cells(self):
+        document = Document()
+        document.add_paragraph("2.1. Организация учебных занятий")
+        table = document.add_table(rows=4, cols=6)
+        header_layout = ((0, 0), (1, 2), (3, 4), (5, 5))
+        data_layout = ((0, 1), (2, 2), (3, 3), (4, 5))
+        rows = (
+            (header_layout, (
+                "Период обучения", "Контактная работа", "Активные формы", "Трудоемкость",
+            )),
+            (header_layout, (
+                "Период обучения", "лекции", "Активные формы", "Трудоемкость",
+            )),
+            (data_layout, ("Семестр 3", "26", "26", "3")),
+            (data_layout, ("ИТОГО", "26", "26", "3")),
+        )
+        for row_index, (layout, texts) in enumerate(rows):
+            for (start, end), text in zip(layout, texts, strict=True):
+                cell = table.cell(row_index, start)
+                if start != end:
+                    cell = cell.merge(table.cell(row_index, end))
+                cell.text = text
+
+        values, issues = extract_workload(document, "workload.docx")
+        self.assertEqual(issues, [])
+        expected_columns = (
+            ("лекции", "hours", 26, 3),
+            ("Активные формы", "reference", 26, 4),
+            ("Трудоемкость", "credit_units", 3, 5),
+        )
+        self.assertEqual(
+            [
+                (
+                    item["periods"], item["label"], item["kind"], item["value"],
+                    item["source_ref"].row, item["source_ref"].col,
+                )
+                for item in values
+            ],
+            [
+                ([period], label, kind, value, row, col)
+                for row, period in ((3, "Семестр 3"), (4, "ИТОГО"))
+                for label, kind, value, col in expected_columns
+            ],
+        )
 
     def test_language_from_title_is_kept_for_validation(self):
         output = parse_rpd(

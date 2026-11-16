@@ -780,6 +780,30 @@ def build_discipline(
     return discipline, issues
 
 
+def align_workload_columns(header_row, data_row):
+    boundaries = []
+    for row in (header_row, data_row):
+        if row.grid_cols_before or row.grid_cols_after:
+            return None
+
+        cells = row.cells
+        starts = [
+            index for index, cell in enumerate(cells)
+            if index == 0 or cell._tc is not cells[index - 1]._tc
+        ]
+        boundaries.append(starts + [len(cells)])
+
+    header, data = boundaries
+    if len(header) != len(data):
+        return None
+
+    for index in range(len(header) - 1):
+        if header[index] >= data[index + 1] or data[index] >= header[index + 1]:
+            return None
+
+    return list(zip(data[1:-1], header[1:-1]))
+
+
 def extract_workload(document, file_name):
     """Прочитать значения нагрузки, сохранив их назначение и координаты."""
     blocks = list(document.iter_inner_content())
@@ -951,25 +975,25 @@ def extract_workload(document, file_name):
                         cell._tc, set()
                     ).add(header_cells[col]._tc)
 
-            if any(
-                len(items) > 1
-                for items in covered_headers.values()
-            ):
-                report(
-                    "manual_review",
-                    "Разметка ячеек строки не совпадает с шапкой нагрузки",
-                    row_number,
-                )
-                continue
+            columns = [(col, col) for col in range(1, len(cells))]
+            if any(len(items) > 1 for items in covered_headers.values()):
+                columns = align_workload_columns(rows[header_index], row)
+                if columns is None:
+                    report(
+                        "manual_review",
+                        "Разметка ячеек строки не совпадает с шапкой нагрузки",
+                        row_number,
+                    )
+                    continue
 
             new_hour_values = [
-                cell.text.strip()
-                for col, cell in enumerate(cells[1:], 1)
-                if cell.text.strip()
-                and cell._tc not in cells_by_id
-                and "трудо" not in normalize(headers[col])
-                and "активн" not in normalize(headers[col])
-                and "интерактивн" not in normalize(headers[col])
+                cells[col].text.strip()
+                for col, header_col in columns
+                if cells[col].text.strip()
+                and cells[col]._tc not in cells_by_id
+                and "трудо" not in normalize(headers[header_col])
+                and "активн" not in normalize(headers[header_col])
+                and "интерактивн" not in normalize(headers[header_col])
             ]
 
             capacity_row = (
@@ -989,9 +1013,10 @@ def extract_workload(document, file_name):
 
             seen_periods.add(cells[0]._tc)
 
-            for col, cell in enumerate(cells[1:], 1):
+            for col, header_col in columns:
+                cell = cells[col]
                 raw = cell.text.strip()
-                label = headers[col]
+                label = headers[header_col]
                 key = normalize(label).replace("\u0451", "е")
 
                 kind = (
@@ -1039,7 +1064,7 @@ def extract_workload(document, file_name):
 
                 item = {
                     "periods": [period],
-                    "group": groups[col],
+                    "group": groups[header_col],
                     "label": label,
                     "kind": kind,
                     "raw": raw,
