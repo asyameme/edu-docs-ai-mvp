@@ -1,6 +1,7 @@
 import unittest
 from collections import Counter
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -168,6 +169,38 @@ class TestRpdParser(unittest.TestCase):
         self.assertNotIn("ПКА-1", codes)
         self.assertIn("УК-1.3", indicators)
         self.assertNotIn("УК-1.4", indicators)
+
+    def test_indicators_are_preserved_when_only_competency_code_is_given(self):
+        name = "РПД_матанализ1.docx"
+        document = Document(ROOT / "tests" / "originals" / name)
+        document.tables[0].cell(1, 0).text = "УК-1"
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / name
+            document.save(path)
+            output = parse_rpd(path, program_id=PROGRAM_ID)
+
+        expected = [
+            item for item in self.outputs[name].indicators
+            if item.competency_code == "УК-1"
+        ]
+        self.assertTrue(expected)
+        self.assertEqual(
+            [item for item in output.indicators if item.competency_code == "УК-1"],
+            expected,
+        )
+        self.assertNotIn("УК-1", {item.code for item in output.competencies})
+        self.assertFalse(any(
+            relation.src_entity == "competency" and relation.src_key == "УК-1"
+            for relation in output.relations
+        ))
+        self.assertTrue(any(
+            issue.category == "manual_review"
+            and "УК-1" in issue.message
+            and issue.source_ref is not None
+            and (issue.source_ref.table, issue.source_ref.row, issue.source_ref.col) == (1, 2, 1)
+            for issue in output.parse_issues
+        ))
 
     def test_missing_hours_are_reported(self):
         output = self.outputs["РПД_языки программирования.docx"]

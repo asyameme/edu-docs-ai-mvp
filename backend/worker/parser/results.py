@@ -674,7 +674,13 @@ def extract_results_into(output, document, file_name, is_heading):
                     source_ref=outcome.source_ref,
                 ))
 
-            if not row_codes or indicator_column is None:
+            if indicator_column is None:
+                continue
+
+            indicator_parent_codes = list(dict.fromkeys(
+                parsed[0] for parsed in parsed_items if parsed is not None
+            ))
+            if not indicator_parent_codes:
                 continue
 
             indicator_ref = SourceRef(
@@ -702,7 +708,7 @@ def extract_results_into(output, document, file_name, is_heading):
 
             indicators, issues = extract_indicators(
                 indicator_cell.text,
-                row_codes[0],
+                indicator_parent_codes[0],
                 indicator_ref,
             )
             output.parse_issues.extend(issues)
@@ -710,7 +716,7 @@ def extract_results_into(output, document, file_name, is_heading):
             for indicator in indicators:
                 if len(parsed_items) > 1:
                     parents = [
-                        code for code in row_codes
+                        code for code in indicator_parent_codes
                         if indicator.code.startswith(code + ".")
                     ]
 
@@ -733,6 +739,9 @@ def extract_results_into(output, document, file_name, is_heading):
                     )
 
                 output.indicators.append(indicator)
+                if indicator.competency_code not in row_codes:
+                    continue
+
                 output.relations.append(Relation(
                     src_entity="competency",
                     src_key=indicator.competency_code,
