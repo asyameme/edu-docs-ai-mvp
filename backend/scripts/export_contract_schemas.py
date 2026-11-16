@@ -5,13 +5,16 @@ from pathlib import Path
 
 from pydantic.json_schema import models_json_schema
 
-from app.review_contract import AnalysisV1, CheckRequest, CheckResult, PrepareRequest
+from app.review_contract import AnalysisV2, CheckRequest, CheckResult, PrepareRequestV2
 
 
 def schemas():
     root = Path(__file__).resolve().parents[1]
     mapping, definitions = models_json_schema(
-        [(model, "validation") for model in (PrepareRequest, AnalysisV1, CheckRequest, CheckResult)]
+        [
+            (model, "validation")
+            for model in (PrepareRequestV2, AnalysisV2, CheckRequest, CheckResult)
+        ]
     )
     result = {
         root / "examples/review/contract.schema.json": {
