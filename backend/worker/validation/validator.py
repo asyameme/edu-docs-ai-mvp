@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import unicodedata
+from difflib import SequenceMatcher
 
 
 if __package__:
@@ -579,6 +580,62 @@ def _program_groups(docs: Sequence[Document]) -> dict[str, list[Document]]:
     return groups
 
 
+def _competency_match_candidates(group: Sequence[Document], *, threshold: float = 0.94) -> tuple[int, list[Finding]]:
+    """Suggest different-code candidates with ALL source evidence, never merge.
+
+    Similarity is a configurable preliminary heuristic, not proof of equivalence.
+    Suppress a pair if the two codes coexist in a single source document.
+    """
+    if not 0.0 <= threshold <= 1.0:
+        raise ValidationError('R-01 match_threshold must be between 0 and 1')
+    rows: dict[str, list[tuple[Document, Mapping[str, Any], str]]] = defaultdict(list)
+    for doc in group:
+        for row in _records(doc, '$.competencies[*]'):
+            code, formulation = _code(row.get('code')), row.get('formulation')
+            if code and isinstance(formulation, str) and formulation.strip():
+                rows[code].append((doc, row, _canonical_formulation(formulation)))
+    findings, checks = [], 0
+    codes = sorted(rows)
+    for i, first in enumerate(codes):
+        for second in codes[i + 1:]:
+            if {id(doc) for doc, _, _ in rows[first]} & {id(doc) for doc, _, _ in rows[second]}:
+                continue
+            evidence_pairs = []
+            matched_variants = []
+            best = 0.0
+            for left_doc, left_row, left_text in rows[first]:
+                for right_doc, right_row, right_text in rows[second]:
+                    if left_doc is right_doc or not left_text or not right_text:
+                        continue
+                    checks += 1
+                    similarity = SequenceMatcher(None, left_text, right_text).ratio()
+                    if similarity < threshold:
+                        continue
+                    best = max(best, similarity)
+                    left_variant = {'code': first, 'formulation': left_row['formulation'],
+                                    'document': left_doc.label, 'source_ref': _source_ref(left_doc, left_row)}
+                    right_variant = {'code': second, 'formulation': right_row['formulation'],
+                                     'document': right_doc.label, 'source_ref': _source_ref(right_doc, right_row)}
+                    evidence_pairs.append({'left': left_variant, 'right': right_variant,
+                                           'similarity': round(similarity, 4)})
+                    for variant in (left_variant, right_variant):
+                        if variant not in matched_variants:
+                            matched_variants.append(variant)
+            if not evidence_pairs:
+                continue
+            matched_variants.sort(key=lambda v: (v['code'], v['document'], str(v['source_ref'])))
+            findings.append(Finding('competency_code_match_candidate', 'needs_review',
+                f'Возможное соответствие разных кодов {first} и {second}; требуется подтверждение пользователя.',
+                {'codes': [first, second], 'program_id': group[0].program_id,
+                 'similarity': round(best, 4), 'match_threshold': threshold,
+                 'match_method': 'normalized_formulation_similarity',
+                 'heuristic_only': True, 'evidence_pairs': evidence_pairs,
+                 'variants': matched_variants,
+                 'source_refs': [v['source_ref'] for v in matched_variants],
+                 'requires_user_confirmation': True, 'auto_merge': False}))
+    return checks, findings
+
+
 def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     """R-01 without matrix: validate codes, links, and matched curriculum coverage.
 
@@ -586,6 +643,9 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
     """
     checks, findings = 0, []
     for pid, group in _program_groups(docs).items():
+        candidate_checks, candidates = _competency_match_candidates(group, threshold=float(rule.get('match_threshold', 0.94)))
+        checks += candidate_checks
+        findings.extend(candidates)
         declared: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         authoritative: set[str] = set()
         for doc in group:
@@ -655,57 +715,61 @@ def _canonical_formulation(value: str) -> str:
 
 def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                              evaluator: CompetencyEvaluator | None = None) -> RuleResult:
-    """R-07: canonical reference comparison with optional real semantic judgment.
+    """R-07: compare all formulations of a code as peers, one finding per code.
 
-    Different codes are never treated as equivalent. Without a semantic model,
-    a nontrivial text difference is marked for manual review, never passed.
+    All cross-document pairs are evaluated; a CKMV/characteristic formulation is
+    never authoritative. Grouping variants avoids contradictory pairwise choices.
     """
     checks, findings = 0, []
-    for pid, group in _program_groups(docs).items():
+    for _pid, group in _program_groups(docs).items():
         by_code: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         for doc in group:
-            if doc.role not in {'rpd', 'rpp', 'ckmv', 'characteristic', 'curriculum'}:
+            if doc.role not in {'rpd', 'rpp', 'ckmv', 'characteristic', 'curriculum', 'matrix'}:
                 continue
             for row in _records(doc, '$.competencies[*]'):
                 code = _code(row.get('code'))
                 if code:
                     by_code[code].append((doc, row))
         for code, records in sorted(by_code.items()):
-            # Prefer CKMV as the comparative reference; characteristic is fallback.
-            baseline = next(((d, r) for role in ('ckmv', 'characteristic')
-                             for d, r in records if d.role == role and _code(r.get('formulation'))), None)
-            if baseline is None:
-                # Without an approved catalogue, cross-document text comparisons
-                # must not be presented as normative validity.
+            variants = [{'document': d.label, 'code': code, 'formulation': row.get('formulation'),
+                         'source_ref': _source_ref(d, row)} for d, row in records]
+            comparisons = []
+            differs = False
+            missing = False
+            for i, (left_doc, left_row) in enumerate(records):
+                for j in range(i + 1, len(records)):
+                    right_doc, right_row = records[j]
+                    if left_doc is right_doc:
+                        continue
+                    checks += 1
+                    left, right = left_row.get('formulation'), right_row.get('formulation')
+                    comparison = {'variant_indices': [i, j]}
+                    if not isinstance(left, str) or not left.strip() or not isinstance(right, str) or not right.strip():
+                        missing = True
+                        comparison.update(status='missing', reason='Отсутствует формулировка')
+                    elif _canonical_formulation(left) == _canonical_formulation(right):
+                        comparison.update(status='technically_equivalent', reason='Различия только в оформлении')
+                    else:
+                        differs = True
+                        result = evaluate_competency_pair(code, left, right, evaluator=evaluator,
+                                                          config=rule.get('llm', {}))
+                        comparison.update(status=result['status'], reason=result['reason'])
+                    comparisons.append(comparison)
+            if not missing and not differs:
                 continue
-            bdoc, brow = baseline
-            base_text = brow['formulation']
-            for doc, row in records:
-                if doc is bdoc and row is brow:
-                    continue
-                checks += 1
-                text = row.get('formulation')
-                refs = [_source_ref(bdoc, brow), _source_ref(doc, row)]
-                if not isinstance(text, str) or not text.strip():
-                    findings.append(Finding('competency_formulation_missing', 'needs_review',
-                        f'Нет формулировки компетенции {code} в {doc.label}.',
-                        {'code': code, 'source_refs': refs}))
-                    continue
-                if _canonical_formulation(base_text) == _canonical_formulation(text):
-                    continue
-                outcome = evaluate_competency_pair(code, base_text, text, evaluator=evaluator,
-                                                  config=rule.get('llm', {}))
-                if outcome['status'] == 'equivalent':
-                    continue
-                status = 'failed' if outcome['status'] == 'changed' else 'needs_review'
-                findings.append(Finding('competency_formulation_mismatch' if status == 'failed' else 'competency_formulation_review',
-                    status, f'Формулировка компетенции {code} отличается от источника {bdoc.label}.',
-                    {'code': code, 'reference_text': base_text, 'document_text': text,
-                     'semantic_status': outcome['status'], 'reason': outcome['reason'],
-                     'source_refs': refs}))
+            # One user decision covers every document variant for the given code.
+            findings.append(Finding(
+                'competency_formulation_missing' if missing else 'competency_formulation_review',
+                'needs_review',
+                f'Варианты формулировки компетенции {code} в разных документах требуют выбора пользователя.',
+                {'code': code, 'program_id': group[0].program_id,
+                 'variants': variants, 'comparisons': comparisons,
+                 'source_refs': [v['source_ref'] for v in variants],
+                 'requires_user_confirmation': True,
+                 'auto_select': False}))
     return _result(rule, checks, findings)
 
-  
+
 def _semantic_indicator_consistency(
     rule: Mapping[str, Any],
     docs: Sequence[Document],
