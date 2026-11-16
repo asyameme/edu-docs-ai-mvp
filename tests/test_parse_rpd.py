@@ -35,7 +35,7 @@ class TestRpdParser(unittest.TestCase):
         expected = {
             "РПД_матанализ1.docx": (4, 7, 9, 12, 2, 12),
             "РПД_БД.docx": (5, 12, 31, 8, 2, 0),
-            "РПД_языки программирования.docx": (4, 13, 39, 38, 2, 6),
+            "РПД_языки программирования.docx": (4, 13, 39, 39, 2, 6),
         }
 
         for name, counts in expected.items():
@@ -248,7 +248,7 @@ class TestRpdParser(unittest.TestCase):
             for issue in output.parse_issues
         ))
 
-    def test_missing_hours_are_reported(self):
+    def test_content_keeps_topic_when_hours_cell_is_empty(self):
         output = self.outputs["РПД_языки программирования.docx"]
 
         self.assertTrue(any(
@@ -260,11 +260,39 @@ class TestRpdParser(unittest.TestCase):
             for issue in output.parse_issues
         ))
 
-        self.assertFalse(any(
-            topic.source_ref.table == 4
-            and topic.source_ref.row == 31
-            for topic in output.course_content
-        ))
+        topic, = [
+            item for item in output.course_content
+            if item.source_ref.table == 4 and item.source_ref.row == 31
+        ]
+        self.assertEqual(topic.topic, "Основные оптимизации, применяемые компилятором")
+        self.assertEqual(topic.activity, "по методическим материалам")
+        self.assertIsNone(topic.hours)
+        self.assertEqual(topic.source_ref.col, 2)
+
+    def test_content_distinguishes_dashes_from_zero_and_invalid_hours(self):
+        document = Document()
+        document.add_paragraph("2.2. Структура и содержание учебных занятий")
+        rows = (
+            ("Тема", "Вид занятий", "Количество часов"),
+            ("Кинематика", "лекции", "-"),
+            ("Динамика", "лекции", "\u2014"),
+            ("Статика", "лекции", "0"),
+            ("Термодинамика", "лекции", "уточнить"),
+        )
+        table = document.add_table(rows=len(rows), cols=3)
+        for row, values in zip(table.rows, rows, strict=True):
+            for cell, value in zip(row.cells, values, strict=True):
+                cell.text = value
+
+        topics, issues = extract_course_content(document, "physics.docx")
+        self.assertEqual(
+            [(topic.topic, topic.hours, topic.source_ref.row) for topic in topics],
+            [("Кинематика", None, 2), ("Динамика", None, 3), ("Статика", 0, 4)],
+        )
+        self.assertEqual(
+            [(issue.category, issue.source_ref.row, issue.source_ref.col) for issue in issues],
+            [("empty_cell", 2, 3), ("empty_cell", 3, 3), ("unexpected_format", 5, 3)],
+        )
 
     def test_relations_have_existing_entities(self):
         for name, output in self.outputs.items():

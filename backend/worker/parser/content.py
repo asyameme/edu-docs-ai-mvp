@@ -656,8 +656,8 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
 
             missing = [
                 field
-                for field, value in values.items()
-                if not value
+                for field in ("topic", "activity")
+                if not values[field]
             ]
 
             if missing:
@@ -675,16 +675,26 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
             hours = None
             if hour_cell is not None:
                 raw_hours = hour_cell.text
-                try:
-                    hours = parse_topic_hours(raw_hours)
-                except ValueError:
+                hours_text = values["hours"]
+                hours_ref = row_ref.model_copy(update={"col": columns["hours"] + 1})
+                if not hours_text or re.fullmatch(r"[-\u2010-\u2015\u2212]", hours_text):
+                    reason = f"в ячейке стоит {hours_text!r}" if hours_text else "ячейка пуста"
                     report(
-                        "unexpected_format",
-                        f"не удалось прочитать часы {raw_hours!r}; тема {values['topic']!r}, "
-                        f"вид занятия {values['activity']!r}",
-                        row_ref.model_copy(update={"col": columns["hours"] + 1}),
+                        "empty_cell",
+                        f"часы не указаны ({reason}). Тема и вид занятия сохранены",
+                        hours_ref,
                     )
-                    continue
+                else:
+                    try:
+                        hours = parse_topic_hours(raw_hours)
+                    except ValueError:
+                        report(
+                            "unexpected_format",
+                            f"не удалось прочитать часы {raw_hours!r}; тема {values['topic']!r}, "
+                            f"вид занятия {values['activity']!r}",
+                            hours_ref,
+                        )
+                        continue
 
             source_column = "hours" if isinstance(hours, AcademicHoursRange) else "topic"
             topics.append(CourseTopic(
