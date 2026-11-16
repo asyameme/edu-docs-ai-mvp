@@ -2,10 +2,19 @@
 # YAML задаёт метаданные и параметры; каждый type должен иметь обработчик в коде.
 # Правила взяты из реестра issue #6; этот файл сам по себе их не исполняет.
 
-schema_version: 1
+schema_version: 2
+
+# До графа правила проверяют набор распарсенных JSON. После решений пользователя
+# та же логика запускается на проекции проверяемой версии графа.
+phases:
+  document_reconciliation:
+    input: parsed_documents
+  graph_validation:
+    input: graph_projection
 
 rules:
   - id: "R-03"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Внутренняя сумма часов"
     type: "sum_components_equals_total"
     status: "draft"
@@ -37,6 +46,7 @@ rules:
       сверки с остальными шаблонами документов перед включением правила.
 
   - id: "R-05"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ между РПД и учебным планом"
     type: "compare_fields_across_documents"
     status: "draft"
@@ -67,6 +77,7 @@ rules:
       внутри РПД и сумм по семестрам РПП в этот черновик не входят.
 
   - id: "R-01-partial"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сверка связей дисциплины с компетенциями между РПД и учебным планом"
     type: "compare_relation_sets"
     status: "draft"
@@ -109,6 +120,7 @@ rules:
       Это не полная проверка R-01 по матрице, ЦКМВ и всем документам программы.
 
   - id: "R-07-partial"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сравнение формулировок компетенций между РПД и учебным планом"
     type: "compare_values_by_key"
     status: "draft"
@@ -141,6 +153,7 @@ rules:
       полная проверка требует ЦКМВ или утверждённого каталога компетенций.
 
   - id: "R-08-local-reference"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Ссылка индикатора на существующую компетенцию внутри РПД"
     type: "reference_exists"
     status: "draft"
@@ -163,6 +176,7 @@ rules:
       формулировок и кодов индикаторов относительно ЦКМВ.
 
   - id: "R-11"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая связь результатов обучения с содержанием и оцениванием в РПД"
     type: "semantic_rpd_alignment"
     status: "draft"
@@ -198,6 +212,7 @@ rules:
       VALIDATION_LLM_MODEL и VALIDATION_LLM_API_KEY; VALIDATION_LLM_API_BASE необязателен.
 
   - id: "R-06"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Поиск дубликатов внутри списков сущностей"
     type: "unique_by_fields"
     status: "draft"
