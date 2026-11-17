@@ -809,6 +809,17 @@
       "title": "Semester Workload",
       "type": "array"
     },
+    "curriculum_workload_reference": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "document_sections": {
       "items": {
         "$ref": "#/$defs/DocumentSection"

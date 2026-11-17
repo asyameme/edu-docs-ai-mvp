@@ -154,7 +154,15 @@ class ImportActivities:
                         "message": item["error_message"],
                     }
                 )
-        status = "failed" if not successful else ("partial" if issues else "completed")
+        has_incomplete_files = len(successful) != len(job["files"])
+        has_parse_errors = any(issue.get("severity") == "error" for issue in issues)
+        status = (
+            "failed"
+            if not successful
+            else "partial"
+            if has_incomplete_files or has_parse_errors
+            else "completed"
+        )
         self.repo.finish(
             UUID(job_id),
             request["attempt"],

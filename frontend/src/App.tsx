@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ImportProgress } from "./ImportProgress";
 import { GenerationScreen } from "./GenerationScreen";
+import { groupImportIssues } from "./importIssues";
 import { useImportJob } from "./useImportJob";
 import type { ImportJob, ReviewDetails, ReviewIssue } from "./api";
 
@@ -31,6 +32,7 @@ type ValidationIssue = {
   title: string;
   source: string;
   ruleId?: string;
+  count?: number;
 };
 
 type ParsedProgram = {
@@ -261,11 +263,19 @@ function formatCountWithWords(count: number, one: string, few: string, many: str
 }
 
 function formatIssueSummary(issues: ValidationIssue[]) {
-  const errors = issues.filter((issue) => issue.severity === "error").length;
-  const warnings = issues.filter((issue) => issue.severity === "warning").length;
+  const counts = issues.reduce(
+    (total, issue) => {
+      total[issue.severity] += issue.count ?? 1;
+      return total;
+    },
+    { error: 0, warning: 0, info: 0 },
+  );
   return [
-    errors > 0 ? formatCountWithWords(errors, "ошибка", "ошибки", "ошибок") : "",
-    warnings > 0 ? formatCountWithWords(warnings, "предупреждение", "предупреждения", "предупреждений") : "",
+    counts.error > 0 ? formatCountWithWords(counts.error, "ошибка", "ошибки", "ошибок") : "",
+    counts.warning > 0 ? formatCountWithWords(counts.warning, "предупреждение", "предупреждения", "предупреждений") : "",
+    counts.info > 0
+      ? formatCountWithWords(counts.info, "информационное замечание", "информационных замечания", "информационных замечаний")
+      : "",
   ].filter(Boolean).join(" · ") || "Проверка завершена";
 }
 
@@ -367,12 +377,13 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       ruleId: `${issue.rule_code} · ${issue.rule_revision}`,
     };
   });
-  const importIssues = (job?.issues ?? []).map((issue, index) => ({
-    id: `import-${index}-${issue.category}`,
-    severity: issue.severity === "error" ? "error" as const : "warning" as const,
+  const importIssues = (job ? groupImportIssues(job) : []).map((issue) => ({
+    id: `import-${issue.id}`,
+    severity: issue.severity,
     title: issue.message,
-    source: "Разбор ZIP-пакета",
+    source: issue.documentName ?? "Разбор ZIP-пакета",
     ruleId: issue.category,
+    count: issue.count,
   }));
 
   return {
@@ -695,11 +706,7 @@ function App() {
   const isGenerationPreview = previewMode === "generation";
   const hasDemoPreview = isChatPreview || isReconciliationPreview || isGenerationPreview;
   const processing = useImportJob();
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const closeSidebarButtonRef = useRef<HTMLButtonElement>(null);
-  const openSidebarButtonRef = useRef<HTMLButtonElement>(null);
-  const previousSidebarOpenRef = useRef(isSidebarOpen);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState("");
@@ -745,6 +752,7 @@ function App() {
   const visibleIssues = (parsedProgram?.issues ?? []).filter((issue) =>
     findingFilter === "all" || issueRuleGroup(issue.ruleId) === findingFilter,
   );
+  const visibleIssueCount = visibleIssues.reduce((count, issue) => count + (issue.count ?? 1), 0);
   const hasUploadedFiles = documents.length > 0 || processing.job !== null;
   const uploadNotice = processing.notice || notice;
   const checkWarnings = processing.checkJob?.status === "completed"
@@ -767,13 +775,6 @@ function App() {
   useEffect(() => {
     setAcceptedWarningIds([]);
   }, [processing.checkJob?.id]);
-
-  useEffect(() => {
-    if (previousSidebarOpenRef.current === isSidebarOpen) return;
-    previousSidebarOpenRef.current = isSidebarOpen;
-    if (isSidebarOpen) closeSidebarButtonRef.current?.focus();
-    else openSidebarButtonRef.current?.focus();
-  }, [isSidebarOpen]);
 
   async function addFiles(files: FileList | File[]) {
     if (processing.busy) return;
@@ -900,27 +901,8 @@ function App() {
   return (
     <div className="app-shell">
       <div className="workspace">
-        <aside
-          className={"sidebar" + (isSidebarOpen ? "" : " sidebar--closed")}
-          aria-label="Разделы приложения"
-          aria-hidden={!isSidebarOpen}
-          inert={!isSidebarOpen}
-        >
-          <div className="sidebar-heading">
-            <span>Рабочее пространство</span>
-            <button
-              ref={closeSidebarButtonRef}
-              className="sidebar-toggle"
-              type="button"
-              aria-label="Свернуть боковую панель"
-              aria-expanded={isSidebarOpen}
-              title="Свернуть боковую панель"
-              onClick={() => setIsSidebarOpen(false)}
-            >
-              ‹
-            </button>
-          </div>
-          <nav className="side-nav">
+        <main className="main-content">
+          <nav className="section-navigation" aria-label="Разделы приложения">
             {navigation.map((item) => (
               <button
                 type="button"
@@ -933,37 +915,6 @@ function App() {
               </button>
             ))}
           </nav>
-        </aside>
-
-        <main className="main-content">
-          {!isSidebarOpen && (
-            <div className="collapsed-navigation">
-              <button
-                ref={openSidebarButtonRef}
-                className="sidebar-toggle sidebar-toggle--open"
-                type="button"
-                aria-label="Открыть боковую панель"
-                aria-expanded={isSidebarOpen}
-                title="Открыть боковую панель"
-                onClick={() => setIsSidebarOpen(true)}
-              >
-                ☰
-              </button>
-              <nav className="side-nav side-nav--horizontal" aria-label="Разделы приложения">
-                {navigation.map((item) => (
-                  <button
-                    type="button"
-                    key={item}
-                    className={"nav-item" + (item === activeScreen ? " is-active" : "")}
-                    aria-current={item === activeScreen ? "page" : undefined}
-                    onClick={() => setActiveScreen(item)}
-                  >
-                    {item}
-                  </button>
-                ))}
-              </nav>
-            </div>
-          )}
           <div className="content-column">
             {!isDemoMode && processing.program && (
               <div className="program-signature" role="group" aria-label="Подпись программы">
@@ -1293,7 +1244,7 @@ function App() {
                     </div>
 
                     <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" ? true : undefined}>
-                      <summary>Замечания проверки · {visibleIssues.length}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
+                      <summary>Замечания проверки · {visibleIssueCount}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
                       <ul className="issue-list">
                         {visibleIssues.length === 0 && <li className="competency-empty-issues">Для выбранного правила замечаний нет.</li>}
                         {visibleIssues.map((issue) => (
@@ -1301,7 +1252,7 @@ function App() {
                             <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
                             <span className="issue-copy">
                               <strong>{issue.title}</strong>
-                              <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}</span>
+                              <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}{issue.count && issue.count > 1 ? ` · ×${issue.count}` : ""}</span>
                             </span>
                             <span className={`severity-label severity-label--${issue.severity}`}>
                               {issue.severity === "error" ? "Ошибка" : issue.severity === "warning" ? "Предупреждение" : "Информация"}

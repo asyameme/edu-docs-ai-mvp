@@ -7,6 +7,15 @@ export type ImportFile = {
   error_message: string | null;
 };
 
+export type ImportIssueSeverity = "error" | "warning" | "info";
+
+export type ImportIssue = {
+  category: string;
+  severity: ImportIssueSeverity;
+  message: string;
+  document_id?: string;
+};
+
 export type ImportJob = {
   id: string;
   program_id: string;
@@ -14,7 +23,7 @@ export type ImportJob = {
   status: "pending" | "processing" | "completed" | "partial" | "failed";
   progress: number;
   files: ImportFile[];
-  issues: { category: string; severity: string; message: string }[];
+  issues: ImportIssue[];
 };
 
 export type ProgramRead = {
