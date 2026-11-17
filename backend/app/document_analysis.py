@@ -77,11 +77,12 @@ def _sources(finding, documents):
         ]
         if variant is not None:
             code = variant.get("code")
-            formulation = variant.get("formulation")
             matches = [
                 (path, row) for path, row in matches
-                if (code is None or row.get("code") == code)
-                and (formulation is None or row.get("formulation") == formulation)
+                if (code is None or isinstance(row.get("code"), str)
+                    and row["code"].strip() == code)
+                and ("formulation" not in variant
+                     or row.get("formulation") == variant["formulation"])
             ]
         sources.append((str(item["document_id"]), matches))
     return sources, limitations

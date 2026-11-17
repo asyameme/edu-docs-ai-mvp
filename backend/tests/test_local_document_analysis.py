@@ -120,6 +120,37 @@ def test_pregraph_analysis_runs_all_rules_without_changing_profile():
     assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
 
 
+@pytest.mark.parametrize("shared_locator", [False, True])
+def test_r07_maps_normalized_codes_and_null_formulations_to_exact_rows(shared_locator):
+    documents = []
+    for index, kind in enumerate(("RPD", "RPP")):
+        parsed = payload(kind)
+        parsed["competencies"] = [{
+            "code": " УК-1 " if not shared_locator else "УК-1",
+            "formulation": None if shared_locator and index == 0 else "Первый текст",
+            "source_ref": {"file": f"{index}.docx", "paragraph_index": 1},
+        }]
+        if shared_locator and index == 0:
+            other = deepcopy(parsed["competencies"][0])
+            other["formulation"] = "Первый текст"
+            parsed["competencies"].append(other)
+        if not shared_locator and index == 1:
+            parsed["competencies"][0]["formulation"] = None
+        documents.append({"document_id": str(uuid4()), "parsed": parsed})
+    config = load_rules()
+    config["rules"] = [rule for rule in config["rules"] if rule["id"] == "R-07"]
+
+    result = analyze_documents(documents, uuid4(), config=config)
+
+    issue = result["issues"][0]
+    assert issue["requires_decision"] is True
+    assert len(issue["variants"]) == 1
+    original = {item["document_id"]: item["parsed"] for item in documents}
+    resolved = apply_document_mutations(original, issue["variants"][0]["changes"])
+    assert all(row["formulation"] == "Первый текст"
+               for parsed in resolved.values() for row in parsed["competencies"])
+
+
 def test_graph_check_runs_all_rules_and_keeps_drafts_out_of_required_profile():
     documents = package()
     config = load_rules()

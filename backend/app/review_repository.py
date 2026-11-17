@@ -524,6 +524,13 @@ class ReviewRepository:
             if review["parameters"].get("schema_version") == 2:
                 if issue["job_id"] != review_id:
                     raise DomainError(409, "Предграфовое решение должно относиться к AnalysisV2")
+                if any(
+                    change.get("op") != "set_document_value"
+                    for decision in snapshot.review.decisions for change in decision.changes
+                ):
+                    raise DomainError(
+                        409, "После правок графа нельзя пересобирать его предграфовым выбором"
+                    )
                 documents = review["parameters"]["input"]["documents"]
                 original = {item["document_id"]: item["parsed"] for item in documents}
                 choices = [

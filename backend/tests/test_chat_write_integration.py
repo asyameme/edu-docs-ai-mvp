@@ -50,7 +50,7 @@ def test_two_accepted_chat_proposals_check_confirm_and_docx(final):
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         original = make_docx('<w:p><w:r><w:t>Тестовая дисциплина: 108 часов</w:t></w:r></w:p>')
         root, _, review = prepare(http, "РПД/РПД_матанализ1.docx", content=original)
-        version, _ = choose(http, root, review)
+        version, issue = choose(http, root, review)
         session = post(http, root + "/chat/sessions", {"version_id": version["id"]}, 201)
         program = root.split("/")[-1]
         entity = version["snapshot"]["entities"][0]
@@ -76,6 +76,12 @@ def test_two_accepted_chat_proposals_check_confirm_and_docx(final):
             assert checked["status"] == "completed", checked
             details = http.get(root + f'/versions/{version["id"]}/review').json()
             assert details["check_report"]["coverage"][0]["reason"] == f"Получено часов: {new}"
+        rejected = http.post(root + f'/reviews/{review["id"]}/decisions', json={
+            "expected_version_id": version["id"], "conflict_id": issue["id"],
+            "variant_id": issue["variants"][0]["id"], "signature": "Тестовый пользователь",
+        }, headers={"Idempotency-Key": uuid4().hex})
+        assert rejected.status_code == 409, rejected.text
+        assert http.get(root).json()["current_version_id"] == version["id"]
         confirmed = post(http, root + f'/reviews/{review["id"]}/confirm', {
             "expected_version_id": version["id"], "signature": "Тестовый пользователь",
             "check_job_id": accepted["check_job_id"],
