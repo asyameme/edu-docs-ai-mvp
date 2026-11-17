@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import unicodedata
 from collections import defaultdict
@@ -31,6 +32,8 @@ DEFAULT_RULES = Path(__file__).with_name("rules.yaml")
 DOC_TYPES = {"rpd", "rpp", "curriculum", "matrix", "characteristic", "ckmv"}
 ValidationPhase = Literal["document_reconciliation", "graph_validation"]
 VALIDATION_PHASES = {"document_reconciliation", "graph_validation"}
+RULE_STATUSES = {"draft", "ready", "ready_with_semantic_fallback"}
+RUNNABLE_RULE_STATUSES = {"ready", "ready_with_semantic_fallback"}
 
 
 class ValidationError(Exception):
@@ -124,6 +127,30 @@ def _validate_rules_config(config: Any) -> dict[str, Any]:
     for rule in config["rules"]:
         if not isinstance(rule, dict):
             raise ValidationError("Каждое правило в rules.yaml должно быть объектом")
+        rule_status = rule.get("status")
+        if not isinstance(rule_status, str) or rule_status not in RULE_STATUSES:
+            raise ValidationError(
+                f"Правило {rule.get('id', '<без id>')} должно содержать один из статусов: "
+                f"{', '.join(sorted(RULE_STATUSES))}"
+            )
+        if rule.get("type") == "credit_hours" and rule_status in RUNNABLE_RULE_STATUSES:
+            inputs = rule.get("inputs")
+            hours_per_credit_unit = (
+                inputs.get("hours_per_credit_unit") if isinstance(inputs, dict) else None
+            )
+            if (
+                isinstance(hours_per_credit_unit, bool)
+                or not isinstance(hours_per_credit_unit, (int, float))
+                or (
+                    isinstance(hours_per_credit_unit, float)
+                    and not math.isfinite(hours_per_credit_unit)
+                )
+                or hours_per_credit_unit <= 0
+            ):
+                raise ValidationError(
+                    f"Для активного правила {rule.get('id', '<без id>')} "
+                    "задайте положительное конечное значение inputs.hours_per_credit_unit"
+                )
         rule_phases = rule.get("phases")
         if (
             not isinstance(rule_phases, list)
@@ -424,6 +451,7 @@ def _hours_against_curriculum(rule: Mapping[str, Any], docs: Sequence[Document])
 
 def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     """R-04: проверить трудоёмкость там, где одни и те же часы и ЗЕТ сопоставимы."""
+    hours_per_credit_unit = rule["inputs"]["hours_per_credit_unit"]
     checks, findings = 0, []
     for doc in docs:
         if doc.role == "curriculum":
@@ -437,8 +465,8 @@ def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResu
             if not isinstance(hours, int) or not isinstance(units, int) or isinstance(hours,bool) or isinstance(units,bool):
                 continue
             checks += 1
-            if hours != units * 36:
-                findings.append(Finding("credit_hours_mismatch", "failed", f"{doc.label}: {hours} ч не соответствуют {units} ЗЕТ (36 ч/ЗЕТ).", {"credit_units":units,"hours_total":hours,"source_refs": [_source_ref(doc,row)]}))
+            if hours != units * hours_per_credit_unit:
+                findings.append(Finding("credit_hours_mismatch", "failed", f"{doc.label}: {hours} ч не соответствуют {units} ЗЕТ ({hours_per_credit_unit:g} ч/ЗЕТ).", {"credit_units":units,"hours_total":hours,"hours_per_credit_unit":hours_per_credit_unit,"source_refs": [_source_ref(doc,row)]}))
     return _result(rule, checks, findings)
 
 
@@ -921,6 +949,8 @@ def run_validation(
     docs = _documents(documents)
     results = []
     for rule in config.get("rules", []):
+        if rule["status"] not in RUNNABLE_RULE_STATUSES:
+            continue
         if phase not in rule.get("phases", []):
             continue
         handler = HANDLERS.get(rule.get("type"))
