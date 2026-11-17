@@ -1,6 +1,5 @@
 """Реальные PostgreSQL и HTTP: задача генерации, ZIP и повторный запрос."""
 
-import hashlib
 import io
 import json
 import os
@@ -12,7 +11,7 @@ from zipfile import ZipFile
 import pytest
 from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
-from test_generation_docx_patch import document_text, make_docx
+from test_generation_docx_patch import make_docx
 
 from app.domain import SnapshotV2
 from app.generation_activities import GenerationActivities
@@ -29,7 +28,7 @@ pytestmark = [
 ]
 
 
-def test_confirmed_version_generates_durable_zip_and_rejects_duplicate_key():
+def test_unverified_confirmation_cannot_start_generation():
     content = make_docx("<w:p><w:r><w:t>Алгебра 72</w:t></w:r></w:p>")
     with TestClient(app) as client:
         program = client.post("/api/v1/programs", json={"name": "Генерация"}).json()
@@ -146,48 +145,8 @@ def test_confirmed_version_generates_durable_zip_and_rejects_duplicate_key():
         body = {"version_id": str(version["id"])}
         key = uuid4().hex
         created = client.post(root, json=body, headers={"Idempotency-Key": key})
-        assert created.status_code == 202, created.text
-        job_id = created.json()["id"]
-        assert client.post(root, json=body, headers={"Idempotency-Key": key}).json()["id"] == job_id
-        if os.getenv("GENERATION_WORKER_TESTS") != "1":
-            assert client.get(f"{root}/{job_id}/download").status_code == 409
-        activity = GenerationActivities(app.state.resources.postgres)
-        if os.getenv("GENERATION_WORKER_TESTS") == "1":
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                if client.get(f"{root}/{job_id}").json()["status"] == "completed":
-                    break
-                time.sleep(0.2)
-            else:
-                pytest.fail("Воркер не завершил генерацию")
-        else:
-            assert activity.build({"job_id": job_id}) == "completed"
-        assert activity.build({"job_id": job_id}) == "completed"
-        ready = client.get(f"{root}/{job_id}").json()
-        assert ready["status"] == "completed"
-        downloaded = client.get(f"{root}/{job_id}/download")
-        assert downloaded.status_code == 200
-        assert downloaded.headers["content-type"] == "application/zip"
-        assert hashlib.sha256(downloaded.content).hexdigest() == ready["sha256"]
-        with ZipFile(io.BytesIO(downloaded.content)) as archive:
-            assert set(archive.namelist()) == {
-                "РПД_Алгебра.docx",
-                "Матрица компетенций.xlsx",
-            }
-            generated_docx = archive.read("РПД_Алгебра.docx")
-            assert generated_docx != content
-            assert "Алгебра 108" in document_text(generated_docx)
-            codes, rows = read_matrix_xlsx(archive.read("Матрица компетенций.xlsx"))
-            assert codes == ("УК-1",)
-            assert rows == [[1]]
-        assert (
-            client.post(
-                root,
-                json={"version_id": program["current_version_id"]},
-                headers={"Idempotency-Key": key},
-            ).status_code
-            == 409
-        )
+        assert created.status_code == 409, created.text
+        assert "проверенная" in created.json()["detail"]
 
 
 @pytest.mark.skipif(

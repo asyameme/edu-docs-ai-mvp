@@ -50,6 +50,7 @@ def _model_evaluator(payload: Mapping[str, Any], config: Mapping[str, Any]) -> M
         'model': model,
         'api_key': key,
         'temperature': 0,
+        'num_retries': 0,
         'timeout': timeout,
         'max_tokens': max_tokens,
         'messages': [

@@ -3,7 +3,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -13,6 +13,9 @@ from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.graph_storage import load_graph
 from app.repository import Repository
+from app.review_contract import CheckResult
+from app.review_logic import content_hash, digest
+from app.review_projection import project_legacy_review_result
 
 
 def _source_files(cur, graph_id):
@@ -41,6 +44,58 @@ def _source_files(cur, graph_id):
 class GenerationRepository:
     def __init__(self, pool):
         self.pool = pool
+
+    @staticmethod
+    def _confirmed_snapshot(cur, program_id, version_id, graph_state_id, review):
+        if graph_state_id is None or (review or {}).get("graph_ready") is False:
+            raise DomainError(409, "Сначала соберите граф из выбранных значений документов")
+        snapshot = SnapshotV2.model_validate(load_graph(cur, graph_state_id, review))
+        confirmation = snapshot.review.confirmation if snapshot.review else None
+        if confirmation is None or content_hash(snapshot) != confirmation.content_hash:
+            raise DomainError(409, "Для генерации нужна проверенная и подтверждённая версия")
+        checked = cur.execute(
+            "SELECT input_version_id,parameters,report FROM processing_jobs "
+            "WHERE id=%s AND program_id=%s AND type='validate'",
+            (confirmation.check_job_id, program_id),
+        ).fetchone()
+        if (
+            checked is None
+            or checked["input_version_id"] != confirmation.checked_version_id
+            or checked["parameters"].get("review_id") != str(snapshot.review.review_id)
+            or checked["parameters"].get("purpose") != "check"
+            or checked["report"].get("outcome") != "completed"
+            or checked["parameters"].get("content_hash") != confirmation.content_hash
+        ):
+            raise DomainError(409, "Подтверждение не связано с завершённой проверкой версии")
+        checked_version = cur.execute(
+            "SELECT graph_snapshot(graph_state_id,review) AS snapshot FROM program_versions "
+            "WHERE program_id=%s AND id=%s",
+            (program_id, confirmation.checked_version_id),
+        ).fetchone()
+        if (
+            checked_version is None
+            or content_hash(checked_version["snapshot"]) != confirmation.content_hash
+        ):
+            raise DomainError(409, "Проверенный граф отличается от подтверждённого")
+        result = CheckResult.model_validate(
+            project_legacy_review_result(checked["report"]["result"])
+        )
+        if digest(result.ruleset.model_dump(mode="json")) != digest(
+            checked["parameters"]["ruleset"]
+        ):
+            raise DomainError(409, "Набор правил проверенной версии изменился")
+        coverage = {item.rule_code: item.status for item in result.coverage}
+        if any(
+            coverage.get(code) not in {"passed", "failed"}
+            for code in result.ruleset.required_rules
+        ):
+            raise DomainError(409, "Есть обязательные проверки без окончательного результата")
+        if any(item.requires_decision or item.severity == "blocking" for item in result.issues):
+            raise DomainError(409, "В проверке остались нерешённые замечания")
+        warnings = {item.id for item in result.issues if item.severity == "warning"}
+        if warnings != set(confirmation.accepted_warning_ids):
+            raise DomainError(409, "Принятые предупреждения не совпадают с проверкой")
+        return snapshot
 
     def create(self, program_id, version_id, import_job_id, key):
         fingerprint = hashlib.sha256(
@@ -88,31 +143,14 @@ class GenerationRepository:
                     ).fetchone()
                 )
                 graph_id = version["graph_state_id"]
-                snapshot = SnapshotV2.model_validate(load_graph(cur, graph_id, version["review"]))
-                if not snapshot.review or not snapshot.review.confirmation:
-                    raise DomainError(409, "Для генерации версии нужно подтверждение")
+                snapshot = self._confirmed_snapshot(
+                    cur, program_id, version_id, graph_id, version["review"]
+                )
                 input_version_id = version_id
             else:
-                imported = Repository.require(
-                    cur.execute(
-                        "SELECT input_version_id,output_graph_state_id,report,parameters FROM "
-                        "processing_jobs "
-                        "WHERE program_id=%s AND id=%s AND type='import'",
-                        (program_id, import_job_id),
-                    ).fetchone()
+                raise DomainError(
+                    409, "Генерация разрешена только для проверенной подтверждённой версии"
                 )
-                graph_id = imported["output_graph_state_id"]
-                if not graph_id or imported["report"].get("outcome") not in {
-                    "completed",
-                    "partial",
-                }:
-                    raise DomainError(409, "Импорт ещё не завершён")
-                snapshot = SnapshotV2.model_validate(load_graph(cur, graph_id))
-                if set(snapshot.document_ids) != {
-                    UUID(d["document_id"]) for d in imported["parameters"]["documents"]
-                }:
-                    raise DomainError(409, "Результат импорта не совпадает с документами")
-                input_version_id = imported["input_version_id"]
             if not snapshot.document_ids:
                 raise DomainError(409, "Нет исходных документов для генерации")
             parameters = {
@@ -198,6 +236,13 @@ class GenerationRepository:
                 )["review"]
             snapshot = SnapshotV2.model_validate(
                 load_graph(cur, job["input_graph_state_id"], review)
+            )
+            self._confirmed_snapshot(
+                cur,
+                job["program_id"],
+                job["input_version_id"],
+                job["input_graph_state_id"],
+                review,
             )
             originals = cur.execute(
                 """SELECT id,original_name,format,content,sha256 FROM source_documents

@@ -59,6 +59,8 @@ def insert_version(
             "SELECT graph_state_id FROM program_versions WHERE program_id=%s AND id=%s",
             (program_id, restore_id),
         ).fetchone()["graph_state_id"]
+    elif (state.get("review") or {}).get("graph_ready") is False:
+        graph = None
     else:
         graph = save_graph(cur, program_id, snapshot)
     row = cur.execute(

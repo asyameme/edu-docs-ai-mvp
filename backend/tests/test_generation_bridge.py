@@ -96,3 +96,90 @@ def test_unsupported_structural_change_is_not_silently_ignored():
     )
     with pytest.raises(GenerationBridgeError, match="структурные изменения"):
         approved_changes(snapshot)
+
+
+@pytest.mark.parametrize(("final_value", "expected"), [(180, 180), (108, None)])
+def test_generation_uses_cumulative_final_graph_relative_to_original_observation(
+    final_value, expected
+):
+    entity_id, ref_id, doc_id = uuid4(), uuid4(), uuid4()
+    check_id, review_id = uuid4(), uuid4()
+    snapshot = SnapshotV2.model_validate(
+        {
+            "document_ids": [doc_id],
+            "entities": [
+                {
+                    "id": entity_id,
+                    "kind": "discipline",
+                    "attributes": {"name": "Алгебра", "hours_total": final_value},
+                    "source_ref_ids": [ref_id],
+                }
+            ],
+            "source_refs": [
+                {"id": ref_id, "document_id": doc_id, "locator": '{"paragraph_index":1}'}
+            ],
+            "source_links": [
+                {
+                    "id": uuid4(),
+                    "target_kind": "entity",
+                    "target_id": entity_id,
+                    "field_path": "/attributes/hours_total",
+                    "source_ref_id": ref_id,
+                    "observed_value": {"value": 108, "unit": "hour"},
+                }
+            ],
+            "review": {
+                "review_id": review_id,
+                "import_job_id": uuid4(),
+                "analysis_version_id": uuid4(),
+                "graph_ready": True,
+                "decisions": [
+                    {
+                        "conflict_id": uuid4(),
+                        "variant_id": uuid4(),
+                        "check_job_id": check_id,
+                        "changes": [
+                            {
+                                "op": "set_document_value",
+                                "document_id": str(doc_id),
+                                "field_path": "/disciplines/0/hours_total",
+                                "expected_old_value": 108,
+                                "value": 144,
+                            }
+                        ],
+                        "decided_at": "2026-11-10T00:00:00Z",
+                    },
+                    {
+                        "conflict_id": uuid4(),
+                        "variant_id": uuid4(),
+                        "check_job_id": check_id,
+                        "changes": [
+                            {
+                                "op": "set_attribute",
+                                "target_kind": "entity",
+                                "target_id": str(entity_id),
+                                "field_path": "/attributes/hours_total",
+                                "value": final_value,
+                            }
+                        ],
+                        "decided_at": "2026-11-10T00:01:00Z",
+                    },
+                ],
+                "confirmation": {
+                    "checked_version_id": uuid4(),
+                    "check_job_id": check_id,
+                    "content_hash": "0" * 64,
+                    "accepted_warning_ids": [],
+                    "confirmed_at": "2026-11-10T00:02:00Z",
+                },
+            },
+        }
+    )
+
+    changes = approved_changes(snapshot)
+
+    if expected is None:
+        assert changes == []
+    else:
+        assert len(changes) == 1
+        assert changes[0].new_value == expected

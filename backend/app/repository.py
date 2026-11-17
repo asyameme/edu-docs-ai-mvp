@@ -155,6 +155,15 @@ class Repository:
                 return version_dto(previous)
             if current != expected_version_id:
                 raise DomainError(409, "Current version changed; reload before saving")
+            current_snapshot = self.require(
+                cursor.execute(
+                    "SELECT graph_snapshot(graph_state_id,review) AS snapshot FROM "
+                    "program_versions WHERE program_id=%s AND id=%s",
+                    (program_id, current),
+                ).fetchone()
+            )["snapshot"]
+            if (current_snapshot.get("review") or {}).get("graph_ready") is False:
+                raise DomainError(409, "Нельзя изменять программу до завершения согласования")
             if restore_id:
                 cursor.execute(
                     "SELECT graph_snapshot(graph_state_id,review) AS snapshot FROM "
@@ -162,6 +171,8 @@ class Repository:
                     (program_id, restore_id),
                 )
                 restored = self.require(cursor.fetchone())["snapshot"]
+                if (restored.get("review") or {}).get("graph_ready") is False:
+                    raise DomainError(409, "Нельзя восстановить версию до сборки её графа")
                 from app.review_storage import insert_version
 
                 restored = {**restored, "schema_version": 2, "review": None}

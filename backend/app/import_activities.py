@@ -137,7 +137,13 @@ class ImportActivities:
         }:
             return
         successful = [f for f in job["files"] if f["status"] == "completed"]
-        snapshot, issues = to_snapshot(job["program_id"], job["files"])
+        legacy_snapshot, issues = None, []
+        if job.get("_legacy"):
+            legacy_snapshot, issues = to_snapshot(job["program_id"], job["files"])
+        else:
+            for item in successful:
+                for issue in item["output"].get("parse_issues", []):
+                    issues.append({**issue, "document_id": str(item["document_id"])})
         for item in job["files"]:
             if item["error_code"]:
                 issues.append(
@@ -153,7 +159,7 @@ class ImportActivities:
             UUID(job_id),
             request["attempt"],
             status,
-            snapshot if successful else None,
+            legacy_snapshot if successful else None,
             issues,
         )
 

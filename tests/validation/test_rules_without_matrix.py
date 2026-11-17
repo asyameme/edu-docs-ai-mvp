@@ -10,8 +10,11 @@ def doc(kind, **fields):
 
 
 def rule(rule_id):
-    rules = load_rules()["rules"]
-    return {"rules": [copy.deepcopy(next(r for r in rules if r["id"] == rule_id))]}
+    config = load_rules()
+    selected = copy.deepcopy(next(r for r in config["rules"] if r["id"] == rule_id))
+    # Черновой обработчик включается только в изолированном тесте.
+    selected["status"] = "ready"
+    return {**config, "rules": [selected]}
 
 
 class ValidationWithoutMatrixTests(unittest.TestCase):

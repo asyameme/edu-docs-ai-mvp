@@ -57,11 +57,14 @@ class DocumentBuilder:
         }
         return identity
 
-    def evidence(self, item, target_kind, document_id, ref, attributes):
+    def evidence(self, item, target_kind, document_id, ref, attributes, observed_attributes=None):
         ref_id = self.source(document_id, ref)
         if ref_id not in item["source_ref_ids"]:
             item["source_ref_ids"].append(ref_id)
-        for key, value in attributes.items():
+        observed_attributes = attributes if observed_attributes is None else observed_attributes
+        for key in attributes:
+            if key not in observed_attributes:
+                raise ValueError(f"Исходное наблюдение поля {key} не найдено")
             pointer = "/attributes/" + key.replace("~", "~0").replace("/", "~1")
             identity = self.identity(f"link:{target_kind}:{item['id']}:{pointer}:{ref_id}")
             self.links[identity] = {
@@ -70,7 +73,7 @@ class DocumentBuilder:
                 "target_id": item["id"],
                 "field_path": pointer,
                 "source_ref_id": ref_id,
-                "observed_value": {"value": deepcopy(value)},
+                "observed_value": {"value": deepcopy(observed_attributes[key])},
             }
 
     def register(self, document_id, kind, key, identity):
@@ -81,7 +84,7 @@ class DocumentBuilder:
             if identity not in mapping[index]:
                 mapping[index].append(identity)
 
-    def entity(self, document_id, kind, key, member, *, placeholder=False):
+    def entity(self, document_id, kind, key, member, *, placeholder=False, original_member=None):
         ref = member["source_ref"]
         seed = f"entity:{document_id}:{kind}:{key}"
         if not placeholder:
@@ -100,7 +103,9 @@ class DocumentBuilder:
                 "source_ref_ids": [],
             },
         )
-        self.evidence(item, "entity", document_id, ref, attributes)
+        original_member = member if original_member is None else original_member
+        observed = {k: deepcopy(v) for k, v in original_member.items() if k != "source_ref"}
+        self.evidence(item, "entity", document_id, ref, attributes, observed)
         self.register(document_id, kind, key, identity)
         if kind == "curriculum_item":
             self.register(document_id, kind, f"{key}::semester={attributes['semester']}", identity)
@@ -136,8 +141,11 @@ class DocumentBuilder:
             )
         return None
 
-    def relation(self, document_id, source, target, kind, ref, attributes=None):
+    def relation(
+        self, document_id, source, target, kind, ref, attributes=None, observed_attributes=None
+    ):
         attributes = deepcopy(attributes or {})
+        observed_attributes = attributes if observed_attributes is None else observed_attributes
         kind = "FORMS_COMPETENCY" if kind == "формирует" else kind
         seed = f"relation:{document_id}:{source}:{target}:{kind}:{canonical(ref)}"
         ordinal = self.occurrences[seed]
@@ -150,7 +158,7 @@ class DocumentBuilder:
             "attributes": attributes,
             "source_ref_ids": [],
         }
-        self.evidence(item, "relation", document_id, ref, attributes)
+        self.evidence(item, "relation", document_id, ref, attributes, observed_attributes)
         if not attributes:
             ref_id = self.source(document_id, ref)
             identity = self.identity(f"link:relation:{item['id']}:$:{ref_id}")
@@ -176,6 +184,7 @@ class DocumentBuilder:
         attributes=None,
         *,
         create=False,
+        original_member=None,
     ):
         ref = member["source_ref"]
         source = self.resolve(document_id, source_kind, source_key, ref, create=create)
@@ -191,19 +200,41 @@ class DocumentBuilder:
                 }
             )
             return
-        self.relation(document_id, source, target, relation_type, ref, attributes)
+        observed_attributes = (
+            {k: v for k, v in original_member.items() if k != "source_ref"}
+            if original_member is not None
+            else attributes
+        )
+        self.relation(
+            document_id, source, target, relation_type, ref, attributes, observed_attributes
+        )
 
 
-def to_snapshot_v2(program_id, files):
+def to_snapshot_v2(program_id, files, *, original_files=None):
     builder, parsed_documents, codes = DocumentBuilder(program_id), {}, {}
+    normalized_documents = {}
+    store_selected_json = original_files is None
+    originals = {
+        str(item["document_id"]): parse_output(item.get("output", item.get("parsed"))).model_dump(
+            mode="json", exclude_none=False
+        )
+        for item in (original_files if original_files is not None else files)
+        if item.get("output", item.get("parsed"))
+    }
     for item in files:
-        output = item["output"]
-        if not output:
+        raw_output = item["output"]
+        if not raw_output:
             continue
-        parsed = parse_output(output)
+        parsed = parse_output(raw_output)
+        output = parsed.model_dump(mode="json", exclude_none=False)
         document_id = str(item["document_id"])
+        original = originals.get(document_id)
+        if original is None:
+            raise ValueError("Исходный JSON документа отсутствует")
         # Проверенный оригинальный JSON сохраняется целиком, включая диагностику и null.
-        parsed_documents[document_id] = deepcopy(output)
+        if store_selected_json:
+            parsed_documents[document_id] = deepcopy(raw_output)
+        normalized_documents[document_id] = output
         code = parsed.meta.program_id
         if code:
             try:
@@ -218,8 +249,19 @@ def to_snapshot_v2(program_id, files):
             groups["program"] = ("program", "name")
         for group, (kind, key_field) in groups.items():
             members = [output[group]] if group == "program" else output.get(group, [])
-            for member in members:
-                identity = builder.entity(document_id, kind, member.get(key_field) or kind, member)
+            original_members = [original[group]] if group == "program" else original.get(group, [])
+            if len(members) != len(original_members):
+                raise ValueError(f"Выбор изменил структуру раздела {group}")
+            for member, original_member in zip(members, original_members, strict=True):
+                if member.get("source_ref") != original_member.get("source_ref"):
+                    raise ValueError("Выбор изменил provenance исходной записи")
+                identity = builder.entity(
+                    document_id,
+                    kind,
+                    member.get(key_field) or kind,
+                    member,
+                    original_member=original_member,
+                )
                 if kind == "program" and code:
                     builder.register(document_id, kind, code, identity)
         builder.issues.extend(
@@ -227,8 +269,15 @@ def to_snapshot_v2(program_id, files):
             for issue in output.get("parse_issues", [])
         )
 
-    for document_id, output in parsed_documents.items():
-        for member in output.get("relations", []):
+    for document_id, output in normalized_documents.items():
+        original_relations = originals[document_id].get("relations", [])
+        if len(output.get("relations", [])) != len(original_relations):
+            raise ValueError("Выбор изменил структуру списка связей")
+        for member, original_member in zip(
+            output.get("relations", []), original_relations, strict=True
+        ):
+            if member.get("source_ref") != original_member.get("source_ref"):
+                raise ValueError("Выбор изменил provenance исходной связи")
             builder.connect(
                 document_id,
                 member,
@@ -238,8 +287,15 @@ def to_snapshot_v2(program_id, files):
                 member["dst_key"],
                 member["kind"],
                 {k: v for k, v in member.items() if k != "source_ref"},
+                original_member=original_member,
             )
-        for cell in output.get("matrix_cells", []):
+        matrix_cells = output.get("matrix_cells", [])
+        original_matrix_cells = originals[document_id].get("matrix_cells", [])
+        if len(matrix_cells) != len(original_matrix_cells):
+            raise ValueError("Выбор изменил структуру матрицы связей")
+        for cell, original_cell in zip(matrix_cells, original_matrix_cells, strict=True):
+            if cell.get("source_ref") != original_cell.get("source_ref"):
+                raise ValueError("Выбор изменил provenance ячейки матрицы")
             builder.connect(
                 document_id,
                 cell,
@@ -250,6 +306,11 @@ def to_snapshot_v2(program_id, files):
                 "FORMS_COMPETENCY",
                 {"matrix_value": cell["value"], "semester": cell.get("semester")},
                 create=True,
+                original_member={
+                    "source_ref": original_cell["source_ref"],
+                    "matrix_value": original_cell["value"],
+                    "semester": original_cell.get("semester"),
+                },
             )
         for member in output.get("role_competency_links", []):
             builder.connect(
@@ -295,6 +356,14 @@ def to_snapshot_v2(program_id, files):
                         builder.relation(
                             document_id, disciplines[0], entity["id"], f"HAS_{kind.upper()}", ref
                         )
+    metadata = {
+        "program_id": str(builder.program_id),
+        "document_program_codes": codes,
+        "unresolved_relations": builder.unresolved,
+        "parse_issues": builder.issues,
+    }
+    if store_selected_json:
+        metadata["parsed_documents"] = parsed_documents
     snapshot = SnapshotV2.model_validate(
         {
             "entities": list(builder.entities.values()),
@@ -302,13 +371,7 @@ def to_snapshot_v2(program_id, files):
             "source_refs": list(builder.refs.values()),
             "source_links": list(builder.links.values()),
             "document_ids": [str(item["document_id"]) for item in files],
-            "metadata": {
-                "program_id": str(builder.program_id),
-                "parsed_documents": parsed_documents,
-                "document_program_codes": codes,
-                "unresolved_relations": builder.unresolved,
-                "parse_issues": builder.issues,
-            },
+            "metadata": metadata,
         }
     )
     return snapshot.model_dump(mode="json"), builder.issues

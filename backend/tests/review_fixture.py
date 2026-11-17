@@ -8,7 +8,6 @@ import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from app.parser_adapter import to_snapshot
 from app.review_logic import digest
 
 app = FastAPI()
@@ -43,13 +42,8 @@ async def analyze(request: dict):
                     return JSONResponse(
                         status_code=422, content={"detail": "Original is unavailable or changed"}
                     )
-    snapshot, _ = to_snapshot(
-        request["program_id"],
-        [{"document_id": item["document_id"], "output": item["parsed"]} for item in documents],
-    )
-    snapshot.update(schema_version=2, source_links=[], review=None)
-    snapshot["metadata"]["fixture_case"] = filename
     issues = []
+    hours = documents[0]["parsed"]["disciplines"][0]["hours_total"]
     for index in range(19 if filename.startswith("many") else 1):
         if filename.startswith("noconflict"):
             break
@@ -62,22 +56,22 @@ async def analyze(request: dict):
                 "severity": "blocking",
                 "requires_decision": True,
                 "message": "Искусственный конфликт часов",
-                "source_ref_ids": [snapshot["source_refs"][0]["id"]],
+                "source_document_ids": [documents[0]["document_id"]],
                 "variants": [
                     {
-                        "id": str(uuid5(namespace, f"variant-{index}-{hours}")),
-                        "label": str(hours),
+                        "id": str(uuid5(namespace, f"variant-{index}-{value}")),
+                        "label": str(value),
                         "changes": [
                             {
-                                "op": "set_attribute",
-                                "target_kind": "entity",
-                                "target_id": snapshot["entities"][0]["id"],
-                                "field_path": "/attributes/hours_total",
-                                "value": hours,
+                                "op": "set_document_value",
+                                "document_id": documents[0]["document_id"],
+                                "field_path": "/disciplines/0/hours_total",
+                                "expected_old_value": hours,
+                                "value": value,
                             }
                         ],
                     }
-                    for hours in (108, 144)
+                    for value in (108, 144)
                 ],
             }
         )
@@ -94,25 +88,16 @@ async def analyze(request: dict):
                 "markdown": "# Искусственный Markdown\n",
             }
         )
-        for ref in snapshot["source_refs"]:
-            if ref["document_id"] == doc["document_id"]:
-                ref.update(artifact_id=identity, artifact_locator="line:1")
-    for entity in snapshot["entities"]:
-        snapshot["source_links"].append(
-            {
-                "id": str(uuid5(namespace, "link:" + entity["id"])),
-                "target_kind": "entity",
-                "target_id": entity["id"],
-                "field_path": "/attributes/hours_total",
-                "source_ref_id": entity["source_ref_ids"][0],
-                "observed_value": {"value": 108, "unit": "hour"},
-            }
-        )
     if filename.startswith("malformed"):
-        snapshot["source_links"][0]["target_id"] = str(uuid5(namespace, "absent"))
+        return {
+            "schema_version": 2,
+            "candidate": {},
+            "issues": [],
+            "ruleset": RULESET,
+            "coverage": [],
+        }
     return {
-        "schema_version": 1,
-        "candidate": snapshot,
+        "schema_version": 2,
         "issues": issues,
         "ruleset": RULESET,
         "coverage": [
@@ -125,7 +110,8 @@ async def analyze(request: dict):
 @app.post("/check")
 def check(request: dict):
     namespace = UUID(request["job_id"])
-    case = request["snapshot"]["metadata"].get("fixture_case", "")
+    case = request["documents"][0]["parsed"]["meta"]["file_name"]
+    hours = request["documents"][0]["parsed"]["disciplines"][0]["hours_total"]
     issues = []
     if case.startswith(("warning", "blocking")):
         issues.append(
@@ -149,7 +135,11 @@ def check(request: dict):
                 "rule_code": "hours",
                 "rule_revision": "1",
                 "status": status,
-                "reason": "Искусственный пропуск" if status == "skipped" else None,
+                "reason": (
+                    "Искусственный пропуск"
+                    if status == "skipped"
+                    else f"Получено часов: {hours}"
+                ),
             }
         ],
     }
