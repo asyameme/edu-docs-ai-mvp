@@ -31,8 +31,12 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
                           "field_path": "/attributes/hours_total", "source_ref_id": ref_id,
                           "observed_value": {"value": 108}}],
     })
-    config = {"schema_version": 1, "rules": [{
+    config = {"schema_version": 2,
+              "phases": {"document_reconciliation": {"input": "parsed_documents"},
+                         "graph_validation": {"input": "graph_projection"}},
+              "rules": [{
         "id": "hours", "name": "Часы и ЗЕТ", "status": "ready", "type": "credit_hours",
+        "phases": ["document_reconciliation", "graph_validation"],
     }]}
     ruleset = validation_ruleset(config, [Document(original["parsed"], "rpd")])
     baseline = run_local_check([original], snapshot, job_id, config=config, ruleset=ruleset)

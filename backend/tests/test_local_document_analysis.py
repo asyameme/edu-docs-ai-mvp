@@ -85,15 +85,52 @@ def test_duplicate_filenames_are_resolved_by_document_identity():
     assert len(result["issues"][0]["variants"]) == 2
 
 
-def test_pregraph_analysis_omits_draft_rules_without_changing_profile():
+def test_missing_nullable_formulation_can_be_filled_from_an_existing_document_value():
+    first, second = payload("RPD"), payload("RPP")
+    first["competencies"] = [{"code": "УК-1", "formulation": None,
+                               "source_ref": {"file": "first.docx", "paragraph_index": 1}}]
+    second["competencies"] = [{"code": "УК-1", "formulation": "Проверяемая формулировка",
+                                "source_ref": {"file": "second.docx", "paragraph_index": 1}}]
+    documents = [{"document_id": str(uuid4()), "parsed": first},
+                 {"document_id": str(uuid4()), "parsed": second}]
+    result = analyze_documents(documents, uuid4(), config=load_rules())
+    issue = next(
+        item for item in result["issues"]
+        if item["type"] == "competency_formulation_missing"
+    )
+
+    assert issue["requires_decision"] is True
+    assert len(issue["variants"]) == 1
+    changes = issue["variants"][0]["changes"]
+    assert len(changes) == 2
+    assert any(change["expected_old_value"] is None
+               and change["value"] == "Проверяемая формулировка" for change in changes)
+
+
+def test_pregraph_analysis_runs_all_rules_without_changing_profile():
     documents = package()
     config = load_rules()
     original = deepcopy(config)
     result = analyze_documents(documents, uuid4(), config=config)
-    assert {item["rule_code"] for item in result["coverage"]} == {"R-01", "R-07"}
-    assert len(result["coverage"]) == 2
+    assert {item["rule_code"] for item in result["coverage"]} == {
+        rule["id"] for rule in config["rules"]
+    }
+    assert len(result["coverage"]) == 17
     assert config == original
-    assert result["ruleset"]["required_rules"] == ["R-01"]
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
+
+
+def test_graph_check_runs_all_rules_and_keeps_drafts_out_of_required_profile():
+    documents = package()
+    config = load_rules()
+    result = run_local_check(documents, SnapshotV2(), uuid4(), config=config)
+
+    assert {item["rule_code"] for item in result["coverage"]} == {
+        rule["id"] for rule in config["rules"]
+    }
+    assert len(result["coverage"]) == 17
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
+    assert any(item["rule_code"] == "R-03" for item in result["coverage"])
 
 
 def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp_path):

@@ -12,6 +12,7 @@ from docx import Document
 from test_review_integration import post, wait
 
 from app.local_parser import parse_local_document
+from worker.validation.validator import load_rules
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     os.getenv("LOCAL_REVIEW_TESTS") != "1", reason="Требуется изолированный локальный стек"
@@ -86,7 +87,8 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
         details = http.get(root + f'/versions/{version["id"]}/review').json()
         report = details["check_report"]
         coverage = {entry["rule_code"]: entry for entry in report["coverage"]}
-        assert set(coverage) == {"R-01", "R-07"}
+        assert set(coverage) == {rule["id"] for rule in load_rules()["rules"]}
+        assert len(coverage) == 17
         assert coverage["R-07"]["status"] == "passed"
         assert all("checks" not in entry for entry in report["coverage"])
         assert all("evidence" not in issue and "checks" not in issue for issue in report["issues"])

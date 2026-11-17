@@ -19,6 +19,7 @@ _FIELDS = {
     "value_mismatch": "credit_units",
     "competency_formulation_review": "formulation",
     "competency_formulation_mismatch": "formulation",
+    "competency_formulation_missing": "formulation",
 }
 _PROTECTED = {"meta", "source_ref", "parse_issues"}
 
@@ -43,7 +44,23 @@ def _records(value, path=""):
 def _sources(finding, documents):
     """Сопоставляет доказательства с документами, не выбирая первый одинаковый файл."""
     sources, limitations = [], []
-    for ref in finding["evidence"].get("source_refs", []):
+    evidence = finding["evidence"]
+    variants = evidence.get("variants", [])
+    references = []
+    if isinstance(variants, list):
+        references.extend(
+            (variant.get("source_ref"), variant)
+            for variant in variants
+            if isinstance(variant, dict) and isinstance(variant.get("source_ref"), dict)
+        )
+    if not references:
+        references.extend((ref, None) for ref in evidence.get("source_refs", []))
+    seen = set()
+    for ref, variant in references:
+        ref_key = digest([ref, variant])
+        if ref_key in seen:
+            continue
+        seen.add(ref_key)
         identity = ref.get("document_id")
         candidates = [
             item for item in documents
@@ -58,6 +75,14 @@ def _sources(finding, documents):
             (path, row) for path, row in _records(item["parsed"])
             if _locator(row["source_ref"]) == _locator(ref)
         ]
+        if variant is not None:
+            code = variant.get("code")
+            formulation = variant.get("formulation")
+            matches = [
+                (path, row) for path, row in matches
+                if (code is None or row.get("code") == code)
+                and (formulation is None or row.get("formulation") == formulation)
+            ]
         sources.append((str(item["document_id"]), matches))
     return sources, limitations
 
@@ -75,7 +100,7 @@ def _variants(finding, sources, documents, issue_id):
         path, row = matches[0]
         targets[identity, path + "/" + field] = row[field]
     values = {digest(value): value for value in targets.values() if value is not None}
-    if len(values) < 2:
+    if not values:
         return [], []
     # Данные разных известных программ не должны образовывать общий выбор.
     original = {str(item["document_id"]): item["parsed"] for item in documents}
@@ -98,7 +123,7 @@ def _variants(finding, sources, documents, issue_id):
         variants.append({"id": str(uuid5(issue_id, signature)),
                          "label": f"Выбрать значение из документов: {str(value)[:200]}",
                          "changes": changes})
-    return (variants, []) if len(variants) >= 2 else ([], ["Нет двух допустимых вариантов"])
+    return (variants, []) if variants else ([], ["Нет допустимых значений для решения"])
 
 
 def analyze_documents(documents, job_id, *, config=None):

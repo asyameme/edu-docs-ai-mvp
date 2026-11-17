@@ -274,16 +274,9 @@ def validation_documents(documents):
 
 def run_document_rules(inputs, config, *, phase):
     """Запускает общий движок с тем же профилем и бюджетом на указанной стадии."""
-    active_config = {
-        **config,
-        "rules": [
-            rule for rule in config["rules"]
-            if rule.get("status") in {"ready", "ready_with_semantic_fallback"}
-        ],
-    }
     budget = _ValidationBudget()
     return run_validation(
-        inputs, active_config, phase=phase,
+        inputs, config, phase=phase,
         semantic_evaluator=budget.semantic, competency_evaluator=budget.competency,
     ).to_dict()
 

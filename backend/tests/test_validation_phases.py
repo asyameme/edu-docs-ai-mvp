@@ -24,7 +24,11 @@ def test_all_current_rules_have_both_explicit_phases():
 
 def test_engine_selects_rule_phase_and_reports_it():
     rules = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
         "rules": [
             {"id": "before", "type": "unique_by_fields", "status": "ready",
                  "phases": ["document_reconciliation"], "inputs": {"collections": [{
@@ -54,7 +58,11 @@ def test_engine_rejects_unknown_phase():
 
 def test_load_rules_rejects_unhashable_phase_values_as_configuration_error(tmp_path):
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
         "rules": [{"id": "broken", "phases": ["document_reconciliation", {}]}],
     }
     path = tmp_path / "rules.json"

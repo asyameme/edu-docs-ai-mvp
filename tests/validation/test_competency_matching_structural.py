@@ -1,14 +1,14 @@
 """Regression coverage for R-01 matching and R-08 document-local references."""
 from copy import deepcopy
-from worker.validation.validator import run_validation
+from worker.validation.validator import load_rules, run_validation
 
-R01 = {'rules': [{'id': 'R-01', 'name': 'R-01', 'type': 'competency_consistency'}]}
-R08 = {'rules': [{'id': 'R-08-local-reference', 'name': 'R-08', 'type': 'reference_exists',
-                 'scope': {'document_types': ['rpd', 'rpp', 'ckmv']},
-                 'inputs': {'source_records_path': '$.indicators[*]',
-                            'source_value_field': 'competency_code',
-                            'target_records_path': '$.competencies[*]',
-                            'target_key_field': 'code'}}]}
+def rule(rule_id):
+    config = load_rules()
+    return {**config, 'rules': [deepcopy(next(r for r in config['rules'] if r['id'] == rule_id))]}
+
+
+R01 = rule('R-01')
+R08 = rule('R-08-local-reference')
 
 
 def doc(kind, name, pid='P', **fields):
@@ -77,7 +77,7 @@ def test_r01_collects_all_supporting_document_variants():
 def test_r01_threshold_is_configurable_without_auto_matching_codes():
     a = doc('matrix', 'a', competencies=[{'code': 'A', 'formulation': 'Способен проводить анализ данных'}])
     b = doc('rpd', 'b', competencies=[{'code': 'B', 'formulation': 'Способен проводить анализ больших данных'}])
-    result = run_validation([a, b], {'rules': [{**R01['rules'][0], 'match_threshold': 0.6}]}).results[0]
+    result = run_validation([a, b], {**R01, 'rules': [{**R01['rules'][0], 'match_threshold': 0.6}]}).results[0]
     candidates = [f for f in result.findings if f.code == 'competency_code_match_candidate']
     assert len(candidates) == 1
     assert candidates[0].evidence['heuristic_only']

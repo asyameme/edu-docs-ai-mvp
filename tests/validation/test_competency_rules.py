@@ -9,7 +9,8 @@ def document(role, **fields):
 
 
 def only(rule_id):
-    return {'rules': [copy.deepcopy(next(r for r in load_rules()['rules'] if r['id'] == rule_id))]}
+    config = load_rules()
+    return {**config, 'rules': [copy.deepcopy(next(r for r in config['rules'] if r['id'] == rule_id))]}
 
 
 class CompetencyRulesTests(unittest.TestCase):

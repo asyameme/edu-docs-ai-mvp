@@ -6,6 +6,7 @@ from worker.validation.validator import Finding, RuleResult, ValidationReport
 
 def _report():
     return ValidationReport(
+        phase="graph_validation",
         results=[
             RuleResult(
                 rule_id="R-03",

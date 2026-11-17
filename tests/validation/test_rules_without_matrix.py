@@ -10,8 +10,8 @@ def doc(kind, **fields):
 
 
 def rule(rule_id):
-    rules = load_rules()["rules"]
-    return {"rules": [copy.deepcopy(next(r for r in rules if r["id"] == rule_id))]}
+    config = load_rules()
+    return {**config, "rules": [copy.deepcopy(next(r for r in config["rules"] if r["id"] == rule_id))]}
 
 
 class ValidationWithoutMatrixTests(unittest.TestCase):

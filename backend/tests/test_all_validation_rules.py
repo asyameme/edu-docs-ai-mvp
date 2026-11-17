@@ -15,8 +15,7 @@ from worker.validation.validator import load_rules, run_validation
 ORIGINALS = Path(__file__).resolve().parents[2] / "tests" / "originals"
 
 
-def test_backend_runs_only_non_draft_rules_on_real_documents(monkeypatch):
-    # Черновики проверяются отдельно вызовом движка, но не входят в Backend-профиль.
+def test_backend_runs_all_rules_on_real_documents(monkeypatch):
     monkeypatch.setattr("app.validation_bridge.VALIDATION_MAX_LLM_CALLS", 0)
     program_id = uuid4()
     members = [
@@ -38,14 +37,11 @@ def test_backend_runs_only_non_draft_rules_on_real_documents(monkeypatch):
     projected = project_snapshot_documents(inputs, snapshot)
     result = run_local_check(projected, snapshot, uuid4(), config=config)
     coverage = {entry["rule_code"]: entry for entry in result["coverage"]}
-    active_rules = {
-        rule["id"] for rule in config["rules"]
-        if rule["status"] in {"ready", "ready_with_semantic_fallback"}
-    }
-    assert set(coverage) == active_rules == {"R-01", "R-07"}
-    assert len(coverage) == 2
-    assert all(issue["rule_code"] in active_rules for issue in result["issues"])
-    assert result["ruleset"]["required_rules"] == ["R-01"]
+    all_rules = {rule["id"] for rule in config["rules"]}
+    assert set(coverage) == all_rules
+    assert len(coverage) == 17
+    assert all(issue["rule_code"] in all_rules for issue in result["issues"])
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
     assert all(entry["checks"] > 0 for entry in coverage.values() if entry["status"] == "passed")
     assert inputs == original
     assert config == original_config
@@ -72,7 +68,7 @@ def test_backend_runs_only_non_draft_rules_on_real_documents(monkeypatch):
 def test_draft_detects_known_error_then_accepts_correction(rule_id, documents, field, bad, good):
     config = load_rules()
     rule = next(item for item in config["rules"] if item["id"] == rule_id)
-    assert rule["status"] == "draft"
+    assert rule["status"] in {"draft", "ready"}
     if rule_id == "R-13":
         rule["inputs"]["required_sections"] = ["Содержание"]
     config["rules"] = [rule]

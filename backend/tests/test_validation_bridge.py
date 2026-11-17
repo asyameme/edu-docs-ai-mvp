@@ -60,13 +60,18 @@ def test_local_check_maps_cross_document_mismatch_to_correct_source_ids():
         },
     ]
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
         "rules": [
             {
                 "id": "R-02",
                 "name": "Hours",
                 "type": "hours_against_curriculum",
                 "status": "ready",
+                "phases": ["document_reconciliation", "graph_validation"],
             }
         ],
     }
@@ -122,13 +127,18 @@ def test_local_check_maps_filename_evidence_to_document_source_ref(monkeypatch):
         }
     ]
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
         "rules": [
             {
                 "id": "R-07",
                 "name": "Semantics",
                 "type": "example",
                 "status": "ready_with_semantic_fallback",
+                "phases": ["document_reconciliation", "graph_validation"],
             }
         ],
     }
@@ -205,13 +215,18 @@ def test_local_check_uses_document_ids_for_duplicate_filenames(monkeypatch):
         for document_id in document_ids
     ]
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
         "rules": [
             {
                 "id": "R-07",
                 "name": "Semantics",
                 "type": "example",
                 "status": "ready_with_semantic_fallback",
+                "phases": ["document_reconciliation", "graph_validation"],
             }
         ],
     }
@@ -327,8 +342,15 @@ def test_local_check_does_not_guess_between_duplicate_locators_in_one_document(m
         "run_validation",
         lambda *_, **__: SimpleNamespace(to_dict=lambda: report),
     )
-    config = {"schema_version": 1, "rules": [{
-        "id": "R-07", "name": "Semantics", "type": "example", "status": "ready"
+    config = {
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
+        "rules": [{
+        "id": "R-07", "name": "Semantics", "type": "example", "status": "ready",
+        "phases": ["document_reconciliation", "graph_validation"]
     }]}
     ruleset = {
         "id": "test", "revision": "r1", "config": config,
@@ -517,19 +539,29 @@ def test_exhausted_llm_budget_returns_manual_review_instead_of_a_pass(monkeypatc
             for ref_id, document_id in zip(source_refs, document_ids, strict=True)
         ],
     })
-    config = {"schema_version": 1, "rules": [{
+    config = {
+        "schema_version": 2,
+        "phases": {
+            "document_reconciliation": {"input": "parsed_documents"},
+            "graph_validation": {"input": "graph_projection"},
+        },
+        "rules": [{
         "id": "R-07",
         "name": "Сравнение формулировок",
         "type": "competency_formulations",
         "status": "ready",
+        "phases": ["document_reconciliation", "graph_validation"],
     }]}
 
     result = run_local_check(documents, snapshot, uuid4(), config=config)
 
-    assert result["coverage"][0]["status"] == "needs_review"
-    assert result["issues"][0]["status"] == "needs_review"
-    assert "лимит запросов" in result["issues"][0]["evidence"]["reason"]
-    assert len(result["issues"][0]["source_ref_ids"]) == 2
+    r07_coverage = next(item for item in result["coverage"] if item["rule_code"] == "R-07")
+    r07_issue = next(item for item in result["issues"] if item["rule_code"] == "R-07")
+    assert r07_coverage["status"] == "needs_review"
+    assert r07_issue["status"] == "needs_review"
+    assert any("лимит запросов" in item.get("reason", "")
+               for item in r07_issue["evidence"]["comparisons"])
+    assert len(r07_issue["source_ref_ids"]) == 2
 
 
 def test_recheck_projects_supported_field_edits_without_mutating_parser_input():
