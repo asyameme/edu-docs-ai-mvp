@@ -32,13 +32,7 @@ def insert_objects(cur, version_id, snapshot):
 
 def insert_projection(cur, version_id, snapshot):
     insert_objects(cur, version_id, snapshot)
-    # В v1 UUID источников повторяются между версиями; SQL требует глобальный ID.
-    refs = {
-        ref.id: uuid5(UUID(str(version_id)), str(ref.id))
-        if snapshot.schema_version == 1
-        else ref.id
-        for ref in snapshot.source_refs
-    }
+    refs = {ref.id: ref.id for ref in snapshot.source_refs}
     for ref in snapshot.source_refs:
         if getattr(ref, "artifact_id", None) and not cur.execute(
             "SELECT id FROM document_artifacts WHERE document_id=%s AND id=%s",

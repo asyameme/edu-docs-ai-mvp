@@ -7,7 +7,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from app.domain import Entity, Relation, Snapshot
+from app.domain import Entity, RelationV2, SnapshotV2
 from app.main import app
 from app.repository import Repository
 
@@ -23,61 +23,63 @@ def test_save_restore_and_version_foreign_keys():
         repo = Repository(app.state.resources.postgres)
         pid = UUID(program["id"])
         a, b, relation = uuid4(), uuid4(), uuid4()
-        snapshot = Snapshot(
+        snapshot = SnapshotV2(
             entities=[Entity(id=a, kind="discipline"), Entity(id=b, kind="competency")],
-            relations=[Relation(id=relation, source_id=a, target_id=b, type="FORMS_COMPETENCY")],
+            relations=[RelationV2(id=relation, source_id=a, target_id=b, type="FORMS_COMPETENCY")],
         )
         version = repo.save(pid, UUID(program["current_version_id"]), uuid4().hex, snapshot)
         restored = repo.save(pid, version["id"], uuid4().hex, restore_id=version["id"])
         with repo.pool.connection() as conn:
             assert (
                 conn.execute(
-                    "SELECT count(*) FROM entities WHERE version_id=%s", (version["id"],)
+                    "SELECT count(*) FROM graph_entities g JOIN program_versions v ON "
+                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s",
+                    (version["id"],),
                 ).fetchone()[0]
                 == 2
             )
             assert (
                 conn.execute(
-                    "SELECT count(*) FROM relations WHERE version_id=%s", (restored["id"],)
+                    "SELECT count(*) FROM graph_relations g JOIN program_versions v ON "
+                    "v.graph_state_id=g.graph_state_id WHERE v.id=%s",
+                    (restored["id"],),
                 ).fetchone()[0]
                 == 1
             )
-            with pytest.raises(psycopg.errors.ForeignKeyViolation):
-                with conn.transaction():
+            with conn.transaction():
+                state = uuid4()
+                conn.execute("INSERT INTO graph_states(id,program_id) VALUES(%s,%s)", (state, pid))
+                with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
                     conn.execute(
-                        "INSERT INTO relations(version_id,id,source_entity_id,"
-                        "target_entity_id,type)"
-                        " VALUES(%s,%s,%s,%s,'HAS_TOPIC')",
-                        (UUID(program["current_version_id"]), uuid4(), a, b),
+                        "INSERT INTO graph_entities VALUES(%s,%s,%s,%s,0)", (pid, state, a, uuid4())
                     )
             with pytest.raises(psycopg.errors.CheckViolation):
                 with conn.transaction():
                     conn.execute(
-                        "UPDATE entities SET kind='competency' WHERE version_id=%s",
-                        (version["id"],),
+                        "UPDATE entity_revisions SET kind='competency' WHERE program_id=%s",
+                        (pid,),
                     )
 
 
 def test_projection_failure_rolls_back_snapshot_and_head(monkeypatch):
-    from app import relational_storage
+    from app import graph_storage
 
     with TestClient(app) as client:
         program = client.post("/api/v1/programs", json={"name": "Откат проекции"}).json()
         repo = Repository(app.state.resources.postgres)
         pid, head = UUID(program["id"]), UUID(program["current_version_id"])
 
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise RuntimeError("Ошибка сохранения предметных записей")
 
-        monkeypatch.setattr(relational_storage, "insert_projection", fail)
+        monkeypatch.setattr(graph_storage, "save_graph", fail)
         with pytest.raises(RuntimeError, match="предметных записей"):
-            repo.save(pid, head, uuid4().hex, Snapshot())
+            repo.save(pid, head, uuid4().hex, SnapshotV2())
         assert repo.program(pid)["current_version_id"] == head
         assert len(repo.versions(pid)) == 1
 
 
 def test_v2_field_evidence_matrix_and_restore_are_relational():
-    from app.domain import SnapshotV2
     from app.review_storage import insert_version
 
     with TestClient(app) as client:
@@ -124,20 +126,25 @@ def test_v2_field_evidence_matrix_and_restore_are_relational():
         with repo.pool.connection() as conn:
             for vid in (version_id, restored["id"]):
                 assert conn.execute(
-                    "SELECT matrix_value FROM relations WHERE version_id=%s", (vid,)
+                    "SELECT (r.attributes->>'matrix_value')::int FROM relation_revisions "
+                    "r JOIN graph_relations g ON g.revision_id=r.revision_id JOIN "
+                    "program_versions v ON v.graph_state_id=g.graph_state_id WHERE "
+                    "v.id=%s",
+                    (vid,),
                 ).fetchone() == (0,)
                 row = conn.execute(
-                    "SELECT entity_id,relation_id,observed_value FROM source_links"
-                    " WHERE version_id=%s",
+                    "SELECT l.entity_id,l.relation_id,l.observed_value FROM source_links l "
+                    "JOIN graph_source_links g ON g.source_link_id=l.id "
+                    "JOIN program_versions v ON v.graph_state_id=g.graph_state_id WHERE v.id=%s",
                     (vid,),
                 ).fetchone()
                 assert row == (None, relation, {"value": 0})
             with pytest.raises(psycopg.errors.CheckViolation):
                 with conn.transaction():
                     conn.execute(
-                        "INSERT INTO source_links(id,version_id,entity_id,relation_id,"
+                        "INSERT INTO source_links(id,program_id,entity_id,relation_id,"
                         "field_path,source_ref_id,observed_value) VALUES(%s,%s,%s,%s,'$',%s,'{}')",
-                        (uuid4(), version_id, a, relation, ref),
+                        (uuid4(), UUID(program["id"]), a, relation, ref),
                     )
         assert client.get(root + "/versions/" + str(version_id)).json()["snapshot"]["source_links"][
             0

@@ -1,4 +1,3 @@
-"""LLM-assisted review of learning-outcome alignment within one RPD."""
 from __future__ import annotations
 
 import json

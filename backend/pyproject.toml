@@ -3,7 +3,7 @@ entrypoint = "app.main:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", ".."]
 markers = ["integration: requires isolated live Compose services"]
 
 [tool.ruff]

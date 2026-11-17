@@ -52,7 +52,7 @@ def test_import_is_persisted_and_duplicate_reuses_job():
                 break
             time.sleep(0.5)
         assert state["status"] == "failed", state
-        assert state["files"][0]["error_code"] == "parser_not_configured"
+        assert state["files"][0]["error_code"] == "parser_invalid_result"
         assert http.get(path + "/" + str(uuid4())).status_code == 404
 
 

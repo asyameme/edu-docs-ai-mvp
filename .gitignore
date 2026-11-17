@@ -4,6 +4,8 @@ __pycache__/
 .ruff_cache/
 .venv/
 *.py[cod]
+.DS_Store
+/parsed_rpd.json
 
 .integration-results/
 

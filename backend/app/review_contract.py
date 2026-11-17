@@ -1,12 +1,13 @@
 """Предложение обмена Backend/ML: анализ пакета и проверка выбранного снимка."""
 
+import re
 from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, Field, JsonValue, model_validator
+from pydantic import AnyHttpUrl, Field, JsonValue, field_validator, model_validator
 
-from app.domain import Contract, Entity, RelationV2, Snapshot, SnapshotV2
-from contracts.parser_output import ParserOutput
+from app.domain import Contract, Entity, RelationV2, SnapshotV2
+from app.parser_document import ParserDocument, parse_output
 
 
 class Mutation(Contract):
@@ -59,10 +60,42 @@ class Mutation(Contract):
         return self
 
 
+class DocumentMutation(Contract):
+    """A selected field value in one parsed document, before graph assembly."""
+
+    op: Literal["set_document_value"]
+    document_id: UUID
+    field_path: str = Field(min_length=1)
+    expected_old_value: JsonValue
+    value: JsonValue = None
+
+    @model_validator(mode="after")
+    def document_field_is_explicit(self) -> Self:
+        required = {"expected_old_value", "value"}
+        if not required.issubset(self.model_fields_set):
+            raise ValueError("Expected and selected values must be supplied, including null")
+        if not self.field_path.startswith("/") or re.search(r"~(?![01])", self.field_path):
+            raise ValueError("Document field must use a valid JSON Pointer")
+        parts = [
+            part.replace("~1", "/").replace("~0", "~")
+            for part in self.field_path[1:].split("/")
+        ]
+        if len(parts) < 2 or any(not part for part in parts):
+            raise ValueError("Document field path must point to a parsed document value")
+        if "meta" in parts or "source_ref" in parts or parts[0] == "parse_issues":
+            raise ValueError(
+                "Document identity, provenance, and parser diagnostics cannot be changed"
+            )
+        return self
+
+
+ReviewMutation = Mutation | DocumentMutation
+
+
 class Variant(Contract):
     id: UUID
     label: str = Field(min_length=1)
-    changes: list[Mutation] = Field(min_length=1)
+    changes: list[ReviewMutation] = Field(min_length=1)
 
 
 class ReviewIssue(Contract):
@@ -74,6 +107,7 @@ class ReviewIssue(Contract):
     status: Literal["open", "needs_review"] = "open"
     message: str = Field(min_length=1)
     source_ref_ids: list[UUID] = Field(default_factory=list)
+    source_document_ids: list[UUID] = Field(default_factory=list)
     requires_decision: bool = False
     variants: list[Variant] = Field(default_factory=list)
 
@@ -177,6 +211,30 @@ class AnalysisV1(CheckResult):
         return self
 
 
+class AnalysisV2(CheckResult):
+    """Document-level reconciliation result; it must not contain a graph."""
+
+    schema_version: Literal[2] = 2
+    artifacts: list[MarkdownArtifact] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def issue_variants_are_document_changes(self) -> Self:
+        ids = [item.id for item in self.artifacts]
+        documents = [item.document_id for item in self.artifacts]
+        if len(ids) != len(set(ids)) or len(documents) != len(set(documents)):
+            raise ValueError("One Markdown artifact per document and analysis is allowed")
+        for issue in self.issues:
+            if issue.requires_decision and not issue.variants:
+                raise ValueError("A decision issue must provide at least one variant")
+            if issue.variants and any(
+                not isinstance(change, DocumentMutation)
+                for variant in issue.variants
+                for change in variant.changes
+            ):
+                raise ValueError("Document reconciliation variants must target parsed JSON fields")
+        return self
+
+
 class ReviewCreate(Contract):
     import_job_id: UUID
     expected_version_id: UUID
@@ -186,7 +244,16 @@ class DecisionCreate(Contract):
     expected_version_id: UUID
     conflict_id: UUID
     variant_id: UUID
+    signature: str = Field(min_length=1, max_length=120)
     check_job_id: UUID | None = None
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class CheckCreate(Contract):
@@ -197,19 +264,42 @@ class ConfirmCreate(Contract):
     expected_version_id: UUID
     check_job_id: UUID
     accepted_warning_ids: list[UUID] = Field(default_factory=list)
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class AnalysisDocument(Contract):
     document_id: UUID
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    parsed: ParserOutput
+    parsed: ParserDocument
     original_url: AnyHttpUrl | None = None
+
+    @field_validator("parsed", mode="before")
+    @classmethod
+    def read_document_version(cls, value):
+        return parse_output(value)
 
     @model_validator(mode="after")
     def hash_matches_original(self) -> Self:
         if self.parsed.meta.file_hash != self.sha256:
             raise ValueError("Parser result and original have different hashes")
         return self
+
+    def check_program(self, program_id: UUID) -> None:
+        # В прежнем meta.program_id встречается UUID, в документах — академический код.
+        try:
+            legacy_id = UUID(self.parsed.meta.program_id or "")
+        except ValueError:
+            legacy_id = None
+        if legacy_id is not None and legacy_id != program_id:
+            raise ValueError("Результат документа принадлежит другой программе")
 
 
 class PrepareRequest(Contract):
@@ -218,7 +308,7 @@ class PrepareRequest(Contract):
     job_id: UUID
     program_id: UUID
     version_id: UUID
-    base_snapshot: Snapshot | SnapshotV2
+    base_snapshot: SnapshotV2
     documents: list[AnalysisDocument] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -227,11 +317,25 @@ class PrepareRequest(Contract):
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate input documents")
         for document in self.documents:
-            if (
-                document.parsed.meta.program_id is not None
-                and document.parsed.meta.program_id != str(self.program_id)
-            ):
-                raise ValueError("Parser result belongs to another program")
+            document.check_program(self.program_id)
+        return self
+
+
+class PrepareRequestV2(Contract):
+    schema_version: Literal[2] = 2
+    operation: Literal["prepare"] = "prepare"
+    job_id: UUID
+    program_id: UUID
+    version_id: UUID
+    documents: list[AnalysisDocument] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def documents_are_unique(self) -> Self:
+        ids = [item.document_id for item in self.documents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate input documents")
+        for document in self.documents:
+            document.check_program(self.program_id)
         return self
 
 
@@ -244,3 +348,12 @@ class CheckRequest(Contract):
     snapshot: SnapshotV2
     ruleset: Ruleset
     documents: list[AnalysisDocument] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def documents_belong_to_program(self) -> Self:
+        ids = [item.document_id for item in self.documents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Документы проверки не должны повторяться")
+        for document in self.documents:
+            document.check_program(self.program_id)
+        return self

@@ -1,4 +1,4 @@
-"""HTTP-адаптер ML: Worker получает неизменяемые оригиналы из PostgreSQL."""
+"""Worker получает оригиналы из PostgreSQL и вызывает локальный или HTTP-парсер."""
 
 import io
 import json
@@ -11,9 +11,10 @@ from temporalio.exceptions import ApplicationError
 
 from app.domain import Contract
 from app.import_repository import ImportRepository
-from app.parser_adapter import GROUPS, to_snapshot
+from app.local_parser import parse_local_document
+from app.parser_adapter import to_snapshot
+from app.parser_document import has_document_data, parse_output
 from app.repository import Repository
-from contracts.parser_output import ParserOutput
 
 
 class ImportActivities:
@@ -42,43 +43,51 @@ class ImportActivities:
         item = next(f for f in job["files"] if str(f["document_id"]) == document_id)
         if item["status"] in {"completed", "failed"}:
             return
-        if not self.settings.parser_url:
-            self.repo.file_finished(
-                UUID(job_id),
-                UUID(document_id),
-                attempt,
-                code="parser_not_configured",
-                message="Сервис разбора документов ещё не подключён; оригинал сохранён",
-            )
-            return
         try:
             document = Repository(self.repo.pool).document_content(job["program_id"], document_id)
-            with (
-                io.BytesIO(document["content"]) as source,
-                httpx.Client(timeout=90, trust_env=False) as client,
-            ):
-                with client.stream(
-                    "POST",
-                    self.settings.parser_url,
-                    files={"file": (item["member_name"], source)},
-                    data={"document_id": document_id, "program_id": str(job["program_id"])},
-                    headers={"Idempotency-Key": f"{job_id}:{attempt}:{document_id}"},
-                ) as response:
-                    if response.status_code >= 500 or response.status_code == 429:
-                        raise ApplicationError("Парсер временно недоступен", type="ParserTemporary")
-                    response.raise_for_status()
-                    chunks, size = [], 0
-                    for chunk in response.iter_bytes():
-                        size += len(chunk)
-                        if size > 10 * 1024 * 1024:
-                            raise ValueError("Ответ парсера превышает 10 МиБ")
-                        chunks.append(chunk)
-            raw = json.loads(b"".join(chunks))
+            if self.settings.parser_url:
+                with (
+                    io.BytesIO(document["content"]) as source,
+                    httpx.Client(timeout=90, trust_env=False) as client,
+                ):
+                    with client.stream(
+                        "POST",
+                        self.settings.parser_url,
+                        files={"file": (item["member_name"], source)},
+                        data={"document_id": document_id, "program_id": str(job["program_id"])},
+                        headers={"Idempotency-Key": f"{job_id}:{attempt}:{document_id}"},
+                    ) as response:
+                        if response.status_code >= 500 or response.status_code == 429:
+                            raise ApplicationError(
+                                "Парсер временно недоступен", type="ParserTemporary"
+                            )
+                        response.raise_for_status()
+                        chunks, size = [], 0
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if size > 10 * 1024 * 1024:
+                                raise ValueError("Ответ парсера превышает 10 МиБ")
+                            chunks.append(chunk)
+                raw = json.loads(b"".join(chunks))
+            else:
+                raw = parse_local_document(
+                    item["member_name"], document["content"], job["program_id"]
+                )
+                if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > 10 * 1024 * 1024:
+                    raise ValueError("Ответ парсера превышает 10 МиБ")
             Contract.strings_are_storable(raw)
-            parsed = ParserOutput.model_validate(raw)
+            parsed = parse_output(raw)
             if parsed.meta.file_hash != item["sha256"]:
                 raise ValueError("Хэш результата не совпал с оригиналом")
-            if not parsed.program and not any(getattr(parsed, key) for key in GROUPS):
+            try:
+                claimed_program_id = UUID(parsed.meta.program_id or "")
+            except ValueError:
+                claimed_program_id = None
+            if claimed_program_id is not None and claimed_program_id != UUID(
+                str(job["program_id"])
+            ):
+                raise ValueError("Результат документа принадлежит другой программе")
+            if not has_document_data(parsed):
                 self.repo.file_finished(
                     UUID(job_id),
                     UUID(document_id),
@@ -91,7 +100,7 @@ class ImportActivities:
                 UUID(job_id),
                 UUID(document_id),
                 attempt,
-                output=parsed.model_dump(mode="json"),
+                output=raw,
             )
         except httpx.TransportError as error:
             raise ApplicationError(

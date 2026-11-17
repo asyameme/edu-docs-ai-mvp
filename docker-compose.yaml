@@ -20,6 +20,12 @@ x-backend: &backend
     ANALYSIS_TIMEOUT_SECONDS: ${ANALYSIS_TIMEOUT_SECONDS:-300}
     ANALYSIS_MAX_REQUEST_BYTES: ${ANALYSIS_MAX_REQUEST_BYTES:-20971520}
     ANALYSIS_MAX_RESPONSE_BYTES: ${ANALYSIS_MAX_RESPONSE_BYTES:-10485760}
+    CHAT_MODEL: ${CHAT_MODEL:-}
+    CHAT_BASE_URL: ${CHAT_BASE_URL:-}
+    CHAT_ENABLED: ${CHAT_ENABLED:-false}
+    CHAT_CREDENTIALS_CONFIGURED: ${CHAT_API_KEY:+true}
+    CHAT_MAX_TURNS: ${CHAT_MAX_TURNS:-8}
+    CHAT_MODEL_TIMEOUT_SECONDS: ${CHAT_MODEL_TIMEOUT_SECONDS:-45}
     ARTIFACT_FILES_PATH: /data/artifacts
   restart: unless-stopped
 
@@ -62,6 +68,9 @@ services:
 
   worker:
     <<: *backend
+    environment:
+      <<: *backend-env
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
     command: ["python", "-m", "app.worker"]
     stop_grace_period: 15s
     volumes:
@@ -106,6 +115,7 @@ services:
     # Старый том нужен только миграции 0003; она читает его без удаления файлов.
     volumes:
       - original-files:/data/originals:ro
+      - artifact-files:/data/artifacts
     depends_on:
       postgres:
         condition: service_healthy

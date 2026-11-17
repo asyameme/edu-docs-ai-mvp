@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class Contract(BaseModel):
@@ -30,22 +30,28 @@ class Contract(BaseModel):
         return value
 
 
+EntityKind = Literal[
+    "discipline",
+    "semester_load",
+    "competency",
+    "indicator",
+    "learning_outcome",
+    "control_form",
+    "assessment_tool",
+    "program",
+    "curriculum_item",
+    "course_topic",
+    "course_content",
+    "score_scale",
+    "document_section",
+    "practice_stage",
+    "professional_role",
+]
+
+
 class Entity(Contract):
     id: UUID
-    kind: Literal[
-        "discipline",
-        "semester_load",
-        "competency",
-        "indicator",
-        "learning_outcome",
-        "control_form",
-        "assessment_tool",
-        "program",
-        "curriculum_item",
-        "course_topic",
-        "course_content",
-        "score_scale",
-    ]
+    kind: EntityKind
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source_ref_ids: list[UUID] = Field(default_factory=list)
 
@@ -72,8 +78,7 @@ class SnapshotSourceRef(Contract):
     locator: str = Field(min_length=1)
 
 
-class Snapshot(Contract):
-    schema_version: Literal[1] = 1
+class SnapshotData(Contract):
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     entities: list[Entity] = Field(default_factory=list)
     relations: list[Relation] = Field(default_factory=list)
@@ -114,13 +119,17 @@ class ProgramCreate(Contract):
         return self
 
 
-class VersionCreate(Contract):
-    expected_version_id: UUID
-    snapshot: Snapshot
-
-
 class VersionRestore(Contract):
     expected_version_id: UUID
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
 
 
 class RelationV2(Relation):
@@ -173,11 +182,12 @@ class ReviewState(Contract):
     review_id: UUID
     import_job_id: UUID
     analysis_version_id: UUID
+    graph_ready: bool = True
     decisions: list[ReviewDecision] = Field(default_factory=list)
     confirmation: ReviewConfirmation | None = None
 
 
-class SnapshotV2(Snapshot):
+class SnapshotV2(SnapshotData):
     schema_version: Literal[2] = 2
     relations: list[RelationV2] = Field(default_factory=list)
     source_refs: list[SourceRefV2] = Field(default_factory=list)
@@ -236,6 +246,28 @@ class SnapshotV2(Snapshot):
         return self
 
 
+class VersionCreate(Contract):
+    expected_version_id: UUID
+    snapshot: SnapshotV2
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
+
+    @model_validator(mode="after")
+    def review_is_server_owned(self) -> Self:
+        if self.snapshot.review is not None:
+            raise ValueError(
+                "Состояние проверки устанавливается только через сценарий подтверждения"
+            )
+        return self
+
+
 class ProgramRead(Contract):
     id: UUID
     name: str
@@ -251,7 +283,7 @@ class VersionRead(Contract):
     restored_from_version_id: UUID | None
     origin: Literal["initial", "save", "restore"]
     created_at: datetime
-    snapshot: Snapshot | SnapshotV2
+    snapshot: SnapshotV2
 
 
 class DocumentRead(Contract):

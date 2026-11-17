@@ -89,8 +89,8 @@ async def analyze(request: dict):
                 "id": identity,
                 "document_id": doc["document_id"],
                 "parser_revision": "artificial-1",
-                "parser_config": {"artificial": True},
-                "parser_config_hash": digest({"artificial": True}),
+                "parser_config": {"artificial": True, "threshold": 1.0},
+                "parser_config_hash": digest({"artificial": True, "threshold": 1.0}),
                 "markdown": "# Искусственный Markdown\n",
             }
         )

@@ -1,0 +1,729 @@
+"""Разбор тем, видов занятий и часов из таблиц содержания."""
+
+import re
+
+from docx.text.paragraph import Paragraph
+
+from .common import (
+    normalize,
+    parse_workload_number,
+    read_section,
+)
+from backend.contracts.document_v2.models import (
+    AcademicHoursRange,
+    CourseTopic,
+    ParseIssue,
+)
+
+
+def parse_topic_hours(raw: str) -> int | AcademicHoursRange:
+    """Прочитать точные часы или обе границы диапазона из ячейки."""
+    match = re.fullmatch(
+        r"(\d+)\s*[-\u2010-\u2015\u2212]\s*(\d+)"
+        r"(?:\s*(?:(?:академических\s+)?час(?:а|ов)?|ч\.))?",
+        normalize(raw),
+    )
+    if match:
+        return AcademicHoursRange(
+            kind="range",
+            min=int(match[1]),
+            max=int(match[2]),
+            unit="academic_hour",
+            raw_text=raw,
+        )
+
+    hours = parse_workload_number(" ".join(raw.split()))
+    if hours != hours.to_integral_value():
+        raise ValueError("Часы должны быть целым числом")
+    return int(hours)
+
+
+def course_content_columns(cells):
+    """Найти колонки темы, вида занятий и часов, если они указаны."""
+    patterns = {
+        "topic": r"^(?:(?:наименование|название)\s+темы\b.*|тема)$",
+        "activity": r"^вид(?:ы)?\s+(?:учебных\s+)?занятий$",
+        "hours": r"^(?:(?:количество|кол[-\u2010-\u2015]во)\s+часов|часы)$",
+    }
+    columns = {}
+    labels = [normalize(cell.text) for cell in cells]
+
+    for field, pattern in patterns.items():
+        matches = [
+            index
+            for index, label in enumerate(labels)
+            if re.fullmatch(pattern, label)
+        ]
+
+        if len(matches) == 1:
+            columns[field] = matches[0]
+        elif field != "hours" or matches:
+            return None
+
+    # Без часов принимаем явную шапку из темы, вида занятия и номера строки.
+    # Незнакомая колонка может содержать часы под другим заголовком.
+    if "hours" not in columns and any(
+        index not in columns.values() and not re.fullmatch(r"№(?:\s*п/п)?\.?", label)
+        for index, label in enumerate(labels)
+    ):
+        return None
+
+    return columns
+
+
+def wide_course_header(rows):
+    """Разобрать шапку с отдельными колонками видов занятий."""
+    paths = []
+    activities_pattern = (
+        r"^(?:лекци|практич|семинар|лаборатор|"
+        r"самостоятельн|контрольн|коллоквиум|консультаци)"
+    )
+
+    for index, row in enumerate(rows[:5]):
+        cells = row.cells
+
+        if not paths:
+            paths = [[] for _ in cells]
+
+        if (
+            len(cells) != len(paths)
+            or row.grid_cols_before
+            or row.grid_cols_after
+        ):
+            return None
+
+        # Числовые значения означают начало строк данных.
+        if any(
+            re.fullmatch(r"\d+(?:[.,]\d+)?", cell.text.strip())
+            for cell in cells
+        ):
+            break
+
+        for column, cell in enumerate(cells):
+            label = " ".join(cell.text.split())
+
+            if label and label not in paths[column]:
+                paths[column].append(label)
+
+        topic_columns = [
+            column
+            for column, labels in enumerate(paths)
+            if any(
+                normalize(label) in {"тема", "темы"}
+                or re.match(
+                    r"^(?:наименование|название)\s+"
+                    r"(?:тем|раздел|модул)",
+                    normalize(label),
+                )
+                for label in labels
+            )
+        ]
+
+        if len(topic_columns) != 1:
+            continue
+
+        activities = {}
+        references = {}
+        unknown = {}
+        ready = True
+
+        for column, labels in enumerate(paths):
+            if column == topic_columns[0]:
+                continue
+
+            text = normalize(" ".join(labels))
+            has_hours = re.search(
+                r"\bчас(?:ы|ов|а)?\b|\bч\.(?:\s|$)",
+                text,
+            )
+
+            activity_labels = [
+                label
+                for label in labels
+                if re.match(
+                    activities_pattern,
+                    normalize(label),
+                )
+            ]
+
+            # "Всего" под видом занятий остается итогом.
+            reference_labels = [
+                label
+                for label in labels
+                if re.match(
+                    r"^(?:всего|итого|контактное время)\b",
+                    normalize(label),
+                )
+            ]
+
+            last_is_reference = (
+                reference_labels
+                and (
+                    not activity_labels
+                    or labels.index(reference_labels[-1])
+                    > labels.index(activity_labels[-1])
+                )
+            )
+
+            if last_is_reference and has_hours:
+                references[column] = " / ".join(labels)
+
+            elif activity_labels and not has_hours:
+                ready = False
+
+            elif activity_labels:
+                activities[column] = activity_labels[-1]
+
+            elif has_hours:
+                if re.search(
+                    r"\b(?:всего|итого|контактное время|"
+                    r"аудиторные занятия|контактная работа)\b",
+                    text,
+                ):
+                    references[column] = " / ".join(labels)
+                else:
+                    unknown[column] = " / ".join(labels)
+
+        if activities and ready:
+            return {
+                "end": index,
+                "topic": topic_columns[0],
+                "activities": activities,
+                "references": references,
+                "unknown": unknown,
+                "width": len(paths),
+            }
+
+    return None
+
+
+def extract_wide_course_table(table, source_ref):
+    """Преобразовать строку темы в записи по видам занятий."""
+    rows = table.rows
+    header = wide_course_header(rows)
+
+    if header is None:
+        return None
+
+    topics = []
+    issues = []
+    topic_column = header["topic"]
+    activities = header["activities"]
+
+    def report(
+        category,
+        message,
+        row=None,
+        column=None,
+        severity="warning",
+    ):
+        issues.append(ParseIssue(
+            category=category,
+            message=f"Содержание: {message}",
+            severity=severity,
+            source_ref=source_ref.model_copy(update={
+                "row": row,
+                "col": None if column is None else column + 1,
+            }),
+        ))
+
+    if len(set(map(normalize, activities.values()))) != len(activities):
+        report(
+            "ambiguous",
+            "одинаковые виды занятий встречаются в нескольких "
+            "колонках; нужно уточнить их назначение",
+            header["end"] + 1,
+        )
+        return topics, issues
+
+    for column, label in header["unknown"].items():
+        report(
+            "unexpected_format",
+            f"неподдержанная колонка часов {label!r}; "
+            "ее значения не перенесены",
+            header["end"] + 1,
+            column,
+        )
+
+    owners = {}
+
+    for row in rows[header["end"] + 1:]:
+        if len(row.cells) != header["width"]:
+            continue
+
+        cells = row.cells
+
+        for column in activities:
+            owners.setdefault(cells[column]._tc, set()).add(
+                (cells[topic_column]._tc, column)
+            )
+
+    seen = set()
+    index = header["end"] + 1
+
+    while index < len(rows):
+        row = rows[index]
+        row_number = index + 1
+        cells = row.cells
+
+        if not any(cell.text.strip() for cell in cells):
+            index += 1
+            continue
+
+        repeated = wide_course_header(rows[index:index + 5])
+
+        if repeated is not None:
+            if any(
+                repeated[key] != header[key]
+                for key in (
+                    "topic",
+                    "activities",
+                    "references",
+                    "unknown",
+                    "width",
+                )
+            ):
+                report(
+                    "unexpected_format",
+                    "внутри таблицы изменилась шапка; "
+                    "оставшаяся часть требует проверки",
+                    row_number,
+                )
+                break
+
+            index += repeated["end"] + 1
+            continue
+
+        index += 1
+
+        if (
+            len(cells) != header["width"]
+            or row.grid_cols_before
+            or row.grid_cols_after
+        ):
+            report(
+                "unexpected_format",
+                "строка не совпадает с сеткой шапки",
+                row_number,
+            )
+            continue
+
+        topic_cell = cells[topic_column]
+        topic = " ".join(topic_cell.text.split())
+
+        if re.fullmatch(
+            r"(?:итого|всего)(?:\s+по\b.*|\s*[:.]?)",
+            normalize(topic),
+        ):
+            continue
+
+        if not topic:
+            report(
+                "empty_cell",
+                "не указана тема",
+                row_number,
+                topic_column,
+            )
+            continue
+
+        for column, label in header["references"].items():
+            raw = " ".join(cells[column].text.split())
+
+            if raw:
+                report(
+                    "manual_review",
+                    f"справочное значение {label!r} = {raw!r} "
+                    "сохранено в сообщении; отдельная тема не создана",
+                    row_number,
+                    column,
+                    severity="info",
+                )
+
+        for column, activity in activities.items():
+            cell = cells[column]
+            key = (topic_cell._tc, cell._tc, column)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            if (
+                len(owners[cell._tc]) > 1
+                or sum(
+                    other._tc is cell._tc
+                    for other in cells
+                ) > 1
+            ):
+                report(
+                    "ambiguous",
+                    "объединенные часы относятся к нескольким "
+                    "темам или колонкам; распределение не определено",
+                    row_number,
+                    column,
+                )
+                continue
+
+            if topic_cell.tables or cell.tables:
+                report(
+                    "unexpected_format",
+                    "в ячейке обнаружена вложенная таблица",
+                    row_number,
+                    column,
+                )
+                continue
+
+            raw = cell.text
+
+            if not raw.strip():
+                report(
+                    "empty_cell",
+                    f"нет часов: тема {topic!r}, вид {activity!r}",
+                    row_number,
+                    column,
+                )
+                continue
+
+            try:
+                hours = parse_topic_hours(raw)
+            except ValueError:
+                report(
+                    "unexpected_format",
+                    f"не удалось прочитать часы {raw!r}: "
+                    f"тема {topic!r}, вид {activity!r}",
+                    row_number,
+                    column,
+                )
+                continue
+
+            topics.append(CourseTopic(
+                topic=topic,
+                activity=activity,
+                hours=hours,
+                source_ref=source_ref.model_copy(update={
+                    "row": row_number,
+                    "col": column + 1,
+                }),
+            ))
+
+    if not topics and not issues:
+        report(
+            "empty_cell",
+            "в таблице нет строк тем с часами",
+            header["end"] + 1,
+        )
+
+    return topics, issues
+
+
+def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD"):
+    """Прочитать таблицы: тема - вид занятий - часы."""
+    if doc_type not in {"RPD", "RPP"}:
+        raise ValueError("Поддерживаются РПД и РПП")
+
+    def is_heading(paragraph):
+        title = re.sub(
+            r"^\d+(?:\.\d+)*\.?\s*",
+            "",
+            normalize(paragraph.text),
+        ).rstrip(".:")
+
+        if doc_type == "RPP":
+            return title == "структура и содержание практики"
+
+        return title in {
+            "структура и содержание учебных занятий",
+            "структура и содержание дисциплины",
+        }
+
+    blocks, issues = read_section(
+        document,
+        file_name,
+        is_heading,
+        "содержание практики" if doc_type == "RPP" else "содержание дисциплины",
+        keep_numbered_items=True,
+    )
+
+    for issue in issues:
+        if issue.category == "empty_cell":
+            issue.category = "manual_review"
+            issue.message = (
+                "Содержание: не удалось выделить содержимое раздела; "
+                "нужно проверить его границы и формат"
+            )
+
+    topics = []
+    table_found = False
+    text_ref = None
+    content_semester = None
+    period_caption = None
+
+    def report(category, message, ref, severity="warning"):
+        issues.append(ParseIssue(
+            category=category,
+            message=f"Содержание: {message}",
+            severity=severity,
+            source_ref=ref,
+        ))
+
+    for block, table_ref in blocks:
+        if isinstance(block, Paragraph):
+            text = normalize(block.text)
+
+            if text.startswith("период обучения"):
+                period_caption = " ".join(block.text.split())
+
+                match = re.fullmatch(
+                    r"период обучения\s*(?:\(модуль\))?"
+                    r"\s*:\s*семестр\s+([1-8])",
+                    text,
+                )
+                content_semester = (
+                    int(match.group(1))
+                    if match
+                    else None
+                )
+
+            if not text.startswith("период обучения"):
+                text_ref = text_ref or table_ref
+
+            continue
+
+        table_found = True
+
+        if period_caption is not None and content_semester is None:
+            report(
+                "unexpected_format",
+                f"не удалось прочитать период {period_caption!r}; "
+                "нужно проверить принадлежность таблицы",
+                table_ref,
+            )
+            continue
+
+        if semesters is not None:
+            if content_semester is None:
+                report(
+                    "manual_review",
+                    "семестр таблицы не указан; темы прочитаны "
+                    "без распределения по семестрам",
+                    table_ref,
+                )
+
+            elif content_semester not in semesters:
+                report(
+                    "manual_review",
+                    f"таблица относится к семестру {content_semester}, "
+                    f"а выбранная нагрузка к семестрам {semesters}; "
+                    "содержание не привязано",
+                    table_ref,
+                )
+                continue
+
+        rows = block.rows
+        header = None
+
+        for index, row in enumerate(rows[:5]):
+            columns = course_content_columns(row.cells)
+
+            if columns is not None:
+                header = (index, columns, len(row.cells), row.grid_cols_before, row.grid_cols_after)
+                break
+
+        if header is None:
+            wide_result = extract_wide_course_table(
+                block,
+                table_ref,
+            )
+
+            if wide_result is not None:
+                wide_topics, wide_issues = wide_result
+                topics.extend(wide_topics)
+                issues.extend(wide_issues)
+                continue
+
+            report(
+                "unexpected_format",
+                "не распознана шапка таблицы тем и видов занятий; "
+                "таблица пока не разобрана",
+                table_ref,
+            )
+            continue
+
+        header_index, columns, width, leading, trailing = header
+        topic_start, issue_start = len(topics), len(issues)
+        seen_cells = set()
+        hour_owners = {}
+        hour_column = columns.get("hours")
+
+        def matches_grid(row, cells):
+            if row.grid_cols_before != leading or len(cells) + row.grid_cols_after != width + trailing:
+                return False
+            if len(cells) == width:
+                return True
+            # Пустой край шапки может быть продолжением последней ячейки строки.
+            return len(cells) > width and all(
+                cell._tc is cells[width - 1]._tc or not cell.text.strip()
+                for cell in cells[width:]
+            )
+
+        # Объединенные часы не распределяем между разными занятиями.
+        if hour_column is not None:
+            for row in rows[header_index + 1:]:
+                cells = row.cells
+                if not matches_grid(row, cells):
+                    continue
+                owner = (
+                    cells[columns["topic"]]._tc,
+                    cells[columns["activity"]]._tc,
+                )
+                hour_cell = cells[hour_column]._tc
+                hour_owners.setdefault(hour_cell, set()).add(owner)
+
+        for row_number, row in enumerate(
+            rows[header_index + 1:],
+            start=header_index + 2,
+        ):
+            cells = row.cells
+            row_ref = table_ref.model_copy(
+                update={"row": row_number},
+            )
+
+            if not any(cell.text.strip() for cell in cells):
+                continue
+
+            repeated_header = course_content_columns(cells)
+
+            if repeated_header is not None:
+                if repeated_header != columns:
+                    report(
+                        "unexpected_format",
+                        "внутри таблицы изменился порядок колонок; "
+                        "оставшаяся часть требует проверки",
+                        row_ref,
+                    )
+                    break
+
+                continue
+
+            if not matches_grid(row, cells):
+                report(
+                    "unexpected_format",
+                    "строка не совпадает с сеткой шапки",
+                    row_ref,
+                )
+                continue
+
+            selected = {
+                field: cells[index]
+                for field, index in columns.items()
+            }
+            values = {
+                field: " ".join(cell.text.split())
+                for field, cell in selected.items()
+            }
+
+            if re.fullmatch(
+                r"(?:итого|всего)(?:\s+по\b.*|\s*[:.]?)",
+                normalize(values["topic"]),
+            ):
+                continue
+
+            cell_key = tuple(cell._tc for cell in selected.values())
+
+            if cell_key in seen_cells:
+                continue
+
+            seen_cells.add(cell_key)
+
+            hour_cell = selected.get("hours")
+            if len(set(cell_key)) != len(cell_key) or (
+                hour_cell is not None and len(hour_owners[hour_cell._tc]) > 1
+            ):
+                report(
+                    "ambiguous",
+                    "объединенная ячейка не позволяет однозначно прочитать строку",
+                    row_ref,
+                )
+                continue
+
+            if any(cell.tables for cell in selected.values()):
+                report(
+                    "unexpected_format",
+                    "в ячейке обнаружена вложенная таблица",
+                    row_ref,
+                )
+                continue
+
+            missing = [
+                field
+                for field, value in values.items()
+                if not value
+            ]
+
+            if missing:
+                field = missing[0]
+
+                report(
+                    "empty_cell",
+                    f"пустое поле {field}; строка {values!r} пропущена",
+                    row_ref.model_copy(
+                        update={"col": columns[field] + 1},
+                    ),
+                )
+                continue
+
+            hours = None
+            if hour_cell is not None:
+                raw_hours = hour_cell.text
+                try:
+                    hours = parse_topic_hours(raw_hours)
+                except ValueError:
+                    report(
+                        "unexpected_format",
+                        f"не удалось прочитать часы {raw_hours!r}; тема {values['topic']!r}, "
+                        f"вид занятия {values['activity']!r}",
+                        row_ref.model_copy(update={"col": columns["hours"] + 1}),
+                    )
+                    continue
+
+            source_column = "hours" if isinstance(hours, AcademicHoursRange) else "topic"
+            topics.append(CourseTopic(
+                topic=values["topic"],
+                activity=values["activity"],
+                hours=hours,
+                source_ref=row_ref.model_copy(
+                    update={"col": columns[source_column] + 1},
+                ),
+            ))
+
+        if hour_column is None and len(topics) > topic_start:
+            report(
+                "manual_review",
+                "в таблице нет колонки часов, темы и виды занятий сохранены",
+                table_ref,
+            )
+        elif len(topics) == topic_start and len(issues) == issue_start:
+            report(
+                "empty_cell",
+                "в таблице нет строк с темами и видами занятий",
+                table_ref,
+            )
+
+    if blocks and not table_found:
+        report(
+            "manual_review",
+            "раздел содержит текст без поддержанной таблицы; "
+            "темы с часами пока не извлечены",
+            blocks[0][1],
+        )
+
+    elif table_found and text_ref is not None:
+        report(
+            "manual_review",
+            "текстовые описания вне таблиц пока не перенесены "
+            "в course_content",
+            text_ref,
+            severity="info",
+        )
+
+    return topics, issues
