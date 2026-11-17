@@ -1,7 +1,20 @@
-schema_version: 1
+# Черновая конфигурация rule engine.
+# YAML задаёт метаданные и параметры; каждый type должен иметь обработчик в коде.
+# Правила взяты из реестра issue #6; этот файл сам по себе их не исполняет.
+
+schema_version: 2
+
+# До графа правила проверяют набор распарсенных JSON. После решений пользователя
+# та же логика запускается на проекции проверяемой версии графа.
+phases:
+  document_reconciliation:
+    input: parsed_documents
+  graph_validation:
+    input: graph_projection
 
 rules:
   - id: "R-03"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Внутренняя сумма часов"
     type: "sum_components_equals_total"
     status: "draft"
@@ -42,6 +55,7 @@ rules:
       Справочные часы активных форм и ЗЕТ в сумму не входят.
 
   - id: "R-05"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ между РПД и учебным планом"
     type: "compare_fields_across_documents"
     status: "draft"
@@ -72,6 +86,7 @@ rules:
       внутри РПД и сумм по семестрам РПП в этот черновик не входят.
 
   - id: "R-01"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность кодов компетенций и связей дисциплин (без матрицы)"
     type: "competency_consistency"
     status: "ready"
@@ -86,6 +101,7 @@ rules:
       или отклоняет кандидата. Автоматическое объединение запрещено.
 
   - id: "R-07"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сопоставление формулировок компетенций с одинаковым кодом"
     type: "competency_formulations"
     status: "ready_with_semantic_fallback"
@@ -109,6 +125,7 @@ rules:
       Выбор формулировки делает пользователь, разные коды не объединяются.
 
   - id: "R-08-local-reference"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Ссылка индикатора на существующую компетенцию внутри документа"
     type: "reference_exists"
     status: "ready"
@@ -131,6 +148,7 @@ rules:
       формулировок и кодов индикаторов относительно ЦКМВ.
 
   - id: "R-08-semantic"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая согласованность индикаторов с одинаковым кодом"
     type: "semantic_indicator_consistency"
     status: "draft"
@@ -162,6 +180,7 @@ rules:
       экспертной проверки и не являются нормативным нарушением.
 
   - id: "R-11"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая связь результатов обучения с содержанием и оцениванием в РПД"
     type: "semantic_rpd_alignment"
     status: "draft"
@@ -198,6 +217,7 @@ rules:
       VALIDATION_LLM_MODEL и VALIDATION_LLM_API_KEY; VALIDATION_LLM_API_BASE необязателен.
 
   - id: "R-06"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Поиск дубликатов внутри списков сущностей"
     type: "unique_by_fields"
     status: "draft"
@@ -223,29 +243,34 @@ rules:
 
   # Правила, не использующие матрицу компетенций.
   - id: "R-02"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сверка часов учебного плана и РПД/РПП"
     type: "hours_against_curriculum"
     status: "draft"
     notes: "Для РПП сравнивается нагрузка конкретного семестра; для РПД — только односеместровая запись."
 
   - id: "R-04"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Соответствие ЗЕТ и часов"
     type: "credit_hours"
     status: "draft"
     notes: "36 часов на 1 ЗЕТ — принятое для проекта допущение, нормативное основание требует подтверждения."
 
   - id: "R-05-title"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ титула и таблицы нагрузки"
     type: "title_credit_units"
     status: "draft"
 
   - id: "R-03-RPP"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сумма нагрузки практики по семестрам"
     type: "semester_workload_totals"
     status: "draft"
     notes: "Проверяется сумма часов и ЗЕТ по semester_workload против общего итога РПП."
 
   - id: "R-09"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Покрытие компетенций по полному учебному плану"
     type: "competency_coverage"
     status: "draft"
@@ -254,12 +279,14 @@ rules:
     notes: "Выключено до подтверждения полноты учебного плана и обязательного перечня компетенций: неполный образец не должен давать ложные ошибки."
 
   - id: "R-10"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Связь результатов обучения с индикаторами"
     type: "outcome_indicator_links"
     status: "draft"
     notes: "В ЦКМВ используются явные indicator_outcome_links; в РПД/РПП допускается опосредованная связь через компетенцию."
 
   - id: "R-15"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Принадлежность индикатора компетенции по коду"
     type: "indicator_hierarchy"
     status: "draft"
@@ -267,6 +294,7 @@ rules:
 
 
   - id: "R-13"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Обязательные разделы ЦКМВ"
     type: "required_sections"
     status: "draft"
@@ -275,6 +303,7 @@ rules:
     notes: "До утверждения перечня разделов и появления document_sections в ЦКМВ проверка пропускается."
 
   - id: "R-14"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Язык обучения дисциплины и программы"
     type: "education_language"
     status: "draft"

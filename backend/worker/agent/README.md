@@ -45,4 +45,3 @@ post-edit checks land in the same table the chat already reads.
 
 Only attribute writes are mapped to text replacement; adding or removing
 entities changes document structure and stays out of scope.
-

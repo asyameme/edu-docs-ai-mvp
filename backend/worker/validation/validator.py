@@ -3,13 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Mapping, Sequence
-import unicodedata
 from difflib import SequenceMatcher
-
+from pathlib import Path
+from typing import Any, Literal, Mapping, Sequence
 
 if __package__:
     from .semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
@@ -30,6 +29,8 @@ except ImportError:  # PyYAML устанавливается из backend/requir
 
 DEFAULT_RULES = Path(__file__).with_name("rules.yaml")
 DOC_TYPES = {"rpd", "rpp", "curriculum", "matrix", "characteristic", "ckmv"}
+ValidationPhase = Literal["document_reconciliation", "graph_validation"]
+VALIDATION_PHASES = {"document_reconciliation", "graph_validation"}
 
 
 class ValidationError(Exception):
@@ -74,6 +75,7 @@ class RuleResult:
 
 @dataclass
 class ValidationReport:
+    phase: ValidationPhase
     results: list[RuleResult]
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +83,7 @@ class ValidationReport:
         for result in self.results:
             counts[result.status] += 1
         return {
+            "phase": self.phase,
             "summary": {"rules_total": len(self.results), "rules_by_status": dict(counts)},
             "results": [
                 {**asdict(result), "findings": [asdict(item) for item in result.findings]}
@@ -96,10 +99,42 @@ def load_rules(path: str | Path = DEFAULT_RULES) -> dict[str, Any]:
         config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise ValidationError(f"Не удалось прочитать rules.yaml: {exc}") from exc
-    if not isinstance(config, dict) or config.get("schema_version") != 1:
-        raise ValidationError("Ожидается rules.yaml со schema_version: 1")
+    return _validate_rules_config(config)
+
+
+def _validate_rules_config(config: Any) -> dict[str, Any]:
+    if not isinstance(config, dict) or config.get("schema_version") != 2:
+        raise ValidationError("Ожидается rules.yaml со schema_version: 2")
+    phases = config.get("phases")
+    if not isinstance(phases, dict) or set(phases) != VALIDATION_PHASES:
+        raise ValidationError(
+            "rules.yaml должен объявлять фазы document_reconciliation и graph_validation"
+        )
+    expected_inputs = {
+        "document_reconciliation": "parsed_documents",
+        "graph_validation": "graph_projection",
+    }
+    for phase, expected_input in expected_inputs.items():
+        if not isinstance(phases[phase], dict) or phases[phase].get("input") != expected_input:
+            raise ValidationError(
+                f"Фаза {phase} должна использовать вход {expected_input}"
+            )
     if not isinstance(config.get("rules"), list):
         raise ValidationError("Поле rules в rules.yaml должно быть списком")
+    for rule in config["rules"]:
+        if not isinstance(rule, dict):
+            raise ValidationError("Каждое правило в rules.yaml должно быть объектом")
+        rule_phases = rule.get("phases")
+        if (
+            not isinstance(rule_phases, list)
+            or not rule_phases
+            or any(not isinstance(value, str) for value in rule_phases)
+            or len(rule_phases) != len(set(rule_phases))
+            or not set(rule_phases).issubset(VALIDATION_PHASES)
+        ):
+            raise ValidationError(
+                f"Правило {rule.get('id', '<без id>')} должно содержать уникальные допустимые phases"
+            )
     return config
 
 
@@ -871,13 +906,23 @@ def run_validation(
     documents: Sequence[Mapping[str, Any] | Document],
     rules_config: Mapping[str, Any] | None = None,
     *,
+    phase: ValidationPhase = "document_reconciliation",
     semantic_evaluator: SemanticEvaluator | None = None,
     competency_evaluator: CompetencyEvaluator | None = None,
 ) -> ValidationReport:
-    config = rules_config if rules_config is not None else load_rules()
+    """Проверить документы либо проекцию актуальной версии графа выбранной фазой.
+
+    Для graph_validation вызывающая сторона должна передать JSON-проекции той
+    версии графа, которую проверяет, а не исходный, уже устаревший пакет.
+    """
+    if phase not in VALIDATION_PHASES:
+        raise ValidationError(f"Неизвестная фаза валидации: {phase}")
+    config = _validate_rules_config(rules_config) if rules_config is not None else load_rules()
     docs = _documents(documents)
     results = []
     for rule in config.get("rules", []):
+        if phase not in rule.get("phases", []):
+            continue
         handler = HANDLERS.get(rule.get("type"))
         if handler is None:
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
@@ -887,17 +932,23 @@ def run_validation(
             results.append(handler(rule, docs, semantic_evaluator))
         else:
             results.append(handler(rule, docs))
-    return ValidationReport(results)
+    return ValidationReport(phase, results)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Проверить JSON по rules.yaml")
     parser.add_argument("json_files", nargs="+", type=Path)
     parser.add_argument("--rules", type=Path, default=DEFAULT_RULES)
+    parser.add_argument(
+        "--phase",
+        choices=sorted(VALIDATION_PHASES),
+        default="document_reconciliation",
+        help="graph_validation принимает проекции проверяемой версии графа",
+    )
     args = parser.parse_args(argv)
     try:
         docs = [json.loads(path.read_text(encoding="utf-8")) for path in args.json_files]
-        report = run_validation(docs, load_rules(args.rules))
+        report = run_validation(docs, load_rules(args.rules), phase=args.phase)
     except (OSError, json.JSONDecodeError, ValidationError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
