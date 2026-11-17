@@ -51,8 +51,10 @@ def test_import_is_persisted_and_duplicate_reuses_job():
             if state["status"] in {"completed", "partial", "failed"}:
                 break
             time.sleep(0.5)
-        assert state["status"] == "failed", state
-        assert state["files"][0]["error_code"] == "parser_not_configured"
+        assert state["status"] == "completed", state
+        imported = http.get(path + "/" + job["id"] + "/result").json()
+        assert imported["documents"][0]["member_name"] == "test.docx"
+        assert imported["documents"][0]["parsed"]["meta"]["doc_type"] == "RPD"
         assert http.get(path + "/" + str(uuid4())).status_code == 404
 
 

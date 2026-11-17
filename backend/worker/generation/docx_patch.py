@@ -7,14 +7,13 @@ entities in-place and leave the rest of each source document untouched.
 
 from __future__ import annotations
 
+import re
+import xml.etree.ElementTree as ET
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Mapping, Sequence
 from xml.sax.saxutils import quoteattr
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
-import xml.etree.ElementTree as ET
-import re
-
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
@@ -32,10 +31,11 @@ class DocxPatch:
 
     ``table``, ``row``, ``col`` and ``paragraph_index`` in ``source_ref`` are
     one-based. If the column is omitted, the old text must identify exactly
-    one paragraph in the selected row. If no table is supplied, the old text
-    must occur exactly once in the document body. ``section`` is retained as
-    diagnostic context; this patcher currently does not use
-    ``paragraph_index`` to select a target.
+    one paragraph in the selected row. If no table is supplied,
+    ``paragraph_index`` selects one body paragraph (numbered in document
+    order, including paragraphs inside tables, without headers and footers);
+    without it the old text must occur exactly once in the document body.
+    ``section`` is retained as diagnostic context.
     """
 
     source_ref: Mapping[str, object]
@@ -70,7 +70,16 @@ def _resolve_paragraphs(root: ET.Element, source_ref: Mapping[str, object]) -> l
         body = root.find(f"{W}body")
         if body is None:
             raise DocxPatchError("В DOCX не найдено тело документа")
-        return list(body.iter(f"{W}p"))
+        paragraphs = list(body.iter(f"{W}p"))
+        index_value = source_ref.get("paragraph_index")
+        if index_value is None:
+            return paragraphs
+        number = _positive_int(index_value, "paragraph_index")
+        if number > len(paragraphs):
+            raise DocxPatchError(
+                f"Абзац #{number} из source_ref не найден; в документе {len(paragraphs)} абзацев"
+            )
+        return [paragraphs[number - 1]]
 
     table_number = _positive_int(table_value, "table")
     if col_value is not None and row_value is None:
@@ -210,7 +219,9 @@ def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
         if not patch.old_text:
             raise DocxPatchError("old_text не может быть пустым")
         if any(character in patch.new_text for character in "\r\n\t"):
-            raise DocxPatchError("new_text должен быть одним текстовым фрагментом без табов и переносов")
+            raise DocxPatchError(
+                "new_text должен быть одним текстовым фрагментом без табов и переносов"
+            )
     active_patches = [patch for patch in patches if patch.old_text != patch.new_text]
     if not active_patches:
         return document
@@ -236,10 +247,12 @@ def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
             paragraphs = _resolve_paragraphs(root, patch.source_ref)
             matches: list[ET.Element] = []
             for paragraph in paragraphs:
-                count = "".join(node.text or "" for node in paragraph.iter(f"{W}t")).count(patch.old_text)
-                matches.extend([paragraph] * count)
+                combined = "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
+                matches.extend([paragraph] * combined.count(patch.old_text))
             if len(matches) != 1:
-                context = patch.source_ref.get("section") or patch.source_ref.get("table") or "документ"
+                context = (
+                    patch.source_ref.get("section") or patch.source_ref.get("table") or "документ"
+                )
                 detail = "не найден" if not matches else "найден неоднозначно"
                 raise DocxPatchError(f"Текст {patch.old_text!r} {detail} (источник: {context})")
             changed = _replace_in_paragraph(matches[0], patch.old_text, patch.new_text)
@@ -266,8 +279,36 @@ def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
         output = BytesIO()
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as target:
             for info in source.infolist():
-                payload = updated_xml if info.filename == DOCUMENT_PART else source.read(info.filename)
+                if info.filename == DOCUMENT_PART:
+                    payload = updated_xml
+                else:
+                    payload = source.read(info.filename)
                 target.writestr(info, payload)
         return output.getvalue()
     finally:
         source.close()
+
+
+def read_area_text(document: bytes, source_ref: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the visible text of each paragraph selected by ``source_ref``.
+
+    Coordinates follow the same rules as :class:`DocxPatch`: ``table``/``row``/
+    ``col`` select table cells, ``paragraph_index`` selects one body paragraph,
+    an empty reference selects the whole body. Text is combined across runs in
+    document order; runs and paragraphs without ``w:t`` contribute nothing.
+    """
+
+    _validate_docx(document)
+    source = ZipFile(BytesIO(document), "r")
+    try:
+        xml = source.read(DOCUMENT_PART)
+    finally:
+        source.close()
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as exc:
+        raise DocxPatchError("Не удалось прочитать word/document.xml") from exc
+    return tuple(
+        "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
+        for paragraph in _resolve_paragraphs(root, source_ref)
+    )

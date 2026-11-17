@@ -1,0 +1,166 @@
+from copy import deepcopy
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
+
+from app.confirmation_policy import apply_confirmation_policy
+from app.review_contract import CheckResult, ReviewIssue, RuleCoverage
+from app.review_projection import (
+    project_legacy_review_issue,
+    project_legacy_review_result,
+    project_prepare_report,
+    validator_result_for_contract,
+)
+
+
+def sample_result():
+    return {
+        "ruleset": {
+            "id": "local",
+            "revision": "r1",
+            "config": {},
+            "required_rules": ["R-01"],
+            "required_document_types": ["rpd"],
+        },
+        "coverage": [{
+            "rule_code": "R-01",
+            "rule_revision": "r1",
+            "status": "needs_review",
+            "checks": 2,
+            "reason": "Требуется ручная проверка",
+        }],
+        "issues": [{
+            "id": str(uuid4()),
+            "rule_code": "R-01",
+            "rule_revision": "r1",
+            "type": "manual_review",
+            "severity": "warning",
+            "status": "needs_review",
+            "message": "Нужна ручная проверка",
+            "source_ref_ids": [],
+            "evidence": {"reason": "Низкая уверенность"},
+            "checks": 2,
+        }],
+    }
+
+
+def test_main_contract_does_not_accept_validator_only_fields_or_coverage_status():
+    coverage = {
+        "rule_code": "R-01",
+        "rule_revision": "r1",
+        "status": "failed",
+    }
+    with pytest.raises(ValidationError):
+        RuleCoverage.model_validate({**coverage, "checks": 2})
+    with pytest.raises(ValidationError):
+        RuleCoverage.model_validate({**coverage, "status": "needs_review"})
+    issue = {
+            "id": uuid4(),
+            "rule_code": "R-01",
+            "rule_revision": "r1",
+            "type": "manual_review",
+            "severity": "warning",
+            "status": "needs_review",
+            "message": "Нужна ручная проверка",
+        }
+    for extension in ({"evidence": {}}, {"checks": 1}):
+        with pytest.raises(ValidationError):
+            ReviewIssue.model_validate({**issue, **extension})
+
+
+def test_validator_projection_maps_review_status_and_keeps_raw_diagnostics():
+    raw = sample_result()
+    original = deepcopy(raw)
+
+    projected = validator_result_for_contract(raw)
+    parsed = CheckResult.model_validate(projected)
+
+    assert raw == original
+    assert parsed.coverage[0].status == "failed"
+    assert parsed.issues[0].status == "needs_review"
+    assert parsed.issues[0].severity == "warning"
+    assert "checks" not in projected["coverage"][0]
+    assert "checks" not in projected["issues"][0]
+    assert "evidence" not in projected["issues"][0]
+
+
+def test_failed_normative_result_projects_as_warning_without_rewriting_coverage():
+    raw = sample_result()
+    raw["coverage"][0]["status"] = "failed"
+    raw["issues"][0].update(status="open", severity="blocking")
+
+    projected = validator_result_for_contract(raw)
+
+    assert projected["coverage"][0]["status"] == "failed"
+    assert projected["issues"][0]["severity"] == "warning"
+
+
+def test_legacy_report_and_database_issue_are_projected_to_main_contract():
+    raw = sample_result()
+    raw["issues"][0]["severity"] = "blocking"
+    raw["graph_ready"] = True
+    raw["graph_build_issues"] = []
+
+    projected = project_legacy_review_result(raw)
+    issue = project_legacy_review_issue(raw["issues"][0])
+
+    assert projected["graph_ready"] is True
+    assert projected["coverage"][0]["status"] == "failed"
+    assert "checks" not in projected["coverage"][0]
+    assert "evidence" not in projected["issues"][0]
+    assert "checks" not in issue
+    assert "evidence" not in issue
+    assert issue["severity"] == "warning"
+    CheckResult.model_validate({key: projected[key] for key in ("ruleset", "coverage", "issues")})
+
+
+def test_backend_graph_integrity_failure_remains_blocking():
+    issue = {
+        "id": uuid4(), "rule_code": "BACKEND_GRAPH_BUILD", "rule_revision": "r1",
+        "type": "unresolved_relation", "severity": "blocking", "status": "open",
+        "message": "Не удалось собрать связи графа",
+    }
+    assert project_legacy_review_issue(issue)["severity"] == "blocking"
+
+
+def test_policy_revision_is_stable_and_failed_remains_validator_outcome():
+    raw = {
+        "ruleset": {"id": "external", "revision": "upstream-r7", "config": {},
+                    "required_rules": ["R-01"], "required_document_types": ["rpd"]},
+        "coverage": [{"rule_code": "R-01", "rule_revision": "r7", "status": "failed"}],
+        "issues": [{"rule_code": "R-01", "severity": "blocking"}],
+    }
+
+    once = apply_confirmation_policy(raw)
+    twice = apply_confirmation_policy(once)
+    changed_rules = deepcopy(raw)
+    changed_rules["ruleset"]["config"] = {"threshold": 0.9}
+    changed = apply_confirmation_policy(changed_rules)
+
+    assert once["ruleset"]["revision"].startswith("mvp-confirmation-policy-v1:")
+    assert twice["ruleset"]["revision"] == once["ruleset"]["revision"]
+    assert changed["ruleset"]["revision"] != once["ruleset"]["revision"]
+    assert once["coverage"][0]["status"] == "failed"
+    assert once["issues"][0]["severity"] == "warning"
+    assert raw["ruleset"]["revision"] == "upstream-r7"
+
+
+def test_prepare_report_omits_backend_only_graph_metadata():
+    raw = sample_result()
+    raw["schema_version"] = 2
+    raw.update({
+        "graph_ready": False,
+        "graph_build_issues": [{"category": "unresolved"}],
+        "candidate": {"entities": []},
+        "artifacts": [],
+    })
+
+    report = project_prepare_report(raw)
+
+    assert report["schema_version"] == 2
+    assert set(report) == {"schema_version", "ruleset", "coverage", "issues"}
+    assert "graph_ready" not in report
+    assert "graph_build_issues" not in report
+    assert "candidate" not in report
+    assert "artifacts" not in report

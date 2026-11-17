@@ -47,15 +47,43 @@ export type ReviewJob = {
   current_review_version_id: string | null;
 };
 
-export type ReviewMutation = {
-  op: string;
-  target_kind: "entity" | "relation";
-  target_id: string;
-  field_path?: string | null;
-  value?: unknown;
-  entity?: { source_ref_ids?: string[] };
-  relation?: { source_ref_ids?: string[] };
-};
+export type ReviewMutation =
+  | {
+    op: "set_document_value";
+    document_id: string;
+    field_path: string;
+    expected_old_value: unknown;
+    value: unknown;
+  }
+  | {
+    op: "set_attribute";
+    target_kind: "entity" | "relation";
+    target_id: string;
+    field_path: string;
+    value: unknown;
+  }
+  | {
+    op: "add_entity";
+    target_kind: "entity";
+    target_id: string;
+    entity: { source_ref_ids: string[] };
+  }
+  | {
+    op: "remove_entity";
+    target_kind: "entity";
+    target_id: string;
+  }
+  | {
+    op: "add_relation" | "update_relation";
+    target_kind: "relation";
+    target_id: string;
+    relation: { source_ref_ids: string[] };
+  }
+  | {
+    op: "remove_relation";
+    target_kind: "relation";
+    target_id: string;
+  };
 
 export type ReviewVariant = {
   id: string;
@@ -72,10 +100,11 @@ export type ReviewIssue = {
   status: "open" | "needs_review";
   message: string;
   source_ref_ids: string[];
+  source_document_ids?: string[];
   requires_decision: boolean;
   variants: ReviewVariant[];
   effective_status?: string;
-  decision?: { variant_id: string } | null;
+  decision?: { variant_id: string; author: string | null } | null;
 };
 
 export type ReviewSnapshot = {
@@ -92,6 +121,11 @@ export type ReviewSnapshot = {
     section: string | null;
     locator: string;
   }>;
+  review?: {
+    graph_ready?: boolean;
+    decisions: Array<{ conflict_id: string; variant_id: string; author: string | null }>;
+    confirmation: { author: string | null } | null;
+  } | null;
 };
 
 export type ReviewDetails = {
@@ -104,7 +138,7 @@ export type ReviewDetails = {
   issues_count: number;
   issues: ReviewIssue[];
   confirmed: boolean;
-  confirmation: { accepted_warning_ids: string[] } | null;
+  confirmation: { accepted_warning_ids: string[]; author: string | null } | null;
   check_job_id: string | null;
   check_report: CheckReport | null;
 };

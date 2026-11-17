@@ -23,7 +23,7 @@ def test_nonfinite_json_is_rejected_without_creating_version():
         body = (
             '{"expected_version_id":"'
             + program["current_version_id"]
-            + '","snapshot":{"metadata":{"value":NaN}}}'
+            + '","signature":"Тестовый пользователь","snapshot":{"metadata":{"value":NaN}}}'
         )
         response = http.post(
             base + "/versions",
@@ -47,7 +47,8 @@ def test_nul_strings_return_422_without_changing_persisted_state():
             response = http.post(
                 base + "/versions",
                 json={"expected_version_id": program["current_version_id"],
-                      "snapshot": {"metadata": metadata}},
+                      "snapshot": {"metadata": metadata},
+                      "signature": "Тестовый пользователь"},
                 headers={"Idempotency-Key": str(uuid4())},
             )
             assert response.status_code == 422, response.text
@@ -87,6 +88,7 @@ def test_restore_repeated_key_returns_same_version_and_other_request_conflicts()
             json={
                 "expected_version_id": program["current_version_id"],
                 "snapshot": {"metadata": {"edited": True}},
+                "signature": "Тестовый пользователь",
             },
             headers={"Idempotency-Key": str(uuid4())},
         )
@@ -94,13 +96,16 @@ def test_restore_repeated_key_returns_same_version_and_other_request_conflicts()
         v2 = result.json()
         key = str(uuid4())
         restore_url = base + "/versions/" + program["current_version_id"] + "/restore"
-        request = {"expected_version_id": v2["id"]}
+        request = {"expected_version_id": v2["id"], "signature": "Тестовый пользователь"}
         first = http.post(restore_url, json=request, headers={"Idempotency-Key": key})
         assert first.status_code == 201, first.text
         repeat = http.post(restore_url, json=request, headers={"Idempotency-Key": key})
         assert repeat.status_code == 201
         assert repeat.json() == first.json()
-        changed = {"expected_version_id": first.json()["id"]}
+        changed = {
+            "expected_version_id": first.json()["id"],
+            "signature": "Другой пользователь",
+        }
         assert (
             http.post(restore_url, json=changed, headers={"Idempotency-Key": key}).status_code
             == 409

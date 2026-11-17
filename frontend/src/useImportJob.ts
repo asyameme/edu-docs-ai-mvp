@@ -12,6 +12,7 @@ import {
   type ReviewJob,
   type VersionRead,
 } from "./api";
+import { requestSignature, signatureForProgram, type ProgramSignature } from "./signature";
 
 const emptySession: ImportSession = { programId: "", jobId: "" };
 
@@ -28,6 +29,8 @@ export function useImportJob() {
   const prepareRequestRef = useRef("");
   const busyRef = useRef(false);
   const reviewBusyRef = useRef(false);
+  const signatureRef = useRef<ProgramSignature | null>(null);
+  const [signature, setSignature] = useState<ProgramSignature | null>(null);
   const [session, setSession] = useState(initial.current);
   const [program, setProgram] = useState<ProgramRead | null>(null);
   const [job, setJob] = useState<ImportJob | null>(null);
@@ -44,6 +47,19 @@ export function useImportJob() {
     sessionRef.current = next;
     setSession(next);
     saveSession(next);
+  }, []);
+
+  const askSignature = useCallback((openedProgram: ProgramRead) => {
+    if (openedProgram.id !== sessionRef.current.programId) return;
+    const result = requestSignature(openedProgram, signatureRef.current);
+    if (result.status === "accepted") {
+      signatureRef.current = result.signature;
+      setSignature(result.signature);
+    } else {
+      setNotice(result.status === "invalid"
+        ? "Введите имя для подписи длиной от 1 до 120 символов."
+        : "Подпись не изменена. Её можно указать или сменить кнопкой над программой.");
+    }
   }, []);
 
   const loadReviewDetails = useCallback(async (versionId: string, programId = sessionRef.current.programId) => {
@@ -79,12 +95,16 @@ export function useImportJob() {
   }, []);
 
   useEffect(() => {
+    signatureRef.current = null;
+    setSignature(null);
+    setProgram(null);
     if (!session.programId) return;
     let active = true;
     void api<ProgramRead>(`/api/v1/programs/${session.programId}`)
       .then((next) => {
         if (!active) return;
         setProgram(next);
+        askSignature(next);
         if (!sessionRef.current.versionId && !sessionRef.current.reviewId) {
           updateSession({ versionId: next.current_version_id });
         }
@@ -95,7 +115,7 @@ export function useImportJob() {
         }
       });
     return () => { active = false; };
-  }, [session.programId, updateSession]);
+  }, [session.programId, updateSession, askSignature]);
 
   useEffect(() => {
     if (!session.programId || !session.jobId) return;
@@ -362,13 +382,18 @@ export function useImportJob() {
   async function decide(conflictId: string, variantId: string) {
     const current = sessionRef.current;
     if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return;
+    const signature = signatureForProgram(signatureRef.current, current.programId);
+    if (!signature) {
+      setNotice("Укажите подпись для этой программы кнопкой над программой.");
+      return;
+    }
     reviewBusyRef.current = true;
     setReviewBusy(true);
     try {
       const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions`, {
         method: "POST",
         headers: operationHeaders(),
-        body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, variant_id: variantId }),
+        body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, variant_id: variantId, signature }),
       });
       updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
       setReviewDetails(null);
@@ -407,6 +432,11 @@ export function useImportJob() {
   async function confirm(acceptedWarningIds: string[]) {
     const current = sessionRef.current;
     if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId || !checkJob || checkJob.status !== "completed") return;
+    const signature = signatureForProgram(signatureRef.current, current.programId);
+    if (!signature) {
+      setNotice("Укажите подпись для этой программы кнопкой над программой.");
+      return;
+    }
     reviewBusyRef.current = true;
     setReviewBusy(true);
     try {
@@ -417,6 +447,7 @@ export function useImportJob() {
           expected_version_id: current.versionId,
           check_job_id: checkJob.id,
           accepted_warning_ids: acceptedWarningIds,
+          signature,
         }),
       });
       updateSession({ versionId: version.id });
@@ -461,6 +492,10 @@ export function useImportJob() {
     programId: session.programId,
     versionId: session.versionId ?? "",
     program,
+    signature: signatureForProgram(signature, session.programId),
+    changeSignature: () => {
+      if (program && !reviewBusyRef.current) askSignature(program);
+    },
     job,
     reviewJob,
     reviewDetails,

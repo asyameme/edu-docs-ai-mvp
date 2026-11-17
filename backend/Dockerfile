@@ -1,12 +1,16 @@
 FROM python:3.12-slim AS runtime
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
-WORKDIR /workspace
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONPATH=/workspace:/workspace/backend
+WORKDIR /workspace/backend
+COPY requirements.txt requirements-validation-llm.txt ./
+RUN pip install -r requirements.txt -r requirements-validation-llm.txt
 RUN useradd --create-home --uid 10001 appuser
 RUN mkdir -p /data/originals /data/artifacts && chown appuser:appuser /workspace /data/originals /data/artifacts
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser contracts ./contracts
+COPY --chown=appuser:appuser worker/parser ./worker/parser
+COPY --chown=appuser:appuser worker/generation ./worker/generation
+COPY --chown=appuser:appuser worker/agent ./worker/agent
+COPY --chown=appuser:appuser worker/validation ./worker/validation
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser examples ./examples
 COPY --chown=appuser:appuser pyproject.toml alembic.ini ./

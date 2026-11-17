@@ -1,0 +1,287 @@
+"""Предграфовый анализ настоящим валидатором без нормализации графа."""
+
+from copy import deepcopy
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+from document_cases import payload
+
+from app.document_analysis import analyze_documents
+from app.document_reconciliation import apply_document_mutations
+from app.domain import SnapshotV2
+from app.review_contract import AnalysisV2
+from app.review_projection import validator_result_for_contract
+from app.validation_bridge import run_local_check, validation_implementation_revision
+from worker.validation.validator import load_rules
+
+
+def package():
+    rpd, plan = payload("RPD"), payload("CURRICULUM")
+    rpd["disciplines"][0]["hours_total"] = 100
+    return [{"document_id": str(uuid4()), "parsed": d} for d in (rpd, plan)]
+
+
+def hours_config():
+    config = load_rules()
+    rule = next(r for r in config["rules"] if r["id"] == "R-02")
+    rule["status"] = "ready"
+    return {**config, "rules": [rule]}
+
+
+def test_real_rule_yields_document_choices_without_building_graph(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Предграфовый анализ не должен строить граф")
+
+    monkeypatch.setattr("app.document_adapter.to_snapshot_v2", forbidden)
+    documents = package()
+    original = deepcopy(documents)
+    job_id = uuid4()
+    config = hours_config()
+    result = analyze_documents(documents, job_id, config=config)
+    AnalysisV2.model_validate(validator_result_for_contract(result))
+    assert result == analyze_documents(documents, job_id, config=config)
+    assert "candidate" not in result
+    assert len(result["issues"]) == 1
+    issue = result["issues"][0]
+    assert issue["requires_decision"]
+    assert len(issue["variants"]) == 2
+    assert set(issue["source_document_ids"]) == {d["document_id"] for d in documents}
+    assert not issue["source_ref_ids"]
+    original_by_id = {d["document_id"]: d["parsed"] for d in documents}
+    for variant in issue["variants"]:
+        resolved = apply_document_mutations(original_by_id, variant["changes"])
+        values = [d.get("disciplines", d.get("curriculum_items"))[0]["hours_total"]
+                  for d in resolved.values()]
+        assert values[0] == values[1]
+        again = analyze_documents(
+            [{"document_id": i, "parsed": d} for i, d in resolved.items()], uuid4(), config=config
+        )
+        assert again["coverage"][0]["status"] == "passed"
+    assert documents == original
+
+
+def test_r01_candidate_has_explicit_choices_with_real_rule_engine():
+    records = [(uuid4(), "CKMV", name, code)
+               for name, code in (("ckmv-a.docx", "УК-1"),
+                                  ("ckmv-b.docx", "УК-2"))]
+    documents = []
+    for identity, kind, name, code in records:
+        parsed = payload(kind)
+        parsed["meta"].update(file_name=name, program_id="P")
+        parsed["competencies"] = [{
+            "code": code, "formulation": "Одинаковое описание",
+            "source_ref": {"file": name, "row": 1},
+        }]
+        parsed["indicators"] = [{
+            "code": f"{code}.1", "text": "Проверяемый результат",
+            "competency_code": code, "source_ref": {"file": name, "row": 2},
+        }]
+        parsed["learning_outcomes"] = [{
+            "local_id": "LO-1", "text": "Результат обучения",
+            "source_ref": {"file": name, "row": 3},
+        }]
+        parsed["indicator_outcome_links"] = [{
+            "indicator_code": f"{code}.1", "learning_outcome_id": "LO-1",
+            "source_ref": {"file": name, "row": 4},
+        }]
+        parsed["role_competency_links"][0]["competency_code"] = code
+        parsed["relations"] = [{
+            "src_entity": "curriculum_item", "src_key": "Дисциплина",
+            "dst_entity": "competency", "dst_key": code, "kind": "формирует",
+            "source_ref": {"file": name, "row": 2},
+        }]
+        documents.append({"document_id": str(identity), "parsed": parsed})
+    config = load_rules()
+    rule = next(item for item in config["rules"] if item["id"] == "R-01")
+    rule["status"] = "ready"
+    config["rules"] = [rule]
+    result = analyze_documents(documents, uuid4(), config=config)
+
+    issue = next(item for item in result["issues"]
+                 if item["type"] == "competency_code_match_candidate")
+    assert issue["requires_decision"] is True, issue
+    assert issue["severity"] == "warning"
+    assert len(issue["variants"]) == 3
+    assert {item["label"] for item in issue["variants"]} >= {
+        "Оставить коды разными",
+        "Выбрать значение из документов: УК-1",
+        "Выбрать значение из документов: УК-2",
+    }
+    accepted = next(item for item in issue["variants"]
+                    if item["label"] == "Выбрать значение из документов: УК-1")
+    selected = apply_document_mutations(
+        {item["document_id"]: item["parsed"] for item in documents},
+        accepted["changes"],
+    )
+    assert [item["competencies"][0]["code"] for item in selected.values()] == ["УК-1", "УК-1"]
+    assert all(item["role_competency_links"][0]["competency_code"] == "УК-1"
+               for item in selected.values())
+    assert all(item["indicators"][0]["competency_code"] == "УК-1"
+               for item in selected.values())
+    assert [item["indicator_outcome_links"][0]["indicator_code"]
+            for item in selected.values()] == ["УК-1.1", "УК-2.1"]
+    assert all(item["relations"][0]["dst_key"] == "УК-1" for item in selected.values())
+    assert [item["parsed"]["competencies"][0]["code"] for item in documents] == ["УК-1", "УК-2"]
+
+
+def test_ambiguous_locator_keeps_finding_without_fabricating_choices():
+    documents = package()
+    documents[0]["parsed"]["disciplines"].append(
+        deepcopy(documents[0]["parsed"]["disciplines"][0])
+    )
+    result = analyze_documents(documents, uuid4(), config=hours_config())
+    assert result["issues"]
+    assert all(not i["variants"] and not i["requires_decision"] for i in result["issues"])
+    assert all(i["evidence"]["document_mapping_limitations"] for i in result["issues"])
+
+
+def test_duplicate_filenames_are_resolved_by_document_identity():
+    documents = package()
+    for item in documents:
+        item["parsed"]["meta"]["file_name"] = "same.docx"
+        for rows in (item["parsed"].get("disciplines", []),
+                     item["parsed"].get("curriculum_items", [])):
+            for row in rows:
+                row["source_ref"]["file"] = "same.docx"
+    result = analyze_documents(documents, uuid4(), config=hours_config())
+    assert len(result["issues"][0]["variants"]) == 2
+
+
+def test_missing_nullable_formulation_can_be_filled_from_an_existing_document_value():
+    first, second = payload("RPD"), payload("RPP")
+    first["competencies"] = [{"code": "УК-1", "formulation": None,
+                               "source_ref": {"file": "first.docx", "paragraph_index": 1}}]
+    second["competencies"] = [{"code": "УК-1", "formulation": "Проверяемая формулировка",
+                                "source_ref": {"file": "second.docx", "paragraph_index": 1}}]
+    documents = [{"document_id": str(uuid4()), "parsed": first},
+                 {"document_id": str(uuid4()), "parsed": second}]
+    result = analyze_documents(documents, uuid4(), config=load_rules())
+    issue = next(
+        item for item in result["issues"]
+        if item["type"] == "competency_formulation_missing"
+    )
+
+    assert issue["requires_decision"] is True
+    assert len(issue["variants"]) == 1
+    changes = issue["variants"][0]["changes"]
+    assert len(changes) == 2
+    assert any(change["expected_old_value"] is None
+               and change["value"] == "Проверяемая формулировка" for change in changes)
+
+
+def test_pregraph_analysis_runs_active_rules_without_changing_profile():
+    documents = package()
+    config = load_rules()
+    original = deepcopy(config)
+    result = analyze_documents(documents, uuid4(), config=config)
+    assert {item["rule_code"] for item in result["coverage"]} == {
+        rule["id"] for rule in config["rules"] if rule["status"] != "draft"
+    }
+    assert len(result["coverage"]) == 5
+    assert config == original
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+
+
+@pytest.mark.parametrize("shared_locator", [False, True])
+def test_r07_maps_normalized_codes_and_null_formulations_to_exact_rows(shared_locator):
+    documents = []
+    for index, kind in enumerate(("RPD", "RPP")):
+        parsed = payload(kind)
+        parsed["competencies"] = [{
+            "code": " УК-1 " if not shared_locator else "УК-1",
+            "formulation": None if shared_locator and index == 0 else "Первый текст",
+            "source_ref": {"file": f"{index}.docx", "paragraph_index": 1},
+        }]
+        if shared_locator and index == 0:
+            other = deepcopy(parsed["competencies"][0])
+            other["formulation"] = "Первый текст"
+            parsed["competencies"].append(other)
+        if not shared_locator and index == 1:
+            parsed["competencies"][0]["formulation"] = None
+        documents.append({"document_id": str(uuid4()), "parsed": parsed})
+    config = load_rules()
+    config["rules"] = [rule for rule in config["rules"] if rule["id"] == "R-07"]
+
+    result = analyze_documents(documents, uuid4(), config=config)
+
+    issue = result["issues"][0]
+    assert issue["requires_decision"] is True
+    assert len(issue["variants"]) == 1
+    original = {item["document_id"]: item["parsed"] for item in documents}
+    resolved = apply_document_mutations(original, issue["variants"][0]["changes"])
+    assert all(row["formulation"] == "Первый текст"
+               for parsed in resolved.values() for row in parsed["competencies"])
+
+
+def test_graph_check_omits_drafts_and_keeps_active_rules():
+    documents = package()
+    config = load_rules()
+    result = run_local_check(documents, SnapshotV2(), uuid4(), config=config)
+
+    assert {item["rule_code"] for item in result["coverage"]} == {
+        rule["id"] for rule in config["rules"] if rule["status"] != "draft"
+    }
+    assert len(result["coverage"]) == 5
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+    assert not any(item["rule_code"] == "R-03" for item in result["coverage"])
+
+
+def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp_path):
+    from app.review_activities import ReviewActivities
+
+    documents = package()
+    for item in documents:
+        item["sha256"] = item["parsed"]["meta"]["file_hash"]
+    job = {"id": uuid4(), "program_id": uuid4(), "input_version_id": uuid4(),
+           "report": {}, "parameters": {
+               "purpose": "prepare", "executor": "local", "schema_version": 2,
+               "local_rules": hours_config(),
+               "implementation_revision": validation_implementation_revision(),
+               "input": {"documents": documents},
+           }}
+    published = []
+
+    class Repository:
+        def job_by_id(self, identity):
+            assert identity == job["id"]
+            return job
+
+        def publish(self, identity, result, artifacts, raw, raw_hash):
+            assert "candidate" not in raw and "candidate" not in result
+            AnalysisV2.model_validate(validator_result_for_contract(raw))
+            assert any("evidence" in item for item in raw["issues"])
+            assert all("evidence" not in item for item in result["issues"])
+            published.append(result)
+            job["report"]["outcome"] = "completed"
+            return "completed"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Локальная подготовка V2 не должна нормализовать граф в Activity")
+
+    monkeypatch.setattr("app.review_activities.to_snapshot_v2", forbidden)
+    activity = object.__new__(ReviewActivities)
+    activity.repo = Repository()
+    activity.settings = SimpleNamespace(artifact_files_path=tmp_path)
+    assert activity.execute({"job_id": str(job["id"])}) == "completed"
+    assert published[0]["schema_version"] == 2
+    assert published[0]["issues"][0]["requires_decision"]
+    assert activity.execute({"job_id": str(job["id"])}) == "completed"
+    assert len(published) == 1
+
+
+@pytest.mark.parametrize(("rule_revision", "config_revision", "expected"), [
+    ("rule-7", "profile-4", "rule-7"),
+    (None, "profile-4", "profile-4"),
+])
+def test_explicit_revision_is_preserved_on_both_phases(rule_revision, config_revision, expected):
+    documents = package()
+    config = hours_config()
+    config["revision"] = config_revision
+    if rule_revision:
+        config["rules"][0]["revision"] = rule_revision
+    analysis = analyze_documents(documents, uuid4(), config=config)
+    checked = run_local_check(documents, SnapshotV2(), uuid4(), config=config)
+    for result in (analysis, checked):
+        assert result["coverage"][0]["rule_revision"] == expected
+        assert result["issues"][0]["rule_revision"] == expected

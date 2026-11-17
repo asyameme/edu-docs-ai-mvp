@@ -58,7 +58,13 @@ def program(program_id: UUID, repo: RepoDep) -> ProgramRead:
 def save_version(
     program_id: UUID, body: VersionCreate, repo: RepoDep, operation_key: OperationKey
 ) -> VersionRead:
-    return repo.save(program_id, body.expected_version_id, operation_key, snapshot=body.snapshot)
+    return repo.save(
+        program_id,
+        body.expected_version_id,
+        operation_key,
+        snapshot=body.snapshot,
+        signature=body.signature,
+    )
 
 
 @router.get("/{program_id}/versions")
@@ -81,7 +87,13 @@ def restore(
     repo: RepoDep,
     operation_key: OperationKey,
 ) -> VersionRead:
-    return repo.save(program_id, body.expected_version_id, operation_key, restore_id=version_id)
+    return repo.save(
+        program_id,
+        body.expected_version_id,
+        operation_key,
+        restore_id=version_id,
+        signature=body.signature,
+    )
 
 
 @router.post("/{program_id}/documents", status_code=201)

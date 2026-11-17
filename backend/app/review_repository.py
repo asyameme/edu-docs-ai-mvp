@@ -1,6 +1,7 @@
 """Бизнес-задачи анализа, неизменяемые решения и подтверждение выбранной версии."""
 
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -8,18 +9,46 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.config import get_settings
+from app.document_reconciliation import apply_document_mutations
 from app.domain import SnapshotV2
 from app.errors import DomainError
+from app.graph_storage import hydrate_job, pack_tree
 from app.repository import Repository
 from app.review_contract import CheckResult
 from app.review_logic import (
     apply_changes,
     changes_in_base_sources,
     content_hash,
-    copy_sources,
     digest,
 )
+from app.review_projection import (
+    project_legacy_review_issue,
+    project_legacy_review_result,
+    project_prepare_report,
+)
 from app.review_storage import insert_issues, insert_version, previous_version
+
+
+def attach_document_artifacts(snapshot_data, artifacts):
+    by_document = {str(item["document_id"]): str(item["id"]) for item in artifacts}
+    for source in snapshot_data["source_refs"]:
+        artifact_id = by_document.get(str(source["document_id"]))
+        if artifact_id:
+            source["artifact_id"] = artifact_id
+            source["artifact_locator"] = "document"
+    return snapshot_data
+
+
+def graph_build_issues(issues):
+    return [
+        {
+            "category": item["category"],
+            "document_id": str(item["document_id"]),
+            "message": item["message"],
+        }
+        for item in issues
+        if item.get("category") == "unresolved_relation"
+    ]
 
 
 class ReviewRepository:
@@ -41,36 +70,48 @@ class ReviewRepository:
     def version(cur, program_id, version_id):
         return Repository.require(
             cur.execute(
-                "SELECT * FROM program_versions WHERE program_id=%s AND id=%s",
+                "SELECT *,graph_snapshot(graph_state_id,review) AS snapshot FROM "
+                "program_versions WHERE program_id=%s AND id=%s",
                 (program_id, version_id),
             ).fetchone()
         )
 
     @staticmethod
     def require_review(cur, program_id, review_id):
-        return Repository.require(
-            cur.execute(
-                """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
+        return hydrate_job(
+            cur,
+            Repository.require(
+                cur.execute(
+                    """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
                AND type='validate' AND parameters->>'purpose'='prepare'""",
-                (program_id, review_id),
-            ).fetchone()
+                    (program_id, review_id),
+                ).fetchone()
+            ),
         )
 
     @staticmethod
-    def checked_snapshot(row, review_id):
+    def checked_snapshot(row, review_id, *, require_graph=True):
         if row["snapshot"].get("schema_version") != 2:
             raise DomainError(404, "Версия не принадлежит подготовке")
         snapshot = SnapshotV2.model_validate(row["snapshot"])
         if snapshot.review is None or snapshot.review.review_id != review_id:
             raise DomainError(404, "Версия не принадлежит этой подготовке")
+        if require_graph and not snapshot.review.graph_ready:
+            raise DomainError(409, "Граф ещё не собран из выбранных значений документов")
         if snapshot.review.confirmation:
             raise DomainError(409, "Подтверждённая версия неизменяема; создайте новую подготовку")
         return snapshot
 
-    def create(self, program_id, key, body, *, purpose="prepare", review_id=None):
+    def create(
+        self, program_id, key, body, *, purpose="prepare", review_id=None,
+        allow_historical=False,
+        connection=None,
+    ):
         request = body.model_dump(mode="json")
         fingerprint = digest({"operation": purpose, "review_id": str(review_id), "body": request})
-        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+        with (
+            nullcontext(connection) if connection is not None else self.pool.connection()
+        ) as connection, connection.cursor(row_factory=dict_row) as cur:
             current = self.lock(cur, program_id)
             previous = cur.execute(
                 """SELECT id,request_hash,type FROM processing_jobs WHERE program_id=%s
@@ -86,12 +127,38 @@ class ReviewRepository:
                 (program_id, key),
             ).fetchone():
                 raise DomainError(409, "Ключ использован для сохранения версии")
-            if not self.settings.analysis_url:
+            if (
+                not self.settings.analysis_url
+                and not self.settings.local_validation_enabled
+            ):
                 raise DomainError(503, "ML-анализ не настроен; фиктивный результат не создаётся")
-            parameters = {"purpose": purpose, "review_id": str(review_id) if review_id else None}
+            executor = "http" if self.settings.analysis_url else "local"
+            parameters = {
+                "purpose": purpose,
+                "review_id": str(review_id) if review_id else None,
+                "executor": executor,
+            }
             if purpose == "prepare":
                 if current != body.expected_version_id:
                     raise DomainError(409, "Текущая версия изменилась")
+                current_snapshot = self.version(cur, program_id, current)["snapshot"]
+                current_review = current_snapshot.get("review") or {}
+                if current_review.get("graph_ready") is False:
+                    previous_review = self.require_review(
+                        cur, program_id, UUID(current_review["review_id"])
+                    )
+                    if not previous_review["report"].get("result", {}).get(
+                        "graph_build_issues"
+                    ):
+                        raise DomainError(409, "Сначала завершите согласование текущего пакета")
+                    required = {
+                        item["id"]
+                        for item in previous_review["report"].get("result", {}).get("issues", [])
+                        if item.get("requires_decision")
+                    }
+                    decided = {str(item["conflict_id"]) for item in current_review["decisions"]}
+                    if not required.issubset(decided):
+                        raise DomainError(409, "Сначала завершите обязательные решения")
                 source = Repository.require(
                     cur.execute(
                         """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
@@ -99,6 +166,7 @@ class ReviewRepository:
                         (program_id, body.import_job_id),
                     ).fetchone()
                 )
+                source = hydrate_job(cur, source)
                 report = source["report"]
                 files = []
                 for member in source["parameters"]["documents"]:
@@ -129,29 +197,47 @@ class ReviewRepository:
                     )
                 if not files or report.get("outcome") not in {"completed", "partial"}:
                     raise DomainError(409, "Импорт не завершён")
-                base = self.version(cur, program_id, current)["snapshot"]
                 parameters.update(
                     import_job_id=str(body.import_job_id),
                     import_workflow_id=source["workflow_id"],
-                    input={"base_snapshot": base, "documents": files},
+                    schema_version=2,
+                    input={"documents": files},
                 )
+                if executor == "local":
+                    from app.validation_bridge import validation_implementation_revision
+                    from worker.validation.validator import load_rules
+
+                    parameters["local_rules"] = load_rules()
+                    parameters["implementation_revision"] = validation_implementation_revision()
                 version_id = current
             else:
                 review = self.require_review(cur, program_id, review_id)
-                if body.version_id != current:
+                executor = review["parameters"].get("executor", "http")
+                parameters["executor"] = executor
+                if body.version_id != current and not allow_historical:
                     raise DomainError(409, "Проверять нужно текущую версию")
-                snapshot = self.checked_snapshot(self.version(cur, program_id, current), review_id)
+                snapshot = self.checked_snapshot(
+                    self.version(cur, program_id, body.version_id), review_id
+                )
                 ruleset = review["report"]["result"]["ruleset"]
+                if executor == "local":
+                    parameters["implementation_revision"] = review["parameters"].get(
+                        "implementation_revision"
+                    )
+                source_documents = review["parameters"]["input"]["documents"]
                 parameters.update(
                     content_hash=content_hash(snapshot),
                     ruleset=ruleset,
+                    project_check_documents=(review["parameters"].get("schema_version") == 2),
                     input={
                         "snapshot": snapshot.model_dump(mode="json"),
                         "ruleset": ruleset,
-                        "documents": review["parameters"]["input"]["documents"],
+                        # Worker повторно накладывает сохранённые решения после чтения
+                        # исходных parsed-артефактов; изменённый JSON не подменяет оригинал.
+                        "documents": source_documents,
                     },
                 )
-                version_id = current
+                version_id = body.version_id
             job_id = uuid4()
             size = len(json.dumps(parameters, ensure_ascii=False, allow_nan=False).encode())
             if size > self.settings.analysis_max_request_bytes:
@@ -159,30 +245,36 @@ class ReviewRepository:
             if purpose == "prepare":
                 parameters["review_id"] = str(job_id)
             cur.execute(
-                """INSERT INTO processing_jobs(id,program_id,input_version_id,operation_key,
-                   request_hash,type,temporal_namespace,workflow_id,parameters)
-                   VALUES(%s,%s,%s,%s,%s,'validate',%s,%s,%s)""",
+                "INSERT INTO processing_jobs(id,program_id,input_version_id,"
+                "input_graph_state_id,operation_key,\n                   request_hash,"
+                "type,temporal_namespace,workflow_id,parameters)\n                   "
+                "VALUES(%s,%s,%s,(SELECT graph_state_id FROM program_versions WHERE "
+                "id=%s),%s,%s,'validate',%s,%s,%s)",
                 (
                     job_id,
                     program_id,
+                    version_id,
                     version_id,
                     key,
                     fingerprint,
                     self.settings.temporal_namespace,
                     f"review-{job_id}",
-                    Jsonb(parameters),
+                    Jsonb(pack_tree(cur, program_id, parameters)),
                 ),
             )
             return job_id
 
     def job(self, program_id, job_id):
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
-            return Repository.require(
-                cur.execute(
-                    """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
+            return hydrate_job(
+                cur,
+                Repository.require(
+                    cur.execute(
+                        """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
                    AND type='validate' AND parameters->>'purpose' IN ('prepare','check')""",
-                    (program_id, job_id),
-                ).fetchone()
+                        (program_id, job_id),
+                    ).fetchone()
+                ),
             )
 
     def job_by_id(self, job_id):
@@ -217,6 +309,9 @@ class ReviewRepository:
             ]
 
     def publish(self, job_id, result, artifacts=(), raw_result=None, raw_hash=None):
+        from app.audit_storage import save_response
+
+        raw_artifact = save_response(raw_result)
         job = self.job_by_id(job_id)
         program_id, purpose = job["program_id"], job["parameters"]["purpose"]
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
@@ -226,65 +321,122 @@ class ReviewRepository:
             ).fetchone()
             if locked["workflow_id"] != job["workflow_id"] or "outcome" in locked["report"]:
                 return locked["report"].get("outcome", "failed")
-            if purpose == "prepare" and current != job["input_version_id"]:
-                report = {
-                    "outcome": "conflict",
-                    "result": result,
-                    "raw_result": raw_result,
-                    "raw_result_hash": raw_hash,
-                    "message": "Версия изменилась во время анализа; результат сохранён",
-                }
-                cur.execute(
-                    "UPDATE processing_jobs SET report=%s WHERE id=%s", (Jsonb(report), job_id)
-                )
-                return "conflict"
-            output_id = None
             if purpose == "prepare":
                 for artifact in artifacts:
                     cur.execute(
-                        """INSERT INTO document_artifacts(
-                           id,program_id,document_id,producing_job_id,
-                           parser_revision,parser_config_hash,storage_key,sha256,size_bytes)
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        "INSERT INTO document_artifacts(\n                           id,"
+                        "program_id,document_id,producing_job_id,producing_attempt,kind,"
+                        "\n                           parser_revision,parser_config,"
+                        "parser_config_hash,hash_encoding,storage_key,sha256,"
+                        "size_bytes)\n                           VALUES(%s,%s,%s,%s,1,"
+                        "'markdown',%s,%s,%s,'raw-bytes',%s,%s,%s)",
                         (
                             UUID(artifact["id"]),
                             program_id,
                             UUID(artifact["document_id"]),
                             job_id,
                             artifact["parser_revision"],
+                            Jsonb(artifact["parser_config"]),
                             artifact["parser_config_hash"],
                             artifact["id"],
                             artifact["sha256"],
                             artifact["size_bytes"],
                         ),
                     )
+            if purpose == "prepare" and current != job["input_version_id"]:
+                candidate = None
+                if job["parameters"].get("schema_version", 1) == 1:
+                    from app.graph_storage import save_graph
+
+                    candidate = save_graph(
+                        cur, program_id, result["candidate"], producer=job_id, attempt=1
+                    )
+                    result = {
+                        **result,
+                        "candidate": {
+                            "__graph_state": str(candidate),
+                            "review": result["candidate"].get("review"),
+                        },
+                    }
+                report = {
+                    "outcome": "conflict",
+                    "result": result,
+                    "raw_result_artifact": raw_artifact,
+                    "raw_result_hash": raw_hash,
+                    "message": "Версия изменилась во время анализа; результат сохранён",
+                }
+                cur.execute(
+                    "UPDATE processing_jobs SET report=%s,output_graph_state_id=%s WHERE id=%s",
+                    (Jsonb(pack_tree(cur, program_id, report)), candidate, job_id),
+                )
+                return "conflict"
+            output_id = None
+            if purpose == "prepare":
                 output_id = uuid5(job_id, "analysis-version")
-                original = SnapshotV2.model_validate(result["candidate"])
-                snapshot = copy_sources(original, output_id)
-                refs = {
-                    str(a.id): str(b.id)
-                    for a, b in zip(original.source_refs, snapshot.source_refs, strict=True)
-                }
-                for issue in result["issues"]:
-                    issue["source_ref_ids"] = [refs[key] for key in issue["source_ref_ids"]]
-                    for variant in issue["variants"]:
-                        for change in variant["changes"]:
-                            for item_key in ("entity", "relation"):
-                                item = change.get(item_key)
-                                if item:
-                                    item["source_ref_ids"] = [
-                                        refs[key] for key in item["source_ref_ids"]
-                                    ]
-                state = snapshot.model_dump(mode="json")
-                state["review"] = {
-                    "review_id": str(job_id),
-                    "import_job_id": job["parameters"]["import_job_id"],
-                    "analysis_version_id": str(output_id),
-                    "decisions": [],
-                    "confirmation": None,
-                }
-                snapshot = SnapshotV2.model_validate(state)
-                result["candidate"] = snapshot.model_dump(mode="json")
+                if job["parameters"].get("schema_version", 1) == 2:
+                    decisions_pending = any(item["requires_decision"] for item in result["issues"])
+                    build_errors = []
+                    original_documents = {
+                        item["document_id"]: item["parsed"]
+                        for item in job["parameters"]["input"]["documents"]
+                    }
+                    if decisions_pending:
+                        graph_data = {
+                            "schema_version": 2,
+                            "metadata": {},
+                            "document_ids": [],
+                            "entities": [],
+                            "relations": [],
+                            "source_refs": [],
+                            "source_links": [],
+                        }
+                    else:
+                        from app.document_adapter import to_snapshot_v2
+
+                        files = [
+                            {"document_id": identity, "output": document}
+                            for identity, document in original_documents.items()
+                        ]
+                        graph_data, build_issues = to_snapshot_v2(
+                            program_id, files, original_files=files
+                        )
+                        build_errors = graph_build_issues(build_issues)
+                        if build_errors:
+                            graph_data = {
+                                "schema_version": 2,
+                                "metadata": {},
+                                "document_ids": [],
+                                "entities": [],
+                                "relations": [],
+                                "source_refs": [],
+                                "source_links": [],
+                            }
+                        else:
+                            attach_document_artifacts(graph_data, result.get("artifacts", []))
+                    state = SnapshotV2.model_validate(graph_data).model_dump(mode="json")
+                    state["review"] = {
+                        "review_id": str(job_id),
+                        "import_job_id": job["parameters"]["import_job_id"],
+                        "analysis_version_id": str(output_id),
+                        "graph_ready": not decisions_pending and not build_errors,
+                        "decisions": [],
+                        "confirmation": None,
+                    }
+                    snapshot = SnapshotV2.model_validate(state)
+                    result["graph_ready"] = not decisions_pending and not build_errors
+                    result["graph_build_issues"] = build_errors
+                else:
+                    snapshot = SnapshotV2.model_validate(result["candidate"])
+                    state = snapshot.model_dump(mode="json")
+                    state["review"] = {
+                        "review_id": str(job_id),
+                        "import_job_id": job["parameters"]["import_job_id"],
+                        "analysis_version_id": str(output_id),
+                        "decisions": [],
+                        "confirmation": None,
+                    }
+                    snapshot = SnapshotV2.model_validate(state)
+                    result["candidate"] = snapshot.model_dump(mode="json")
                 insert_version(cur, program_id, current, output_id, snapshot)
                 issue_version = output_id
             else:
@@ -292,22 +444,34 @@ class ReviewRepository:
                 CheckResult.model_validate(result)
                 if digest(result["ruleset"]) != digest(job["parameters"]["ruleset"]):
                     raise ValueError("Check used another ruleset")
+            cur.execute(
+                "UPDATE processing_jobs SET output_version_id=%s,output_graph_state_id="
+                "(SELECT graph_state_id FROM program_versions WHERE "
+                "id=%s),checked_version_id=%s WHERE id=%s",
+                (output_id, output_id, issue_version, job_id),
+            )
             insert_issues(cur, program_id, job_id, issue_version, result["issues"])
             report = {
                 "outcome": "completed",
                 "result": result,
-                "raw_result": raw_result,
+                "raw_result_artifact": raw_artifact,
                 "raw_result_hash": raw_hash,
                 "completed_at": datetime.now(UTC).isoformat(),
             }
             cur.execute(
                 "UPDATE processing_jobs SET output_version_id=%s,report=%s WHERE id=%s",
-                (output_id, Jsonb(report), job_id),
+                (output_id, Jsonb(pack_tree(cur, program_id, report)), job_id),
             )
             return "completed"
 
     def fail(self, job_id, workflow_id, code, message):
         with self.pool.connection() as connection:
+            connection.execute(
+                "SELECT p.id FROM programs p JOIN processing_jobs j ON "
+                "j.program_id=p.id "
+                "WHERE j.id=%s FOR UPDATE OF p",
+                (job_id,),
+            )
             connection.execute(
                 """UPDATE processing_jobs SET report=%s WHERE id=%s AND workflow_id=%s
                    AND NOT report ? 'outcome'""",
@@ -334,7 +498,9 @@ class ReviewRepository:
             review = self.require_review(cur, program_id, review_id)
             if current != body.expected_version_id:
                 raise DomainError(409, "Текущая версия изменилась")
-            snapshot = self.checked_snapshot(self.version(cur, program_id, current), review_id)
+            snapshot = self.checked_snapshot(
+                self.version(cur, program_id, current), review_id, require_graph=False
+            )
             issue = Repository.require(
                 cur.execute(
                     "SELECT job_id,version_id,details FROM validation_issues "
@@ -355,6 +521,93 @@ class ReviewRepository:
             )
             if not details["requires_decision"] or variant is None:
                 raise DomainError(422, "Выберите один из предложенных вариантов")
+            if review["parameters"].get("schema_version") == 2:
+                if issue["job_id"] != review_id:
+                    raise DomainError(409, "Предграфовое решение должно относиться к AnalysisV2")
+                if any(
+                    change.get("op") != "set_document_value"
+                    for decision in snapshot.review.decisions for change in decision.changes
+                ):
+                    raise DomainError(
+                        409, "После правок графа нельзя пересобирать его предграфовым выбором"
+                    )
+                documents = review["parameters"]["input"]["documents"]
+                original = {item["document_id"]: item["parsed"] for item in documents}
+                choices = [
+                    item.model_dump(mode="json")
+                    for item in snapshot.review.decisions
+                    if item.conflict_id != body.conflict_id
+                ]
+                changes = [change for choice in choices for change in choice["changes"]]
+                changes.extend(variant["changes"])
+                selected_documents = apply_document_mutations(original, changes)
+                choices.append(
+                    {
+                        "conflict_id": str(body.conflict_id),
+                        "variant_id": str(body.variant_id),
+                        "check_job_id": str(review_id),
+                        "changes": variant["changes"],
+                        "decided_at": datetime.now(UTC).isoformat(),
+                        "author": body.signature,
+                    }
+                )
+                required = {
+                    item["id"]
+                    for item in review["report"]["result"]["issues"]
+                    if item["requires_decision"]
+                }
+                decided = {str(item["conflict_id"]) for item in choices}
+                graph_ready = required.issubset(decided)
+                build_errors = []
+                if graph_ready:
+                    from app.document_adapter import to_snapshot_v2
+
+                    files = [
+                        {"document_id": identity, "output": value}
+                        for identity, value in selected_documents.items()
+                    ]
+                    graph_data, build_issues = to_snapshot_v2(
+                        program_id, files, original_files=documents
+                    )
+                    build_errors = graph_build_issues(build_issues)
+                    if build_errors:
+                        graph_ready = False
+                        graph_data = snapshot
+                    else:
+                        attach_document_artifacts(
+                            graph_data, review["report"]["result"].get("artifacts", [])
+                        )
+                else:
+                    graph_data = snapshot
+                state = (
+                    graph_data.model_dump(mode="json")
+                    if isinstance(graph_data, SnapshotV2)
+                    else SnapshotV2.model_validate(graph_data).model_dump(mode="json")
+                )
+                if state["review"] is None:
+                    state["review"] = snapshot.review.model_dump(mode="json")
+                state["review"]["graph_ready"] = graph_ready
+                state["review"]["decisions"] = choices
+                next_snapshot = SnapshotV2.model_validate(state)
+                version = insert_version(
+                    cur,
+                    program_id,
+                    current,
+                    uuid4(),
+                    next_snapshot,
+                    key=key,
+                    fingerprint=fingerprint,
+                    actor_type="user",
+                    actor_id=body.signature,
+                )
+                review_result = review["report"].get("result", {})
+                review_result["graph_ready"] = graph_ready
+                review_result["graph_build_issues"] = build_errors
+                cur.execute(
+                    "UPDATE processing_jobs SET report=%s WHERE id=%s",
+                    (Jsonb(pack_tree(cur, program_id, review["report"])), review_id),
+                )
+                return version
             base = review["report"]["result"]["candidate"]
             source_snapshot = self.version(cur, program_id, issue["version_id"])["snapshot"]
             changes = changes_in_base_sources(variant["changes"], source_snapshot, base)
@@ -370,7 +623,7 @@ class ReviewRepository:
                     "check_job_id": str(issue["job_id"]),
                     "changes": changes,
                     "decided_at": datetime.now(UTC).isoformat(),
-                    "author": None,
+                    "author": body.signature,
                 }
             )
             selected = apply_changes(
@@ -380,18 +633,29 @@ class ReviewRepository:
             state["review"]["decisions"] = choices
             selected = SnapshotV2.model_validate(state)
             version_id = uuid4()
-            selected = copy_sources(selected, version_id)
             return insert_version(
-                cur, program_id, current, version_id, selected, key=key, fingerprint=fingerprint
+                cur,
+                program_id,
+                current,
+                version_id,
+                selected,
+                key=key,
+                fingerprint=fingerprint,
+                actor_type="user",
+                actor_id=body.signature,
             )
 
     @staticmethod
     def job_with_cursor(cur, program_id, job_id):
-        return Repository.require(
-            cur.execute(
-                "SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s AND type='validate'",
-                (program_id, job_id),
-            ).fetchone()
+        return hydrate_job(
+            cur,
+            Repository.require(
+                cur.execute(
+                    "SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s AND "
+                    "type='validate'",
+                    (program_id, job_id),
+                ).fetchone()
+            ),
         )
 
     def confirm(self, program_id, review_id, key, body):
@@ -425,14 +689,17 @@ class ReviewRepository:
                 or checked["parameters"].get("content_hash") != content_hash(snapshot)
             ):
                 raise DomainError(409, "Нужна завершённая проверка точной текущей версии")
-            result = CheckResult.model_validate(checked["report"]["result"])
+            result = CheckResult.model_validate(
+                project_legacy_review_result(checked["report"]["result"])
+            )
             if digest(result.ruleset.model_dump(mode="json")) != digest(
                 checked["parameters"]["ruleset"]
             ):
                 raise DomainError(409, "Набор правил проверки изменился")
             coverage = {item.rule_code: item.status for item in result.coverage}
             if any(
-                coverage[code] not in {"passed", "failed"} for code in result.ruleset.required_rules
+                coverage.get(code) not in {"passed", "failed"}
+                for code in result.ruleset.required_rules
             ):
                 raise DomainError(409, "Обязательные проверки пропущены")
             decided = {str(item.conflict_id) for item in snapshot.review.decisions}
@@ -453,15 +720,22 @@ class ReviewRepository:
                 "content_hash": hash_before,
                 "accepted_warning_ids": [str(v) for v in body.accepted_warning_ids],
                 "confirmed_at": datetime.now(UTC).isoformat(),
-                "author": None,
+                "author": body.signature,
             }
             snapshot = SnapshotV2.model_validate(state)
             version_id = uuid4()
-            snapshot = copy_sources(snapshot, version_id)
             if content_hash(snapshot) != hash_before:
                 raise DomainError(409, "Содержимое не совпадает с проверенным")
             return insert_version(
-                cur, program_id, current, version_id, snapshot, key=key, fingerprint=fingerprint
+                cur,
+                program_id,
+                current,
+                version_id,
+                snapshot,
+                key=key,
+                fingerprint=fingerprint,
+                actor_type="user",
+                actor_id=body.signature,
             )
 
     def details(self, program_id, version_id, limit, offset):
@@ -496,9 +770,37 @@ class ReviewRepository:
                 (program_id, job_ids),
             ).fetchall()
         issues = [
-            {**item["details"], "source_version_id": item["version_id"], "job_id": item["job_id"]}
+            {
+                **project_legacy_review_issue(item["details"]),
+                "source_version_id": item["version_id"],
+                "job_id": item["job_id"],
+            }
             for item in stored
         ]
+        build_errors = review["report"].get("result", {}).get("graph_build_issues", [])
+        if snapshot.review.graph_ready is False:
+            for item in build_errors:
+                issue_id = uuid5(
+                    snapshot.review.review_id,
+                    "graph-build:" + digest(item),
+                )
+                issues.append(
+                    {
+                        "id": str(issue_id),
+                        "rule_code": "BACKEND_GRAPH_BUILD",
+                        "rule_revision": digest({"builder": "document-adapter-v2"}),
+                        "type": item["category"],
+                        "severity": "blocking",
+                        "status": "open",
+                        "message": item["message"],
+                        "source_ref_ids": [],
+                        "source_document_ids": [item["document_id"]],
+                        "requires_decision": False,
+                        "variants": [],
+                        "source_version_id": version_id,
+                        "job_id": snapshot.review.review_id,
+                    }
+                )
         accepted = (
             set(snapshot.review.confirmation.accepted_warning_ids)
             if snapshot.review.confirmation
@@ -521,5 +823,10 @@ class ReviewRepository:
             "confirmed": snapshot.review.confirmation is not None,
             "confirmation": snapshot.review.confirmation,
             "check_job_id": latest["id"] if latest else None,
-            "check_report": latest["report"].get("result") if latest else None,
+            "check_report": (
+                project_legacy_review_result(latest["report"]["result"])
+                if latest
+                else None
+            ),
+            "prepare_report": project_prepare_report(review["report"]["result"]),
         }

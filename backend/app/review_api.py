@@ -19,8 +19,15 @@ from app.domain import VersionRead
 from app.errors import DomainError
 from app.program_api import Limit, Offset, OperationKey, RepoDep
 from app.repository import Repository
-from app.review_contract import CheckCreate, ConfirmCreate, DecisionCreate, ReviewCreate
+from app.review_contract import (
+    CheckCreate,
+    CheckResult,
+    ConfirmCreate,
+    DecisionCreate,
+    ReviewCreate,
+)
 from app.review_logic import digest
+from app.review_projection import project_legacy_review_result
 from app.review_repository import ReviewRepository
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}", tags=["Reviews"])
@@ -221,7 +228,13 @@ async def read_check(
     return {
         **ReviewJobRead.model_validate(state).model_dump(mode="json"),
         "content_hash": row["parameters"]["content_hash"],
-        "report": row["report"].get("result"),
+        "report": (
+            CheckResult.model_validate(
+                project_legacy_review_result(row["report"]["result"])
+            ).model_dump(mode="json")
+            if row["report"].get("result")
+            else None
+        ),
     }
 
 
@@ -245,7 +258,7 @@ def download_artifact(
     with repo.pool.connection() as connection:
         row = connection.execute(
             "SELECT storage_key FROM document_artifacts WHERE program_id=%s "
-            "AND document_id=%s AND id=%s",
+            "AND document_id=%s AND id=%s AND kind='markdown'",
             (program_id, document_id, artifact_id),
         ).fetchone()
     if row is None:

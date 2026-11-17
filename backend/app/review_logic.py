@@ -186,3 +186,45 @@ def map_analysis_ids(result, job_id, base):
         return value
 
     return walk(data)
+
+
+def map_analysis_v2_ids(result, job_id, documents):
+    """Закрепляет IDs результата без графа за неизменяемой попыткой анализа."""
+    data = result.model_dump(mode="json")
+    allowed_documents = {str(item["document_id"]) for item in documents}
+    if any(str(item.document_id) not in allowed_documents for item in result.artifacts):
+        raise ValueError("Analysis artifact references a document outside the pinned import")
+    for issue in result.issues:
+        if not set(map(str, issue.source_document_ids)).issubset(allowed_documents):
+            raise ValueError("Analysis issue references a document outside the pinned import")
+        for variant in issue.variants:
+            for change in variant.changes:
+                if str(change.document_id) not in allowed_documents:
+                    raise ValueError(
+                        "Analysis variant references a document outside the pinned import"
+                    )
+    groups = [data["issues"], data["artifacts"]]
+    groups += [issue["variants"] for issue in data["issues"]]
+    values = [item["id"] for group in groups for item in group]
+    if len(values) != len(set(values)):
+        raise ValueError("Analysis IDs must be unique across object kinds")
+    mapping = {value: str(uuid5(job_id, value)) for value in values}
+
+    def walk(value, key=""):
+        if isinstance(value, dict):
+            literal = {
+                "config",
+                "ruleset",
+                "value",
+                "expected_old_value",
+                "document_id",
+                "source_document_ids",
+            }
+            return {k: deepcopy(v) if k in literal else walk(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(item, key) for item in value]
+        if isinstance(value, str) and (key == "id" or key.endswith("_id") or key.endswith("_ids")):
+            return mapping.get(value, value)
+        return value
+
+    return walk(data)

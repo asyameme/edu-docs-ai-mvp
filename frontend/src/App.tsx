@@ -22,6 +22,7 @@ type ReconciliationFinding = {
   description: string;
   choices: FindingChoice[];
   selectedChoiceId?: string;
+  ruleCode?: string;
 };
 
 type ValidationIssue = {
@@ -92,6 +93,7 @@ const demoProgram: ParsedProgram = {
   findings: [
     {
       id: "competence-code",
+      ruleCode: "R-01",
       title: "Код компетенции различается",
       description: "План: УК-2 · РПД: УК-3 | Учебный план, стр. 8 · РПД, разд. 3.2",
       choices: [
@@ -267,34 +269,86 @@ function formatIssueSummary(issues: ValidationIssue[]) {
   ].filter(Boolean).join(" · ") || "Проверка завершена";
 }
 
+type FindingFilter = "all" | "R-01" | "R-07" | "R-08";
+type FindingStatusFilter = "all" | "pending" | "saved";
+
+function findingRuleGroup(ruleCode?: string) {
+  return ruleCode?.match(/^R-(01|07|08)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
+}
+
+function issueRuleGroup(ruleId?: string) {
+  return ruleId?.match(/^R-(01|07|08)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
+}
+
+// Подсветка только визуальная: показывает отличающиеся слова, а не вывод о смысловой эквивалентности.
+function ComparisonText({ value, otherValues }: { value: string; otherValues: string[] }) {
+  const pieces = value.match(/\s+|[^\s]+/g) ?? [];
+  const otherWords = otherValues.map((text) => new Set((text.match(/[^\s]+/g) ?? [])
+    .map((word) => word.toLocaleLowerCase("ru").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))));
+  return <span>{pieces.map((piece, index) => {
+    const word = piece.toLocaleLowerCase("ru").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+    const differs = Boolean(word) && otherWords.some((words) => !words.has(word));
+    return differs
+      ? <mark className="competency-diff-word" key={index}>{piece}</mark>
+      : <span key={index}>{piece}</span>;
+  })}</span>;
+}
+
 function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): ParsedProgram {
   const snapshot = details.version.snapshot;
   const sourceRefs = new Map(snapshot.source_refs.map((source) => [source.id, source]));
   const documentNames = new Map((job?.files ?? []).map((file) => [file.document_id, file.member_name]));
   const documentCount = job?.files.length ?? snapshot.source_refs.length;
-  const sourceDescription = (ids: string[]) => {
+  const sourceDescription = (
+    ids: string[],
+    documentIds: string[] = [],
+    fieldPaths: string[] = [],
+  ) => {
     const sources = ids.map((id) => sourceRefs.get(id)).filter((source) => source !== undefined);
-    const names = [...new Set(sources.map((source) => documentNames.get(source.document_id)).filter((name) => name !== undefined))];
+    const sourceDocumentIds = [...new Set([
+      ...documentIds,
+      ...sources.map((source) => source.document_id),
+    ])];
+    const names = [...new Set(
+      sourceDocumentIds
+        .map((id) => documentNames.get(id))
+        .filter((name) => name !== undefined),
+    )];
     const sections = [...new Set(sources.map((source) => source.section).filter((section) => section !== null))];
     return {
       source: names.length ? names.join(" · ") : "Источник пакета документов",
-      location: sections.length ? sections.join(" · ") : "Фрагмент исходного документа",
+      location: sections.length
+        ? sections.join(" · ")
+        : fieldPaths.length
+          ? fieldPaths.join(" · ")
+          : "Фрагмент исходного документа",
     };
   };
   const findings = details.issues.filter((issue) => issue.requires_decision)
     .map((issue) => {
       const choices = issue.variants.map((variant) => {
         const changeSourceIds = variant.changes.flatMap((change) => [
-          ...(change.entity?.source_ref_ids ?? []),
-          ...(change.relation?.source_ref_ids ?? []),
+          ...("entity" in change ? change.entity.source_ref_ids : []),
+          ...("relation" in change ? change.relation.source_ref_ids : []),
         ]);
-        const location = sourceDescription(changeSourceIds.length ? changeSourceIds : issue.source_ref_ids);
+        const changeDocumentIds = variant.changes.flatMap((change) =>
+          change.op === "set_document_value" ? [change.document_id] : [],
+        );
+        const fieldPaths = variant.changes.flatMap((change) =>
+          "field_path" in change ? [change.field_path] : [],
+        );
+        const location = sourceDescription(
+          changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
+          changeDocumentIds.length ? changeDocumentIds : issue.source_document_ids ?? [],
+          fieldPaths,
+        );
         return { id: variant.id, value: variant.label, ...location };
       });
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
       const sourceSummary = [...new Set(choices.map((choice) => `${choice.source}, ${choice.location}`))].join(" · ");
       return {
         id: issue.id,
+        ruleCode: issue.rule_code,
         title: issue.message,
         description: choiceSummary
           ? `${choiceSummary}${sourceSummary ? ` | ${sourceSummary}` : ""}`
@@ -304,7 +358,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       };
     });
   const reviewIssues = details.issues.map((issue: ReviewIssue) => {
-    const source = sourceDescription(issue.source_ref_ids);
+    const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
     return {
       id: issue.id,
       severity: issue.severity === "blocking" ? "error" as const : "warning" as const,
@@ -655,6 +709,10 @@ function App() {
     : {};
   const [selectedChoices, setSelectedChoices] = useState<Record<string, string>>(chatPreviewChoices);
   const [appliedChoices, setAppliedChoices] = useState<Record<string, string>>(chatPreviewChoices);
+  const [customValues, setCustomValues] = useState<Record<string, string>>({});
+  const [customCodes, setCustomCodes] = useState<Record<string, string>>({});
+  const [findingFilter, setFindingFilter] = useState<FindingFilter>("all");
+  const [findingStatusFilter, setFindingStatusFilter] = useState<FindingStatusFilter>("all");
   const [acceptedWarningIds, setAcceptedWarningIds] = useState<string[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(hasDemoPreview ? demoChatMessages : []);
   const [chatDraft, setChatDraft] = useState("");
@@ -673,6 +731,16 @@ function App() {
     const selectedChoice = selectedChoices[finding.id];
     return !appliedChoice || (selectedChoice !== undefined && selectedChoice !== appliedChoice);
   }).length ?? 0;
+  const visibleFindings = (parsedProgram?.findings ?? []).filter((finding) => {
+    if (findingFilter !== "all" && findingRuleGroup(finding.ruleCode) !== findingFilter) return false;
+    const savedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
+    const draftChoiceId = selectedChoices[finding.id];
+    const saved = Boolean(savedChoiceId && (!draftChoiceId || draftChoiceId === savedChoiceId));
+    return findingStatusFilter === "all" || (findingStatusFilter === "saved" ? saved : !saved);
+  });
+  const visibleIssues = (parsedProgram?.issues ?? []).filter((issue) =>
+    findingFilter === "all" || issueRuleGroup(issue.ruleId) === findingFilter,
+  );
   const hasUploadedFiles = documents.length > 0 || processing.job !== null;
   const uploadNotice = processing.notice || notice;
   const checkWarnings = processing.checkJob?.status === "completed"
@@ -711,6 +779,8 @@ function App() {
       setIsDemoMode(false);
       setSelectedChoices({});
       setAppliedChoices({});
+      setCustomValues({});
+      setCustomCodes({});
       setDemoConfirmed(false);
       setAcceptedWarningIds([]);
       setChatMessages([]);
@@ -734,8 +804,14 @@ function App() {
   }
 
   function chooseFindingChoice(findingId: string, choiceId: string) {
+    // Выбор только меняет черновик. Отправка на сервер — отдельное действие.
     setSelectedChoices((current) => ({ ...current, [findingId]: choiceId }));
+  }
+
+  function saveFindingChoice(findingId: string, choiceId: string) {
+    if (!choiceId || choiceId === "__custom__" || choiceId === "__reject__") return;
     if (isDemoMode) {
+      // Только локальное поведение демонстрационного экрана.
       setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
       return;
     }
@@ -828,6 +904,14 @@ function App() {
             ))}
           </nav>
           <div className="content-column">
+            {!isDemoMode && processing.program && (
+              <div className="program-signature" role="group" aria-label="Подпись программы">
+                <span>Подпись: <strong>{processing.signature ?? "не указана"}</strong></span>
+                <button className="secondary-button" type="button" onClick={processing.changeSignature} disabled={processing.reviewBusy}>
+                  {processing.signature ? "Сменить подпись" : "Указать подпись"}
+                </button>
+              </div>
+            )}
             {activeScreen === "Чат" ? (
               <ChatScreen
                 versionNumber={versionNumber}
@@ -937,29 +1021,81 @@ function App() {
 
                 {parsedProgram ? (
                   <>
+                    <div className="competency-filter-toolbar" aria-label="Фильтры результатов проверки">
+                      <div className="competency-filter-rules" role="group" aria-label="Фильтр по правилу">
+                        {(["all", "R-01", "R-07", "R-08"] as const).map((filter) => (
+                          <button key={filter} type="button"
+                            className={`competency-filter-button${findingFilter === filter ? " is-active" : ""}`}
+                            aria-pressed={findingFilter === filter}
+                            onClick={() => setFindingFilter(filter)}>
+                            {filter === "all" ? "Все правила" : filter}
+                          </button>
+                        ))}
+                      </div>
+                      <label className="competency-status-filter">
+                        Статус
+                        <select value={findingStatusFilter} onChange={(event) => setFindingStatusFilter(event.target.value as FindingStatusFilter)}>
+                          <option value="all">Все</option>
+                          <option value="pending">Требуют решения</option>
+                          <option value="saved">Сохранены</option>
+                        </select>
+                      </label>
+                    </div>
+                    {findingFilter === "R-08" && <p className="competency-toolbar-note">R-08 — структурная проверка. Результаты показаны в разделе замечаний ниже; выбора формулировки здесь нет.</p>}
                     <div className="finding-list">
-                      {parsedProgram.findings.map((finding, index) => {
+                      {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранным фильтрам нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Проверьте замечания R-08 ниже." : "Попробуйте другой фильтр."}</p>}
+                      {visibleFindings.map((finding, index) => {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
                         const selectedChoiceId = selectedChoices[finding.id] ?? appliedChoiceId ?? "";
                         const isResolved = Boolean(appliedChoice && selectedChoiceId === appliedChoice.id);
+                        const ruleGroup = findingRuleGroup(finding.ruleCode);
+                        const isCompetencyFinding = ruleGroup === "R-01" || ruleGroup === "R-07";
+                        const isCustom = selectedChoiceId === "__custom__";
+                        const isReject = selectedChoiceId === "__reject__";
+                        const isUnsaved = Boolean(selectedChoiceId && !isResolved);
+                        const customText = customValues[finding.id] ?? "";
 
                         return (
-                          <div className="finding-group" key={finding.id}>
+                          <div className={`finding-group${isCompetencyFinding ? " competency-finding-group" : ""}`} key={finding.id}>
                             <article className={`finding-card${isResolved ? " is-resolved" : ""}`}>
                             <div className="finding-topline">
-                              <span className="finding-label">Расхождение {index + 1} из {parsedProgram.findings.length}</span>
+                              <span className="finding-label">{isCompetencyFinding ? `${ruleGroup} · ` : ""}Расхождение {index + 1} из {visibleFindings.length}</span>
                               <span className={`finding-status${isResolved ? " finding-status--resolved" : ""}`}>
                                 {isResolved ? "Решено" : "Нужно решение"}
                               </span>
                             </div>
                             <h3>{finding.title}</h3>
                             <p className="finding-description">{finding.description}</p>
+                            {isCompetencyFinding && finding.choices.length > 0 && (
+                              <section className="competency-comparison" aria-label="Сравнение вариантов из документов">
+                                <div className="competency-comparison-heading">
+                                  <strong>{ruleGroup === "R-01" ? "Предлагаемые коды" : "Сравнение формулировок"}</strong>
+                                  <span>{finding.choices.length} {finding.choices.length === 1 ? "вариант" : "варианта(ов)"} · без автоматического эталона</span>
+                                </div>
+                                <div className="competency-comparison-grid">
+                                  {finding.choices.map((choice) => (
+                                    <div className="competency-comparison-card" key={choice.id}>
+                                      <span className="competency-comparison-source">{choice.source}</span>
+                                      <div className="competency-comparison-value">
+                                        {ruleGroup === "R-07" && finding.choices.length > 1
+                                          ? <ComparisonText value={choice.value} otherValues={finding.choices.filter((item) => item.id !== choice.id).map((item) => item.value)} />
+                                          : choice.value}
+                                      </div>
+                                      <span className="competency-comparison-location">{choice.location}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                                {ruleGroup === "R-07" && finding.choices.length > 1 && (
+                                  <p className="competency-comparison-hint">Подсвечены слова, отсутствующие хотя бы в одном другом варианте. Это текстовое отличие, не оценка смысла.</p>
+                                )}
+                              </section>
+                            )}
                             {finding.choices.length === 0 && (
                               <p className="finding-help">Для этого расхождения сервер пока не подготовил варианты решения.</p>
                             )}
                           </article>
-                            {finding.choices.length > 0 && (
+                            {(finding.choices.length > 0 || isCompetencyFinding) && (
                               <fieldset className="choice-list">
                                 <legend className="visually-hidden">Выберите верное значение</legend>
                                 {finding.choices.map((choice) => (
@@ -984,17 +1120,122 @@ function App() {
                                     </span>
                                   </label>
                                 ))}
+                                {isCompetencyFinding && (
+                                  <>
+                                    <label className={`choice-card${isCustom ? " is-selected" : ""}`}>
+                                      <input
+                                        type="radio"
+                                        name={`choice-${finding.id}`}
+                                        value="__custom__"
+                                        checked={isCustom}
+                                        disabled={isConfirmed || processing.reviewBusy}
+                                        onChange={() => chooseFindingChoice(finding.id, "__custom__")}
+                                      />
+                                      <span className="choice-content"><span className="choice-value">Ввести свой вариант</span></span>
+                                    </label>
+                                    {finding.ruleCode === "R-01" && (
+                                      <label className={`choice-card${isReject ? " is-selected" : ""}`}>
+                                        <input
+                                          type="radio"
+                                          name={`choice-${finding.id}`}
+                                          value="__reject__"
+                                          checked={isReject}
+                                          disabled={isConfirmed || processing.reviewBusy}
+                                          onChange={() => chooseFindingChoice(finding.id, "__reject__")}
+                                        />
+                                        <span className="choice-content"><span className="choice-value">Отклонить сопоставление</span></span>
+                                      </label>
+                                    )}
+                                  </>
+                                )}
                               </fieldset>
+                            )}
+                            {isCompetencyFinding && isCustom && (
+                              <div className="competency-custom-editor">
+                                {finding.ruleCode === "R-07" && (
+                                  <>
+                                    <label htmlFor={`custom-code-${finding.id}`}>Итоговый код компетенции</label>
+                                    <input
+                                      id={`custom-code-${finding.id}`}
+                                      type="text"
+                                      maxLength={200}
+                                      value={customCodes[finding.id] ?? ""}
+                                      disabled={isConfirmed || processing.reviewBusy}
+                                      placeholder="Введите код, если его нужно изменить"
+                                      onChange={(event) => setCustomCodes((current) => ({ ...current, [finding.id]: event.target.value }))}
+                                    />
+                                  </>
+                                )}
+                                <label htmlFor={`custom-${finding.id}`}>
+                                  {finding.ruleCode === "R-01" ? "Собственный код компетенции" : "Собственная формулировка компетенции"}
+                                </label>
+                                <textarea
+                                  id={`custom-${finding.id}`}
+                                  rows={finding.ruleCode === "R-01" ? 2 : 4}
+                                  value={customText}
+                                  maxLength={4000}
+                                  disabled={isConfirmed || processing.reviewBusy}
+                                  placeholder={finding.ruleCode === "R-01" ? "Введите код" : "Введите формулировку"}
+                                  onChange={(event) => setCustomValues((current) => ({ ...current, [finding.id]: event.target.value }))}
+                                />
+                              </div>
+                            )}
+                            {isCompetencyFinding && selectedChoiceId && !isResolved && (
+                              <section className="competency-decision-preview" aria-label="Предпросмотр выбранного решения" aria-live="polite">
+                                <strong>Предпросмотр решения · не сохранено</strong>
+                                {isReject ? <p>Отклонить предложенное сопоставление кодов.</p>
+                                  : isCustom ? <>
+                                    {ruleGroup === "R-07" && <p><span>Код:</span> {customCodes[finding.id]?.trim() || "Без изменения кода"}</p>}
+                                    <p><span>{ruleGroup === "R-01" ? "Код:" : "Формулировка:"}</span> {customText.trim() || "Значение не введено"}</p>
+                                  </> : <>
+                                    <p>{finding.choices.find((choice) => choice.id === selectedChoiceId)?.value ?? "Вариант не найден"}</p>
+                                    <small>{finding.choices.find((choice) => choice.id === selectedChoiceId)?.source}</small>
+                                  </>}
+                                <p className="competency-preview-notice">Выбор не изменяет исходные документы. Сохранение выполняется только после отдельного подтверждения и ответа сервера.</p>
+                              </section>
+                            )}
+                            {(finding.choices.length > 0 || isCompetencyFinding) && !isConfirmed && (
+                              <div className="competency-action-row">
+                                <button
+                                  className="secondary-button"
+                                  type="button"
+                                  disabled={!isUnsaved || isCustom || isReject || processing.reviewBusy}
+                                  onClick={() => saveFindingChoice(finding.id, selectedChoiceId)}
+                                >
+                                  {processing.reviewBusy ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
+                                </button>
+                                {isUnsaved && (
+                                  <button className="competency-cancel-button" type="button"
+                                    disabled={processing.reviewBusy}
+                                    onClick={() => setSelectedChoices((current) => {
+                                      const next = { ...current };
+                                      if (appliedChoiceId) next[finding.id] = appliedChoiceId;
+                                      else delete next[finding.id];
+                                      return next;
+                                    })}
+                                  >Отменить выбор</button>
+                                )}
+                                {isResolved && <span className="competency-saved-note">Выбор сохранён в версии</span>}
+                              </div>
+                            )}
+                            {(isCustom || isReject) && (
+                              <p className="competency-api-note" role="status">
+                                {isCustom && !customText.trim() ? "Введите значение. " : ""}
+                                Сохранение {isReject ? "отклонения" : "собственного варианта"} пока недоступно:
+                                действующий API Review принимает только идентификатор готового варианта.
+                                Введённое значение остаётся черновиком и не отправляется на сервер.
+                              </p>
                             )}
                           </div>
                         );
                       })}
                     </div>
 
-                    <details className="issues-details">
-                      <summary>Замечания проверки · {parsedProgram.issues.length}</summary>
+                    <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" ? true : undefined}>
+                      <summary>Замечания проверки · {visibleIssues.length}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
                       <ul className="issue-list">
-                        {parsedProgram.issues.map((issue) => (
+                        {visibleIssues.length === 0 && <li className="competency-empty-issues">Для выбранного правила замечаний нет.</li>}
+                        {visibleIssues.map((issue) => (
                           <li className="issue-row" key={issue.id}>
                             <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
                             <span className="issue-copy">
