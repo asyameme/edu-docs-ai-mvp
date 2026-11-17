@@ -1392,7 +1392,7 @@ def extract_practice_workload(document, file_name):
     )
 
     if not blocks:
-        return [], issues
+        return [], issues, None
 
     records = []
     plan_ref = None
@@ -1491,12 +1491,14 @@ def extract_practice_workload(document, file_name):
             source_ref=plan_ref or blocks[0][1],
         ))
 
-    return records, issues
+    return records, issues, plan_ref
 
 
 def build_practice_discipline(document, file_name, title_parts):
     """Собрать практику и прочитанную посеместровую нагрузку."""
-    records, issues = extract_practice_workload(document, file_name)
+    records, issues, curriculum_workload_reference = extract_practice_workload(
+        document, file_name,
+    )
 
     parts = [
         " ".join(text.split())
@@ -1531,7 +1533,7 @@ def build_practice_discipline(document, file_name, title_parts):
             message="Не удалось прочитать название практики с титула",
             source_ref=SourceRef(file=file_name, section="титул"),
         ))
-        return None, [], issues
+        return None, [], issues, curriculum_workload_reference
 
     if not records:
         cover_credits = set()
@@ -1552,7 +1554,7 @@ def build_practice_discipline(document, file_name, title_parts):
             hours_by_kind={},
             source_ref=SourceRef(file=file_name, section="титул"),
         )
-        return discipline, [], issues
+        return discipline, [], issues, curriculum_workload_reference
 
     totals = [
         item for item in records
@@ -1645,7 +1647,7 @@ def build_practice_discipline(document, file_name, title_parts):
         source_ref=total_ref,
     )
 
-    return discipline, semester_workload, issues
+    return discipline, semester_workload, issues, curriculum_workload_reference
 
 
 def extract_practice_control_forms(document, file_name):
