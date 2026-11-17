@@ -7,6 +7,7 @@ from pydantic import Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai.models import Model
+from pydantic_ai.models.openai import OpenAIChatModelSettings
 
 from .contracts import (
     ChatDeps,
@@ -17,18 +18,32 @@ from .contracts import (
     SourceFragment,
     ValidationFinding,
 )
+from .llm_journal import journalled
 from .read_port import EntityKind, get_worker_read_port
+
+# Qwen на vLLM по умолчанию размышляет: тратит лимит токенов на reasoning и
+# возвращает пустой ответ. Тот же костыль, что в validation/semantic_llm.py.
+MODEL_SETTINGS = OpenAIChatModelSettings(
+    extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+)
 
 INSTRUCTIONS = """
 Ты чат-агент системы поддержки документации образовательной программы.
 
+- Отвечай кратко и по-русски; перечисляй только факты, проверенные инструментами.
 - Для утверждений о состоянии программы используй результаты инструментов.
 - Не придумывай значения, связи, формулировки или ссылки на источники.
+- Если сущность или данные не нашлись — скажи об этом прямо, без догадок.
 - Если данные сокращены (truncated=true), используй summary/matched_context;
   для нужного фрагмента передай в read_entity query с искомой формулировкой.
 - Если запрос неоднозначен, верни Clarification с конкретными вопросами.
-- Если пользователь просит изменить данные, сначала прочитай текущую сущность
-  и верни ChangeProposal с текущими и предлагаемыми значениями и источниками.
+- Если пользователь просит изменить данные, сначала покажи текущее состояние
+  сущности (read_entity или read_graph_projection) и только затем верни
+  ChangeProposal с текущими и предлагаемыми значениями и источниками.
+- Предлагая правку того же поля повторно, сначала перечитай сущность:
+  значение могло измениться с прошлой правки.
+- На вопросы о нарушениях и замечаниях, а также после предложения правок
+  используй get_validation_findings.
 - ChangeProposal является только предложением. Не утверждай, что данные изменены.
 - Не выбирай канонический код или формулировку при расхождении источников.
   Покажи варианты и попроси пользователя выбрать.
@@ -39,12 +54,14 @@ def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
     """Создаёт агента; настроенную модель передаёт backend."""
 
     agent = Agent(
-        model,
+        journalled(model),
         name="edu_program_chat_v1",
         deps_type=ChatDeps,
         output_type=ChatOutput,
         instructions=INSTRUCTIONS,
         capabilities=[TemporalDurability()],
+        model_settings=MODEL_SETTINGS,
+        retries=2,
     )
 
     @agent.tool
