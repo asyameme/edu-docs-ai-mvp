@@ -2,6 +2,7 @@ import json
 from uuid import uuid4
 
 import pytest
+from document_cases import payload
 
 import app.validation_bridge as validation_bridge
 from app.domain import SnapshotV2
@@ -87,7 +88,7 @@ def test_local_check_maps_cross_document_mismatch_to_correct_source_ids():
     assert result["coverage"][0]["checks"] == 1
     issue = result["issues"][0]
     assert issue["source_ref_ids"] == [str(curriculum_ref), str(rpd_ref)]
-    assert issue["severity"] == "blocking"
+    assert issue["severity"] == "warning"
 
 
 def test_local_check_maps_filename_evidence_to_document_source_ref(monkeypatch):
@@ -396,25 +397,88 @@ def test_source_identity_cannot_be_overwritten_by_original_filename():
     assert result["file"] == "same.docx"
 
 
-def test_recheck_rejects_unprojected_code_change():
+def test_recheck_projects_arbitrary_attribute_changes():
     document_id, entity_id, ref_id = [uuid4() for _ in range(3)]
-    document = {"document_id": str(document_id), "parsed": {
-        "meta": {"doc_type": "RPD"},
-        "competencies": [{"code": "OLD", "source_ref": {"row": 1}}],
-        "relations": [{"src_entity": "discipline", "src_key": "A", "dst_entity": "competency",
-                       "dst_key": "OLD", "kind": "формирует", "source_ref": {"row": 2}}],
-    }}
+    parsed = payload("RPD")
+    parsed["competencies"] = [{
+        "code": "УК-1", "formulation": "Старая формулировка",
+        "source_ref": {"file": "source.docx", "paragraph_index": 1},
+    }]
+    document = {"document_id": str(document_id), "parsed": parsed}
     snapshot = SnapshotV2.model_validate({
         "document_ids": [document_id],
-        "entities": [{"id": entity_id, "kind": "competency", "attributes": {"code": "NEW"},
+        "entities": [{"id": entity_id, "kind": "competency",
+                      "attributes": {"formulation": "Новая формулировка"},
                       "source_ref_ids": [ref_id]}],
-        "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"row":1}'}],
+        "source_refs": [{
+            "id": ref_id, "document_id": document_id,
+            "locator": '{"file":"source.docx","paragraph_index":1}',
+        }],
         "source_links": [{"id": uuid4(), "target_kind": "entity", "target_id": entity_id,
-                          "field_path": "/attributes/code", "source_ref_id": ref_id,
-                          "observed_value": {"value": "OLD"}}],
+                          "field_path": "/attributes/formulation", "source_ref_id": ref_id,
+                          "observed_value": {"value": "Старая формулировка"}}],
+        "review": {
+            "review_id": uuid4(), "import_job_id": uuid4(), "analysis_version_id": uuid4(),
+            "graph_ready": True, "decisions": [{
+                "conflict_id": uuid4(), "variant_id": uuid4(), "check_job_id": uuid4(),
+                "changes": [{"op": "set_attribute", "target_kind": "entity",
+                             "target_id": str(entity_id),
+                             "field_path": "/attributes/formulation",
+                             "value": "Новая формулировка"}],
+                "decided_at": "2026-11-17T00:00:00Z",
+            }],
+        },
     })
-    with pytest.raises(ValueError, match="часы и зачётные единицы"):
-        project_snapshot_documents([document], snapshot)
+    projected = project_snapshot_documents([document], snapshot)
+    assert projected[0]["parsed"]["competencies"][0]["formulation"] == "Новая формулировка"
+
+
+def test_recheck_rejects_attribute_value_that_breaks_document_contract():
+    document_id, entity_id, ref_id = [uuid4() for _ in range(3)]
+    parsed = {
+        "meta": {
+            "schema_version": 2, "doc_type": "CKMV", "file_name": "source.docx",
+            "file_hash": "a" * 64, "parser_config": "test",
+        },
+        "competencies": [{
+            "code": "УК-1", "formulation": "Исходная формулировка",
+            "source_ref": {"file": "source.docx", "row": 1},
+        }],
+    }
+    snapshot = SnapshotV2.model_validate({
+        "document_ids": [document_id],
+        "entities": [{
+            "id": entity_id, "kind": "competency",
+            "attributes": {"formulation": 123}, "source_ref_ids": [ref_id],
+        }],
+        "source_refs": [{
+            "id": ref_id, "document_id": document_id,
+            "locator": '{"file":"source.docx","row":1}',
+        }],
+        "source_links": [{
+            "id": uuid4(), "target_kind": "entity", "target_id": entity_id,
+            "field_path": "/attributes/formulation", "source_ref_id": ref_id,
+            "observed_value": {"value": "Исходная формулировка"},
+        }],
+        "review": {
+            "review_id": uuid4(), "import_job_id": uuid4(),
+            "analysis_version_id": uuid4(), "graph_ready": True,
+            "decisions": [{
+                "conflict_id": uuid4(), "variant_id": uuid4(), "check_job_id": uuid4(),
+                "changes": [{
+                    "op": "set_attribute", "target_kind": "entity",
+                    "target_id": str(entity_id), "field_path": "/attributes/formulation",
+                    "value": 123,
+                }],
+                "decided_at": "2026-11-17T00:00:00Z",
+            }],
+        },
+    })
+
+    with pytest.raises(ValueError, match="контракт исходного документа"):
+        project_snapshot_documents(
+            [{"document_id": str(document_id), "parsed": parsed}], snapshot
+        )
 
 
 @pytest.mark.parametrize("new_value", ["144", True])
@@ -438,6 +502,17 @@ def test_recheck_rejects_non_numeric_supported_values(new_value):
             "field_path": "/attributes/hours_total", "source_ref_id": ref_id,
             "observed_value": {"value": 108},
         }],
+        "review": {
+            "review_id": uuid4(), "import_job_id": uuid4(), "analysis_version_id": uuid4(),
+            "graph_ready": True, "decisions": [{
+                "conflict_id": uuid4(), "variant_id": uuid4(), "check_job_id": uuid4(),
+                "changes": [{
+                    "op": "set_attribute", "target_kind": "entity",
+                    "target_id": str(entity_id), "field_path": "/attributes/hours_total",
+                    "value": new_value,
+                }], "decided_at": "2026-11-17T00:00:00Z",
+            }],
+        },
     })
     with pytest.raises(ValueError, match="конечное числовое значение"):
         project_snapshot_documents([document], snapshot)
@@ -455,6 +530,19 @@ def test_old_local_ruleset_is_rejected_after_implementation_changes(monkeypatch)
             SnapshotV2(document_ids=[document_id]), uuid4(),
             config=load_rules(), ruleset=ruleset,
         )
+
+
+def test_confirmation_policy_is_included_in_ruleset_revision(monkeypatch):
+    document_id = str(uuid4())
+    inputs = [Document({"meta": {"doc_type": "RPD"}}, document_id, document_id)]
+    initial = validation_ruleset(load_rules(), inputs)
+    monkeypatch.setattr(
+        validation_bridge,
+        "CONFIRMATION_POLICY",
+        {**validation_bridge.CONFIRMATION_POLICY, "revision": "test-policy-v2"},
+    )
+    updated = validation_ruleset(load_rules(), inputs)
+    assert initial["revision"] != updated["revision"]
 
 
 def test_llm_budget_stops_calls_at_the_global_limit(monkeypatch):
@@ -568,13 +656,9 @@ def test_recheck_projects_supported_field_edits_without_mutating_parser_input():
     from app.validation_bridge import project_snapshot_documents
 
     document_id, entity_id, ref_id, link_id = [uuid4() for _ in range(4)]
-    original = {
-        "document_id": str(document_id),
-        "parsed": {
-            "meta": {"doc_type": "RPD"},
-            "disciplines": [{"name": "Алгебра", "hours_total": 108, "source_ref": {"row": 2}}],
-        },
-    }
+    parsed = payload("RPD")
+    original = {"document_id": str(document_id), "parsed": parsed}
+    locator = json.dumps(parsed["disciplines"][0]["source_ref"])
     snapshot = SnapshotV2.model_validate(
         {
             "document_ids": [document_id],
@@ -587,7 +671,7 @@ def test_recheck_projects_supported_field_edits_without_mutating_parser_input():
                 }
             ],
             "relations": [],
-            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"row":2}'}],
+            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": locator}],
             "source_links": [
                 {
                     "id": link_id,
@@ -598,6 +682,25 @@ def test_recheck_projects_supported_field_edits_without_mutating_parser_input():
                     "observed_value": {"value": 108},
                 }
             ],
+            "review": {
+                "review_id": uuid4(),
+                "import_job_id": uuid4(),
+                "analysis_version_id": uuid4(),
+                "graph_ready": True,
+                "decisions": [{
+                    "conflict_id": uuid4(),
+                    "variant_id": uuid4(),
+                    "check_job_id": uuid4(),
+                    "changes": [{
+                        "op": "set_attribute",
+                        "target_kind": "entity",
+                        "target_id": str(entity_id),
+                        "field_path": "/attributes/hours_total",
+                        "value": 144,
+                    }],
+                    "decided_at": "2026-11-17T00:00:00Z",
+                }],
+            },
         }
     )
     projected = project_snapshot_documents([original], snapshot)
@@ -616,13 +719,9 @@ def test_recheck_keeps_document_choice_and_projects_final_chat_value(chat_value)
 
     document_id, entity_id, ref_id, link_id = [uuid4() for _ in range(4)]
     review_id, import_id, analysis_id = [uuid4() for _ in range(3)]
-    original = {
-        "document_id": str(document_id),
-        "parsed": {
-            "meta": {"doc_type": "RPD"},
-            "disciplines": [{"name": "Алгебра", "hours_total": 108, "source_ref": {"row": 2}}],
-        },
-    }
+    parsed = payload("RPD")
+    original = {"document_id": str(document_id), "parsed": parsed}
+    locator = json.dumps(parsed["disciplines"][0]["source_ref"])
     snapshot = SnapshotV2.model_validate(
         {
             "document_ids": [document_id],
@@ -635,7 +734,7 @@ def test_recheck_keeps_document_choice_and_projects_final_chat_value(chat_value)
                 }
             ],
             "relations": [],
-            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"row":2}'}],
+            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": locator}],
             "source_links": [
                 {
                     "id": link_id,
@@ -699,15 +798,12 @@ def test_recheck_keeps_supported_document_choice_for_other_source_fields():
 
     document_id, entity_id, ref_id, link_id = [uuid4() for _ in range(4)]
     review_id, import_id, analysis_id = [uuid4() for _ in range(3)]
-    original = {
-        "document_id": str(document_id),
-        "parsed": {
-            "meta": {"doc_type": "RPD"},
-            "competencies": [
-                {"code": "УК-1", "formulation": "Исходная", "source_ref": {"row": 2}}
-            ],
-        },
-    }
+    parsed = payload("RPD")
+    parsed["competencies"] = [{
+        "code": "УК-1", "formulation": "Исходная",
+        "source_ref": {"file": "source.docx", "paragraph_index": 1},
+    }]
+    original = {"document_id": str(document_id), "parsed": parsed}
     snapshot = SnapshotV2.model_validate(
         {
             "document_ids": [document_id],
@@ -720,7 +816,10 @@ def test_recheck_keeps_supported_document_choice_for_other_source_fields():
                 }
             ],
             "relations": [],
-            "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"row":2}'}],
+            "source_refs": [{
+                "id": ref_id, "document_id": document_id,
+                "locator": '{"file":"source.docx","paragraph_index":1}',
+            }],
             "source_links": [
                 {
                     "id": link_id,

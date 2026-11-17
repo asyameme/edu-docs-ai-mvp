@@ -69,46 +69,63 @@ class ChatWriteRepository:
                     raise DomainError(409, "Сначала разрешите вопросы предложения")
                 try:
                     changes = plan_approved_changes(snapshot, proposal)
-                    for change in changes:
-                        snapshot = apply_change(snapshot, change)
                 except ProposalApplicationError as error:
                     raise DomainError(422, str(error)) from error
-                snapshot.review.confirmation = None
-                # История выбора документов сохраняется; генерация сравнивает итог с оригиналом.
                 from app.domain import ReviewDecision
 
-                snapshot.review.decisions.append(ReviewDecision(
-                    conflict_id=turn_id, variant_id=turn_id,
-                    check_job_id=snapshot.review.review_id,
-                    changes=[{
-                        "op": "set_attribute", "target_kind": change.target_kind,
-                        "target_id": str(change.target_id), "field_path": change.field_path,
-                        "value": change.new_value,
-                    } for change in changes],
-                    decided_at=datetime.now(UTC), author=body.signature,
-                ))
                 review = ReviewRepository.require_review(
                     cur, program_id, snapshot.review.review_id
                 )
-                # Отказ до записи версии, если правку нельзя отобразить обратно в документы.
-                try:
-                    project_snapshot_documents(review["parameters"]["input"]["documents"], snapshot)
-                except ValueError as error:
-                    raise DomainError(422, str(error)) from error
-                version = insert_version(
-                    cur, program_id, current, uuid4(), snapshot,
-                    key=key, fingerprint=fingerprint,
-                    actor_type="user", actor_id=body.signature,
-                )
+                document_inputs = review["parameters"]["input"]["documents"]
+                parent_version_id = current
+                prior_changes = []
+                for index, change in enumerate(changes):
+                    snapshot = apply_change(snapshot, change)
+                    prior_changes.append({
+                        "op": "set_attribute", "target_kind": change.target_kind,
+                        "target_id": str(change.target_id), "field_path": change.field_path,
+                        "value": change.new_value,
+                    })
+                    snapshot.review.confirmation = None
+                    snapshot.review.decisions = [
+                        item for item in snapshot.review.decisions
+                        if item.conflict_id != turn_id
+                    ]
+                    snapshot.review.decisions.append(ReviewDecision(
+                        conflict_id=turn_id, variant_id=turn_id,
+                        check_job_id=snapshot.review.review_id,
+                        changes=list(prior_changes),
+                        decided_at=datetime.now(UTC), author=body.signature,
+                    ))
+                    # Каждая правка получает собственную неизменяемую версию и проверку.
+                    try:
+                        project_snapshot_documents(document_inputs, snapshot)
+                    except ValueError as error:
+                        raise DomainError(422, str(error)) from error
+                    version = insert_version(
+                        cur, program_id, parent_version_id, uuid4(), snapshot,
+                        key=key if index == len(changes) - 1 else None,
+                        fingerprint=fingerprint if index == len(changes) - 1 else None,
+                        actor_type="user", actor_id=body.signature,
+                    )
+                    parent_version_id = version["id"]
+                    check_id = ReviewRepository(self.pool).create(
+                        program_id, "chat-check:" + str(version["id"]),
+                        CheckCreate(version_id=version["id"]), purpose="check",
+                        review_id=snapshot.review.review_id, allow_historical=True,
+                        connection=conn,
+                    )
                 cur.execute(
                     "UPDATE chat_sessions SET version_id=%s,updated_at=now() WHERE id=%s",
                     (version["id"], session_id),
                 )
-            # Версия и долговечное задание проверки фиксируются одной транзакцией.
+            else:
+                check_id = None
             review_id = UUID(str(version["snapshot"]["review"]["review_id"]))
-            check_id = ReviewRepository(self.pool).create(
-                program_id, "chat-check:" + str(version["id"]),
-                CheckCreate(version_id=version["id"]), purpose="check", review_id=review_id,
-                allow_historical=True, connection=conn,
-            )
+            if check_id is None:
+                check_id = ReviewRepository(self.pool).create(
+                    program_id, "chat-check:" + str(version["id"]),
+                    CheckCreate(version_id=version["id"]), purpose="check",
+                    review_id=review_id, allow_historical=True, connection=conn,
+                )
         return {"version": version, "check_job_id": check_id}

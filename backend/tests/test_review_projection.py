@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.confirmation_policy import apply_confirmation_policy
 from app.review_contract import CheckResult, ReviewIssue, RuleCoverage
 from app.review_projection import (
     project_legacy_review_issue,
@@ -84,8 +85,20 @@ def test_validator_projection_maps_review_status_and_keeps_raw_diagnostics():
     assert "evidence" not in projected["issues"][0]
 
 
+def test_failed_normative_result_projects_as_warning_without_rewriting_coverage():
+    raw = sample_result()
+    raw["coverage"][0]["status"] = "failed"
+    raw["issues"][0].update(status="open", severity="blocking")
+
+    projected = validator_result_for_contract(raw)
+
+    assert projected["coverage"][0]["status"] == "failed"
+    assert projected["issues"][0]["severity"] == "warning"
+
+
 def test_legacy_report_and_database_issue_are_projected_to_main_contract():
     raw = sample_result()
+    raw["issues"][0]["severity"] = "blocking"
     raw["graph_ready"] = True
     raw["graph_build_issues"] = []
 
@@ -98,7 +111,39 @@ def test_legacy_report_and_database_issue_are_projected_to_main_contract():
     assert "evidence" not in projected["issues"][0]
     assert "checks" not in issue
     assert "evidence" not in issue
+    assert issue["severity"] == "warning"
     CheckResult.model_validate({key: projected[key] for key in ("ruleset", "coverage", "issues")})
+
+
+def test_backend_graph_integrity_failure_remains_blocking():
+    issue = {
+        "id": uuid4(), "rule_code": "BACKEND_GRAPH_BUILD", "rule_revision": "r1",
+        "type": "unresolved_relation", "severity": "blocking", "status": "open",
+        "message": "Не удалось собрать связи графа",
+    }
+    assert project_legacy_review_issue(issue)["severity"] == "blocking"
+
+
+def test_policy_revision_is_stable_and_failed_remains_validator_outcome():
+    raw = {
+        "ruleset": {"id": "external", "revision": "upstream-r7", "config": {},
+                    "required_rules": ["R-01"], "required_document_types": ["rpd"]},
+        "coverage": [{"rule_code": "R-01", "rule_revision": "r7", "status": "failed"}],
+        "issues": [{"rule_code": "R-01", "severity": "blocking"}],
+    }
+
+    once = apply_confirmation_policy(raw)
+    twice = apply_confirmation_policy(once)
+    changed_rules = deepcopy(raw)
+    changed_rules["ruleset"]["config"] = {"threshold": 0.9}
+    changed = apply_confirmation_policy(changed_rules)
+
+    assert once["ruleset"]["revision"].startswith("mvp-confirmation-policy-v1:")
+    assert twice["ruleset"]["revision"] == once["ruleset"]["revision"]
+    assert changed["ruleset"]["revision"] != once["ruleset"]["revision"]
+    assert once["coverage"][0]["status"] == "failed"
+    assert once["issues"][0]["severity"] == "warning"
+    assert raw["ruleset"]["revision"] == "upstream-r7"
 
 
 def test_prepare_report_omits_backend_only_graph_metadata():

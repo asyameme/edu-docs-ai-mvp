@@ -202,6 +202,16 @@ def test_unresolved_graph_build_keeps_selected_decisions_and_reports_blocker():
         )
         assert build_issue["severity"] == "blocking"
         assert build_issue["source_document_ids"]
+        response = http.post(
+            root + "/reviews/" + job["id"] + "/confirm",
+            json={
+                "expected_version_id": version["id"],
+                "check_job_id": str(uuid4()),
+                "signature": "Тестовый пользователь",
+            },
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+        assert response.status_code == 409
 
 
 def test_unresolved_graph_without_user_choices_can_be_reanalyzed():
@@ -237,7 +247,9 @@ def test_confirmation_gates_warning_blocking_and_skipped_rules(filename):
         }
         path = root + "/reviews/" + job["id"] + "/confirm"
         post(http, path, body, 409)
-        if filename.startswith("warning"):
+        if not filename.startswith("skipped"):
+            assert checked["report"]["coverage"][0]["status"] == "failed"
+            assert checked["report"]["issues"][0]["severity"] == "warning"
             body["accepted_warning_ids"] = [checked["report"]["issues"][0]["id"]]
             confirmed = post(http, path, body, 201)
             assert confirmed["snapshot"]["review"]["confirmation"]["accepted_warning_ids"]

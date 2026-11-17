@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.confirmation_policy import apply_confirmation_policy
 from app.document_adapter import to_snapshot_v2
 from app.document_analysis import analyze_documents
 from app.document_reconciliation import validate_document_mutation_variants
@@ -198,7 +199,8 @@ class ReviewActivities:
             if purpose == "prepare":
                 documents = job["parameters"]["input"]["documents"]
                 if job["parameters"].get("schema_version", 1) == 2:
-                    response = validator_result_for_contract(raw) if is_local else raw
+                    response = apply_confirmation_policy(raw)
+                    response = validator_result_for_contract(response) if is_local else response
                     parsed = AnalysisV2.model_validate(response)
                     required_types = {
                         value.casefold() for value in parsed.ruleset.required_document_types
@@ -221,7 +223,8 @@ class ReviewActivities:
                     result["schema_version"] = 2
                     artifacts = self.save_artifacts(result)
                 else:
-                    response = validator_result_for_contract(raw) if is_local else raw
+                    response = apply_confirmation_policy(raw)
+                    response = validator_result_for_contract(response) if is_local else response
                     parsed = AnalysisV1.model_validate(response)
                     expected = {UUID(item["document_id"]) for item in documents}
                     if set(parsed.candidate.document_ids) != expected:
@@ -240,7 +243,8 @@ class ReviewActivities:
                             apply_changes(result["candidate"], variant["changes"])
                     artifacts = self.save_artifacts(result)
             else:
-                response = validator_result_for_contract(raw) if is_local else raw
+                response = apply_confirmation_policy(raw)
+                response = validator_result_for_contract(response) if is_local else response
                 result = CheckResult.model_validate(response).model_dump(mode="json")
                 snapshot = SnapshotV2.model_validate(job["parameters"]["input"]["snapshot"])
                 refs = {str(item.id) for item in snapshot.source_refs}

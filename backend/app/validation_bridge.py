@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from app.confirmation_policy import CONFIRMATION_POLICY
 from app.document_reconciliation import apply_document_mutations
+from app.parser_document import parse_output
 from app.review_logic import digest
 from worker.validation.validator import Document, load_rules, run_validation
 
@@ -26,6 +28,7 @@ def validation_implementation_revision():
     worker = root / "worker" / "validation"
     files = [
         Path(__file__).resolve(),
+        root / "app" / "confirmation_policy.py",
         root / "app" / "document_analysis.py",
         root / "app" / "document_reconciliation.py",
         root / "app" / "review_projection.py",
@@ -93,7 +96,7 @@ class _ValidationBudget:
 
 
 def project_snapshot_documents(documents, snapshot):
-    """Переносит простые изменения атрибутов в JSON для повторной сверки."""
+    """Переносит изменения атрибутов по источникам в JSON для повторной сверки."""
     data = snapshot.model_dump(mode="python")
     outputs = {str(item["document_id"]): deepcopy(item["parsed"]) for item in documents}
     targets = {("entity", str(item["id"])): item for item in data["entities"]}
@@ -107,6 +110,7 @@ def project_snapshot_documents(documents, snapshot):
         source_links[(item["target_kind"], str(item["target_id"]), item["field_path"])].append(item)
 
     document_changes = []
+    review_attribute_fields = set()
     if snapshot.review:
         for decision in snapshot.review.decisions:
             for change in decision.changes:
@@ -120,14 +124,30 @@ def project_snapshot_documents(documents, snapshot):
                 key = (change["target_kind"], str(change["target_id"]), change["field_path"])
                 if key not in source_links:
                     raise ValueError("Нет исходного поля для поддержанной повторной проверки")
-                supported_fields = {"/attributes/hours_total", "/attributes/credit_units"}
-                if (
-                    change["target_kind"] != "entity"
-                    or change["field_path"] not in supported_fields
-                ):
-                    raise ValueError(
-                        "Повторная проверка поддерживает только часы и зачётные единицы"
-                    )
+                if not change["field_path"].startswith("/attributes/"):
+                    raise ValueError("Изменяемый путь должен находиться внутри attributes")
+                review_attribute_fields.add(key)
+    else:
+        # Старые версии без review сохраняют прежнее поведение только для чисел.
+        for link in data["source_links"]:
+            if link["field_path"] not in {
+                "/attributes/hours_total", "/attributes/credit_units"
+            }:
+                continue
+            target = targets.get((link["target_kind"], str(link["target_id"])))
+            if target is None:
+                continue
+            field = link["field_path"].removeprefix("/attributes/")
+            old_value = link["observed_value"].get("value")
+            new_value = target.get("attributes", {}).get(field)
+            if old_value != new_value or type(old_value) is not type(new_value):
+                review_attribute_fields.add(
+                    (link["target_kind"], str(link["target_id"]), link["field_path"])
+                )
+        if not review_attribute_fields:
+            return [
+                {**item, "parsed": outputs[str(item["document_id"])]} for item in documents
+            ]
 
     outputs = apply_document_mutations(outputs, document_changes)
 
@@ -137,75 +157,120 @@ def project_snapshot_documents(documents, snapshot):
             key: item for key, item in ref.items() if item is not None
         } == {key: item for key, item in locator.items() if item is not None}
 
-    def update_record(value, locator, field, new_value):
+    def pointer_tokens(pointer):
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ValueError("Изменяемое поле должно быть задано JSON Pointer")
+        return [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
+
+    def pointer_get(value, tokens):
+        for token in tokens:
+            if isinstance(value, list):
+                if (
+                    not token.isascii()
+                    or not token.isdigit()
+                    or len(token) > 1 and token.startswith("0")
+                    or int(token) >= len(value)
+                ):
+                    raise KeyError(token)
+                value = value[int(token)]
+            elif isinstance(value, dict) and token in value:
+                value = value[token]
+            else:
+                raise KeyError(token)
+        return value
+
+    def pointer_set(value, tokens, new_value):
+        if not tokens:
+            raise ValueError("Нельзя заменить исходный объект целиком")
+        parent = pointer_get(value, tokens[:-1])
+        last = tokens[-1]
+        if isinstance(parent, list):
+            if (
+                not last.isascii()
+                or not last.isdigit()
+                or len(last) > 1 and last.startswith("0")
+                or int(last) >= len(parent)
+            ):
+                raise KeyError(last)
+            parent[int(last)] = deepcopy(new_value)
+        elif isinstance(parent, dict) and last in parent:
+            parent[last] = deepcopy(new_value)
+        else:
+            raise KeyError(last)
+
+    def update_record(value, locator, field_tokens, new_value):
         if isinstance(value, dict):
             if same_locator(value.get("source_ref"), locator):
-                if field not in value:
-                    raise ValueError(f"В исходных данных нет поля {field}")
-                value[field] = new_value
+                try:
+                    pointer_set(value, field_tokens, new_value)
+                except KeyError:
+                    return 0
                 return 1
             return sum(
-                update_record(child, locator, field, new_value)
+                update_record(child, locator, field_tokens, new_value)
                 for key, child in value.items()
                 if key not in {"meta", "parse_issues", "source_ref"}
             )
         if isinstance(value, list):
-            return sum(update_record(child, locator, field, new_value) for child in value)
+            return sum(update_record(child, locator, field_tokens, new_value) for child in value)
         return 0
 
-    def record_values(value, locator, field):
+    def record_values(value, locator, field_tokens):
         if isinstance(value, dict):
             if same_locator(value.get("source_ref"), locator):
-                return [value[field]] if field in value else []
+                try:
+                    return [pointer_get(value, field_tokens)]
+                except KeyError:
+                    return []
             return [
                 found
                 for key, child in value.items()
                 if key not in {"meta", "parse_issues", "source_ref"}
-                for found in record_values(child, locator, field)
+                for found in record_values(child, locator, field_tokens)
             ]
         if isinstance(value, list):
             return [
                 found
                 for child in value
-                for found in record_values(child, locator, field)
+                for found in record_values(child, locator, field_tokens)
             ]
         return []
 
     for link in data["source_links"]:
         if link["field_path"] == "$":
             continue
+        key = (link["target_kind"], str(link["target_id"]), link["field_path"])
+        if key not in review_attribute_fields:
+            continue
         target = targets.get((link["target_kind"], str(link["target_id"])))
         ref = refs[str(link["source_ref_id"])]
         document = outputs.get(str(ref["document_id"]))
         if target is None or document is None:
             raise ValueError("Не удалось восстановить исходное поле для повторной проверки")
-        old_value = link["observed_value"].get("value")
-        new_value = target.get("attributes", {}).get(link["field_path"].split("/")[-1])
-        parts = link["field_path"].split("/")
-        supported_fields = {"/attributes/hours_total", "/attributes/credit_units"}
-        is_supported = (
-            link["target_kind"] == "entity"
-            and len(parts) == 3
-            and parts[1] == "attributes"
-            and link["field_path"] in supported_fields
-        )
-        field = parts[2].replace("~1", "/").replace("~0", "~") if len(parts) > 2 else ""
+        path_tokens = pointer_tokens(link["field_path"])
+        if len(path_tokens) < 2 or path_tokens[0] != "attributes":
+            raise ValueError("Исходное поле должно находиться внутри attributes")
+        if any(token in {"meta", "source_ref", "parse_issues"} for token in path_tokens):
+            raise ValueError("Нельзя переносить изменения в метаданные или свидетельства")
+        try:
+            new_value = pointer_get(target.get("attributes", {}), path_tokens[1:])
+        except KeyError as error:
+            raise ValueError("Изменённое поле отсутствует в графе") from error
         try:
             locator = json.loads(ref["locator"])
         except json.JSONDecodeError as error:
             raise ValueError("Источник не содержит координаты для повторной проверки") from error
-        if not is_supported:
-            unchanged = old_value == new_value and isinstance(old_value, bool) == isinstance(
-                new_value, bool
-            )
-            if unchanged:
-                continue
-            values = record_values(document, locator, field)
-            if len(values) == 1 and values[0] == new_value and type(values[0]) is type(new_value):
-                continue
-            raise ValueError("Повторная проверка поддерживает только часы и зачётные единицы")
-        if old_value is None and new_value is None:
-            # Неизвестное исходное число остаётся неизвестным, это не правка пользователя.
+        field_tokens = path_tokens[1:]
+        values = record_values(document, locator, field_tokens)
+        if len(values) == 1 and values[0] == new_value and type(values[0]) is type(new_value):
+            continue
+        numeric_field = len(field_tokens) == 1 and field_tokens[0] in {
+            "hours_total", "credit_units"
+        }
+        if not numeric_field or new_value is None:
+            count = update_record(document, locator, field_tokens, new_value)
+            if count != 1:
+                raise ValueError("Источник поля неоднозначен для повторной сверки")
             continue
         if (
             isinstance(new_value, bool)
@@ -213,12 +278,18 @@ def project_snapshot_documents(documents, snapshot):
             or not math.isfinite(new_value)
         ):
             raise ValueError("Часы и зачётные единицы должны иметь конечное числовое значение")
-        count = update_record(document, locator, field, new_value)
+        count = update_record(document, locator, field_tokens, new_value)
         if count != 1:
             raise ValueError("Источник поля неоднозначен для повторной проверки")
-    return [
+    projected = [
         {**item, "parsed": outputs[str(item["document_id"])]} for item in documents
     ]
+    try:
+        for item in projected:
+            parse_output(item["parsed"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("Изменение нарушает контракт исходного документа") from error
+    return projected
 
 
 def validation_rule_revision(config, rule):
@@ -234,11 +305,12 @@ def validation_ruleset(config, documents):
         raise ValueError("Нет документов поддерживаемых типов для проверки")
     return {
         "id": "education-backend-validation",
-        "revision": digest(
+        "revision": CONFIRMATION_POLICY["revision"] + ":" + digest(
             {
                 "implementation": validation_implementation_revision(),
                 "config": config,
                 "required_document_types": required_documents,
+                "confirmation_policy": CONFIRMATION_POLICY,
             }
         ),
         "config": config,
@@ -392,7 +464,7 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
                     "rule_code": result["rule_id"],
                     "rule_revision": rule_revision,
                     "type": finding["code"],
-                    "severity": "blocking" if finding["status"] == "failed" else "warning",
+                    "severity": "warning",
                     "status": "needs_review" if finding["status"] == "needs_review" else "open",
                     "message": finding["message"],
                     "source_ref_ids": source_ids,

@@ -10,7 +10,6 @@ from document_cases import payload
 from app.document_analysis import analyze_documents
 from app.document_reconciliation import apply_document_mutations
 from app.domain import SnapshotV2
-from app.review_activities import ReviewActivities
 from app.review_contract import AnalysisV2
 from app.review_projection import validator_result_for_contract
 from app.validation_bridge import run_local_check, validation_implementation_revision
@@ -60,6 +59,70 @@ def test_real_rule_yields_document_choices_without_building_graph(monkeypatch):
         )
         assert again["coverage"][0]["status"] == "passed"
     assert documents == original
+
+
+def test_r01_candidate_has_explicit_choices_with_real_rule_engine():
+    records = [(uuid4(), "CKMV", name, code)
+               for name, code in (("ckmv-a.docx", "УК-1"),
+                                  ("ckmv-b.docx", "УК-2"))]
+    documents = []
+    for identity, kind, name, code in records:
+        parsed = payload(kind)
+        parsed["meta"].update(file_name=name, program_id="P")
+        parsed["competencies"] = [{
+            "code": code, "formulation": "Одинаковое описание",
+            "source_ref": {"file": name, "row": 1},
+        }]
+        parsed["indicators"] = [{
+            "code": f"{code}.1", "text": "Проверяемый результат",
+            "competency_code": code, "source_ref": {"file": name, "row": 2},
+        }]
+        parsed["learning_outcomes"] = [{
+            "local_id": "LO-1", "text": "Результат обучения",
+            "source_ref": {"file": name, "row": 3},
+        }]
+        parsed["indicator_outcome_links"] = [{
+            "indicator_code": f"{code}.1", "learning_outcome_id": "LO-1",
+            "source_ref": {"file": name, "row": 4},
+        }]
+        parsed["role_competency_links"][0]["competency_code"] = code
+        parsed["relations"] = [{
+            "src_entity": "curriculum_item", "src_key": "Дисциплина",
+            "dst_entity": "competency", "dst_key": code, "kind": "формирует",
+            "source_ref": {"file": name, "row": 2},
+        }]
+        documents.append({"document_id": str(identity), "parsed": parsed})
+    config = load_rules()
+    rule = next(item for item in config["rules"] if item["id"] == "R-01")
+    rule["status"] = "ready"
+    config["rules"] = [rule]
+    result = analyze_documents(documents, uuid4(), config=config)
+
+    issue = next(item for item in result["issues"]
+                 if item["type"] == "competency_code_match_candidate")
+    assert issue["requires_decision"] is True, issue
+    assert issue["severity"] == "warning"
+    assert len(issue["variants"]) == 3
+    assert {item["label"] for item in issue["variants"]} >= {
+        "Оставить коды разными",
+        "Выбрать значение из документов: УК-1",
+        "Выбрать значение из документов: УК-2",
+    }
+    accepted = next(item for item in issue["variants"]
+                    if item["label"] == "Выбрать значение из документов: УК-1")
+    selected = apply_document_mutations(
+        {item["document_id"]: item["parsed"] for item in documents},
+        accepted["changes"],
+    )
+    assert [item["competencies"][0]["code"] for item in selected.values()] == ["УК-1", "УК-1"]
+    assert all(item["role_competency_links"][0]["competency_code"] == "УК-1"
+               for item in selected.values())
+    assert all(item["indicators"][0]["competency_code"] == "УК-1"
+               for item in selected.values())
+    assert [item["indicator_outcome_links"][0]["indicator_code"]
+            for item in selected.values()] == ["УК-1.1", "УК-2.1"]
+    assert all(item["relations"][0]["dst_key"] == "УК-1" for item in selected.values())
+    assert [item["parsed"]["competencies"][0]["code"] for item in documents] == ["УК-1", "УК-2"]
 
 
 def test_ambiguous_locator_keeps_finding_without_fabricating_choices():
@@ -165,6 +228,8 @@ def test_graph_check_omits_drafts_and_keeps_active_rules():
 
 
 def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp_path):
+    from app.review_activities import ReviewActivities
+
     documents = package()
     for item in documents:
         item["sha256"] = item["parsed"]["meta"]["file_hash"]

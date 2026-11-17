@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from app.confirmation_policy import issue_severity
 from app.review_contract import ReviewIssue
 
 _ISSUE_FIELDS = {
@@ -29,7 +30,11 @@ def _project_result(result):
             if key not in _COVERAGE_FIELDS:
                 item.pop(key)
     projected["issues"] = [
-        {key: value for key, value in item.items() if key in _ISSUE_FIELDS}
+        {
+            **{key: value for key, value in item.items() if key in _ISSUE_FIELDS},
+            # Статус failed остаётся исходом валидатора; графовые сбои задаются Backend.
+            "severity": issue_severity(item),
+        }
         for item in projected.get("issues", [])
     ]
     return projected
@@ -58,4 +63,5 @@ def project_prepare_report(result):
 def project_legacy_review_issue(issue):
     """Возвращает сохранённое замечание в формате, совместимом с контрактом main."""
     public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
+    public_issue["severity"] = issue_severity(public_issue)
     return ReviewIssue.model_validate(public_issue).model_dump(mode="json")

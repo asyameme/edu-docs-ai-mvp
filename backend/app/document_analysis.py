@@ -20,6 +20,7 @@ _FIELDS = {
     "competency_formulation_review": "formulation",
     "competency_formulation_mismatch": "formulation",
     "competency_formulation_missing": "formulation",
+    "competency_code_match_candidate": "code",
 }
 _PROTECTED = {"meta", "source_ref", "parse_issues"}
 
@@ -112,11 +113,15 @@ def _variants(finding, sources, documents, issue_id):
         return [], ["Источники принадлежат разным программам"]
     variants = []
     for signature, value in sorted(values.items()):
-        changes = [
-            {"op": "set_document_value", "document_id": identity, "field_path": path,
-             "expected_old_value": deepcopy(old), "value": deepcopy(value)}
-            for (identity, path), old in sorted(targets.items())
-        ]
+        if finding["code"] == "competency_code_match_candidate":
+            codes = {item for item in values.values() if isinstance(item, str)}
+            changes = _competency_code_changes(original, codes, value)
+        else:
+            changes = [
+                {"op": "set_document_value", "document_id": identity, "field_path": path,
+                 "expected_old_value": deepcopy(old), "value": deepcopy(value)}
+                for (identity, path), old in sorted(targets.items())
+            ]
         try:
             validate_document_mutation_variants(original, [changes])
         except (DomainError, ValueError):
@@ -124,7 +129,63 @@ def _variants(finding, sources, documents, issue_id):
         variants.append({"id": str(uuid5(issue_id, signature)),
                          "label": f"Выбрать значение из документов: {str(value)[:200]}",
                          "changes": changes})
+    if finding["code"] == "competency_code_match_candidate":
+        keep_changes = [
+            {"op": "set_document_value", "document_id": identity,
+             "field_path": path, "expected_old_value": deepcopy(old),
+             "value": deepcopy(old)}
+            for (identity, path), old in sorted(targets.items())
+        ]
+        try:
+            validate_document_mutation_variants(original, [keep_changes])
+        except (DomainError, ValueError):
+            pass
+        else:
+            signature = digest({"decision": "keep_separate", "changes": keep_changes})
+            variants.append({
+                "id": str(uuid5(issue_id, signature)),
+                "label": "Оставить коды разными",
+                "changes": keep_changes,
+            })
     return (variants, []) if variants else ([], ["Нет допустимых значений для решения"])
+
+
+def _competency_code_changes(documents, codes, selected_code):
+    """Согласованно меняет код компетенции и ссылки на него в документах."""
+    changes = []
+
+    def replace(document_id, path, current):
+        if isinstance(current, str) and current in codes and current != selected_code:
+            changes.append({
+                "op": "set_document_value", "document_id": document_id,
+                "field_path": path, "expected_old_value": current,
+                "value": selected_code,
+            })
+
+    def walk(document_id, value, path=""):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                escaped = key.replace("~", "~0").replace("/", "~1")
+                child_path = path + "/" + escaped
+                if key == "competency_code":
+                    replace(document_id, child_path, child)
+                elif key == "code" and path.startswith("/competencies/") and (
+                    len(path.split("/")) == 3
+                ):
+                    replace(document_id, child_path, child)
+                elif key in {"src_key", "dst_key"} and (
+                    value.get("src_entity" if key == "src_key" else "dst_entity")
+                    == "competency"
+                ):
+                    replace(document_id, child_path, child)
+                walk(document_id, child, child_path)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(document_id, child, path + "/" + str(index))
+
+    for document_id, document in documents.items():
+        walk(document_id, document)
+    return changes
 
 
 def analyze_documents(documents, job_id, *, config=None):
@@ -163,7 +224,7 @@ def analyze_documents(documents, job_id, *, config=None):
             issues.append({
                 "id": str(issue_id), "rule_code": result["rule_id"],
                 "rule_revision": revision, "type": finding["code"],
-                "severity": "blocking" if finding["status"] == "failed" else "warning",
+                "severity": "warning",
                 "status": "needs_review" if finding["status"] == "needs_review" else "open",
                 "message": finding["message"], "checks": result["checks"],
                 "source_document_ids": sorted({identity for identity, _ in sources}),
