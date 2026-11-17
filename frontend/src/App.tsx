@@ -30,9 +30,6 @@ type ValidationIssue = {
   title: string;
   source: string;
   ruleId?: string;
-  status?: "open" | "needs_review";
-  detail?: string;
-  checks?: number | null;
 };
 
 type ParsedProgram = {
@@ -281,28 +278,15 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
     fieldPaths: string[] = [],
   ) => {
     const sources = ids.map((id) => sourceRefs.get(id)).filter((source) => source !== undefined);
-    const sourceDocuments = [...new Map(sources.map((source) => [source.document_id, source])).values()];
-    const documentLabels = sourceDocuments.map((source) => ({
-      id: source.document_id,
-      name: documentNames.get(source.document_id) ?? "Источник пакета документов",
-    }));
     const sourceDocumentIds = [...new Set([
       ...documentIds,
       ...sources.map((source) => source.document_id),
     ])];
-    for (const id of sourceDocumentIds) {
-      if (!documentLabels.some((item) => item.id === id)) {
-        documentLabels.push({
-          id,
-          name: documentNames.get(id) ?? "Источник пакета документов",
-        });
-      }
-    }
-    const nameCounts = new Map<string, number>();
-    for (const item of documentLabels) nameCounts.set(item.name, (nameCounts.get(item.name) ?? 0) + 1);
-    const names = documentLabels.map((item) =>
-      nameCounts.get(item.name)! > 1 ? `${item.name} · ${item.id.slice(0, 8)}` : item.name,
-    );
+    const names = [...new Set(
+      sourceDocumentIds
+        .map((id) => documentNames.get(id))
+        .filter((name) => name !== undefined),
+    )];
     const sections = [...new Set(sources.map((source) => source.section).filter((section) => section !== null))];
     return {
       source: names.length ? names.join(" · ") : "Источник пакета документов",
@@ -347,20 +331,12 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
     });
   const reviewIssues = details.issues.map((issue: ReviewIssue) => {
     const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
-    const reason = issue.evidence?.reason ?? issue.evidence?.model_reason;
-    const sourceLimitations = issue.evidence?.source_mapping_limitations;
     return {
       id: issue.id,
       severity: issue.severity === "blocking" ? "error" as const : "warning" as const,
       title: issue.message,
       source: source.source,
       ruleId: `${issue.rule_code} · ${issue.rule_revision}`,
-      status: issue.status,
-      detail: [
-        typeof reason === "string" ? reason : undefined,
-        Array.isArray(sourceLimitations) ? sourceLimitations.join("; ") : undefined,
-      ].filter(Boolean).join(" · ") || undefined,
-      checks: issue.checks,
     };
   });
   const importIssues = (job?.issues ?? []).map((issue, index) => ({
@@ -719,31 +695,7 @@ function App() {
     : processing.reviewDetails
       ? mapReviewToProgram(processing.reviewDetails, processing.job)
       : null;
-  const currentSourceRefs = new Map(
-    (processing.reviewDetails?.version.snapshot.source_refs ?? []).map((source) => [source.id, source]),
-  );
-  const currentDocumentNames = new Map(
-    (processing.job?.files ?? []).map((file) => [file.document_id, file.member_name]),
-  );
-  const checkSourceDescription = (ids: string[]) => {
-    const refs = ids.map((id) => currentSourceRefs.get(id)).filter((source) => source !== undefined);
-    const sourceDocuments = [...new Map(refs.map((source) => [source.document_id, source])).values()];
-    const documentLabels = sourceDocuments.map((source) => ({
-      id: source.document_id,
-      name: currentDocumentNames.get(source.document_id) ?? "Источник пакета документов",
-    }));
-    const nameCounts = new Map<string, number>();
-    for (const item of documentLabels) nameCounts.set(item.name, (nameCounts.get(item.name) ?? 0) + 1);
-    const names = documentLabels.map((item) =>
-      nameCounts.get(item.name)! > 1 ? `${item.name} · ${item.id.slice(0, 8)}` : item.name,
-    );
-    const sections = [...new Set(refs.map((source) => source.section).filter((section) => section !== null))];
-    return [names.join(" · "), sections.join(" · ")].filter(Boolean).join(" · ");
-  };
   const isConfirmed = isDemoMode ? demoConfirmed : Boolean(processing.reviewDetails?.confirmed);
-  const coverageReport = processing.checkJob?.status === "completed"
-    ? processing.checkJob.report
-    : processing.reviewDetails?.check_report ?? processing.reviewDetails?.prepare_report;
   const versionNumber = processing.reviewDetails?.version.number ?? 1;
   const hasReconciliation = parsedProgram !== null;
   const unresolvedCount = parsedProgram?.findings.filter((finding) => {
@@ -1137,41 +1089,12 @@ function App() {
                     <details className="issues-details">
                       <summary>Замечания проверки · {parsedProgram.issues.length}</summary>
                       <ul className="issue-list">
-                        {[
-                          ...parsedProgram.issues,
-                          ...(processing.checkJob?.report?.issues ?? []).map((issue) => ({
-                            id: issue.id,
-                            severity: issue.severity === "blocking" ? "error" as const : "warning" as const,
-                            title: issue.message,
-                            source: checkSourceDescription(issue.source_ref_ids) || (
-                              issue.source_ref_ids.length
-                                ? `Источников: ${issue.source_ref_ids.length}`
-                                : "Точный источник не установлен"
-                              ),
-                            ruleId: `${issue.rule_code} · ${issue.rule_revision}`,
-                            status: issue.status,
-                            detail: [
-                              issue.evidence?.reason,
-                              issue.evidence?.model_reason,
-                              ...(Array.isArray(issue.evidence?.source_mapping_limitations)
-                                ? issue.evidence.source_mapping_limitations
-                                : []),
-                            ].filter((value): value is string => typeof value === "string").join(" · ") || undefined,
-                            checks: issue.checks,
-                          })),
-                        ].filter((issue, index, allIssues) =>
-                          allIssues.findIndex((item) => item.id === issue.id) === index
-                        ).map((issue) => (
+                        {parsedProgram.issues.map((issue) => (
                           <li className="issue-row" key={issue.id}>
                             <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
                             <span className="issue-copy">
                               <strong>{issue.title}</strong>
-                              <span>
-                                {issue.status === "needs_review" ? "Нужна ручная проверка · " : ""}
-                                {issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}
-                                {issue.checks != null ? ` · проверок правила: ${issue.checks}` : ""}
-                              </span>
-                              {issue.detail && <span>Причина: {issue.detail}</span>}
+                              <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}</span>
                             </span>
                             <span className={`severity-label severity-label--${issue.severity}`}>
                               {issue.severity === "error" ? "Ошибка" : issue.severity === "warning" ? "Предупреждение" : "Информация"}
@@ -1180,30 +1103,6 @@ function App() {
                         ))}
                       </ul>
                     </details>
-
-                    {!isDemoMode && coverageReport && (
-                      <details className="issues-details" open>
-                        <summary>
-                          Выполнение правил проверки
-                          {processing.checkJob?.status === "completed" && !checkMatchesCurrentVersion
-                            ? " · результат для другой версии" : ""}
-                        </summary>
-                        <ul className="issue-list">
-                          {coverageReport.coverage.map((item) => (
-                            <li className="issue-row" key={`${processing.checkJob?.id}-${item.rule_code}`}>
-                              <span className={`severity-dot severity-dot--${item.status === "failed" ? "error" : item.status === "passed" ? "info" : "warning"}`} aria-hidden="true" />
-                              <span className="issue-copy">
-                                <strong>{item.rule_code}: {item.status === "passed" ? "проверка пройдена" : item.status === "failed" ? "найдено расхождение" : item.status === "skipped" ? "проверка пропущена" : "нужна ручная проверка"}</strong>
-                                <span>
-                                  {item.checks != null ? `Выполнено сравнений: ${item.checks}` : "Число сравнений не указано"}
-                                  {item.reason ? ` · ${item.reason}` : ""}
-                                </span>
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    )}
 
                     {!isDemoMode && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
                       <div className="processing-caption" role="status">

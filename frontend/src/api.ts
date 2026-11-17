@@ -103,8 +103,6 @@ export type ReviewIssue = {
   source_document_ids?: string[];
   requires_decision: boolean;
   variants: ReviewVariant[];
-  evidence?: Record<string, unknown>;
-  checks?: number | null;
   effective_status?: string;
   decision?: { variant_id: string; author: string | null } | null;
 };
@@ -143,17 +141,11 @@ export type ReviewDetails = {
   confirmation: { accepted_warning_ids: string[]; author: string | null } | null;
   check_job_id: string | null;
   check_report: CheckReport | null;
-  prepare_report?: CheckReport | null;
 };
 
 export type CheckReport = {
   ruleset: { required_rules: string[] };
-  coverage: Array<{
-    rule_code: string;
-    status: "passed" | "failed" | "needs_review" | "skipped" | "not_applicable";
-    checks?: number | null;
-    reason: string | null;
-  }>;
+  coverage: Array<{ rule_code: string; status: string; reason: string | null }>;
   issues: ReviewIssue[];
 };
 
