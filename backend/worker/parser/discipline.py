@@ -3,6 +3,7 @@
 import re
 from collections import Counter
 
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -1708,7 +1709,18 @@ def extract_practice_control_forms(document, file_name):
             ))
             continue
 
-        text = normalize(block.text).replace("\u0451", "е")
+        parts = []
+        for element in block._p.xpath(".//w:t | .//w:tab | .//w:br | .//w:cr | .//w:sym"):
+            if element.tag == qn("w:t"):
+                parts.append(element.text or "")
+            elif element.tag == qn("w:sym"):
+                font = element.get(qn("w:font"), "").casefold()
+                code = element.get(qn("w:char"), "").upper()
+                parts.append("☑" if font == "wingdings" and code == "F0FE" else "\ufffc")
+            else:
+                parts.append(" ")
+
+        text = normalize("".join(parts)).replace("\u0451", "е")
         if re.search(r"промежуточн\w*\s+аттестац", text):
             active = True
         if not active:
@@ -1722,7 +1734,7 @@ def extract_practice_control_forms(document, file_name):
         selected = [
             match.group(2) for match in marked if match.group(1) in checked
         ]
-        if not marked and not any(char in text for char in checked + unchecked):
+        if not marked and not any(char in text for char in checked + unchecked + "\ufffc"):
             if len(candidates) == 1 and not re.search(
                 r"\bне\s+(?:предусмотрен\w*|проводится)\b", text,
             ):
