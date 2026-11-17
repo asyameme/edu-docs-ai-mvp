@@ -1,6 +1,7 @@
-# Черновая конфигурация rule engine.
+# Конфигурация rule engine.
 # YAML задаёт метаданные и параметры; каждый type должен иметь обработчик в коде.
 # Правила взяты из реестра issue #6; этот файл сам по себе их не исполняет.
+# Статусы draft исключены из запуска; ready и ready_with_semantic_fallback запускаются.
 
 schema_version: 2
 
@@ -90,7 +91,7 @@ rules:
     name: "Согласованность кодов компетенций и связей дисциплин (без матрицы)"
     type: "competency_consistency"
     status: "ready"
-    match_threshold: 0.94  # Предварительная настраиваемая эвристика, НЕ решение
+    match_threshold: 0.94  # Порог предложения кандидата; соответствие подтверждает пользователь.
     notes: >-
       Проверяет ссылки на существующие коды и соответствие явных связей
       учебного плана и РПД/РПП по названию и семестру. Отсутствие кода
@@ -151,7 +152,7 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая согласованность индикаторов с одинаковым кодом"
     type: "semantic_indicator_consistency"
-    status: "draft"
+    status: "ready_with_semantic_fallback"
     scope:
       document_types: ["rpd", "rpp", "ckmv"]
     inputs:
@@ -253,8 +254,10 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Соответствие ЗЕТ и часов"
     type: "credit_hours"
-    status: "draft"
-    notes: "36 часов на 1 ЗЕТ — принятое для проекта допущение, нормативное основание требует подтверждения."
+    status: "ready"
+    inputs:
+      hours_per_credit_unit: 36
+    notes: "Для проекта утверждено значение 36 часов на 1 ЗЕТ."
 
   - id: "R-05-title"
     phases: ["document_reconciliation", "graph_validation"]
