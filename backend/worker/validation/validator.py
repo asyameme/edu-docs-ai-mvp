@@ -122,6 +122,7 @@ def load_rules(path: str | Path = DEFAULT_RULES) -> dict[str, Any]:
         if (
             not isinstance(rule_phases, list)
             or not rule_phases
+            or any(not isinstance(item, str) for item in rule_phases)
             or len(rule_phases) != len(set(rule_phases))
             or not set(rule_phases).issubset(VALIDATION_PHASES)
         ):

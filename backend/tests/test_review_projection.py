@@ -8,6 +8,7 @@ from app.review_contract import CheckResult, ReviewIssue, RuleCoverage
 from app.review_projection import (
     project_legacy_review_issue,
     project_legacy_review_result,
+    project_prepare_report,
     validator_result_for_contract,
 )
 
@@ -98,3 +99,23 @@ def test_legacy_report_and_database_issue_are_projected_to_main_contract():
     assert "checks" not in issue
     assert "evidence" not in issue
     CheckResult.model_validate({key: projected[key] for key in ("ruleset", "coverage", "issues")})
+
+
+def test_prepare_report_omits_backend_only_graph_metadata():
+    raw = sample_result()
+    raw["schema_version"] = 2
+    raw.update({
+        "graph_ready": False,
+        "graph_build_issues": [{"category": "unresolved"}],
+        "candidate": {"entities": []},
+        "artifacts": [],
+    })
+
+    report = project_prepare_report(raw)
+
+    assert report["schema_version"] == 2
+    assert set(report) == {"schema_version", "ruleset", "coverage", "issues"}
+    assert "graph_ready" not in report
+    assert "graph_build_issues" not in report
+    assert "candidate" not in report
+    assert "artifacts" not in report

@@ -24,6 +24,7 @@ from app.review_logic import (
 from app.review_projection import (
     project_legacy_review_issue,
     project_legacy_review_result,
+    project_prepare_report,
 )
 from app.review_storage import insert_issues, insert_version, previous_version
 
@@ -820,11 +821,5 @@ class ReviewRepository:
                 if latest
                 else None
             ),
-            "prepare_report": {
-                key: value
-                for key, value in project_legacy_review_result(
-                    review["report"]["result"]
-                ).items()
-                if key not in {"candidate", "artifacts"}
-            },
+            "prepare_report": project_prepare_report(review["report"]["result"]),
         }

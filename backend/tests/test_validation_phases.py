@@ -1,5 +1,7 @@
 """Разделение готовых проверок по стадиям без изменения правил и статусов."""
 
+import json
+
 import pytest
 
 from worker.validation.validator import ValidationError, load_rules, run_validation
@@ -48,3 +50,15 @@ def test_engine_selects_rule_phase_and_reports_it():
 def test_engine_rejects_unknown_phase():
     with pytest.raises(ValidationError, match="Неизвестная фаза"):
         run_validation([], phase="before_graph")
+
+
+def test_load_rules_rejects_unhashable_phase_values_as_configuration_error(tmp_path):
+    config = {
+        "schema_version": 1,
+        "rules": [{"id": "broken", "phases": ["document_reconciliation", {}]}],
+    }
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="Правило broken"):
+        load_rules(path)

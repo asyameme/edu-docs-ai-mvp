@@ -99,7 +99,8 @@ def test_complete_review_preserves_original_sources_versions_and_confirmation():
         version, issue = choose(http, root, job)
         assert version["snapshot"]["entities"][0]["attributes"]["hours_total"] == 144
         details = http.get(root + "/versions/" + version["id"] + "/review").json()
-        assert details["prepare_report"]["graph_ready"] is True
+        assert "graph_ready" not in details["prepare_report"]
+        assert "graph_build_issues" not in details["prepare_report"]
         checked = run_check(http, root, job, version["id"])
         assert checked["status"] == "completed", checked
         details = http.get(root + "/versions/" + version["id"] + "/review").json()
@@ -194,8 +195,8 @@ def test_unresolved_graph_build_keeps_selected_decisions_and_reports_blocker():
         assert version["snapshot"]["review"]["graph_ready"] is False
         assert len(version["snapshot"]["review"]["decisions"]) == 1
         details = http.get(root + "/versions/" + version["id"] + "/review").json()
-        assert details["prepare_report"]["graph_ready"] is False
-        assert details["prepare_report"]["graph_build_issues"]
+        assert "graph_ready" not in details["prepare_report"]
+        assert "graph_build_issues" not in details["prepare_report"]
         build_issue = next(
             issue for issue in details["issues"] if issue["rule_code"] == "BACKEND_GRAPH_BUILD"
         )

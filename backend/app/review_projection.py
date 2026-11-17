@@ -45,6 +45,16 @@ def project_legacy_review_result(result):
     return _project_result(result)
 
 
+def project_prepare_report(result):
+    """Скрывает внутренние поля сборки графа в публичном отчёте подготовки."""
+    projected = project_legacy_review_result(result)
+    return {
+        key: value
+        for key, value in projected.items()
+        if key not in {"candidate", "artifacts", "graph_ready", "graph_build_issues"}
+    }
+
+
 def project_legacy_review_issue(issue):
     """Возвращает сохранённое замечание в формате, совместимом с контрактом main."""
     public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
