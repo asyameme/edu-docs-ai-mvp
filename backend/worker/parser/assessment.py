@@ -298,12 +298,9 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
                         not label or label == str(index)
                         for index, label in enumerate(labels, 1)
                     )
-                    or (
-                        doc_type == "RPP"
-                        and numbered == [
-                            str(index) for index in range(1, len(numbered) + 1)
-                        ]
-                    )
+                    or numbered == [
+                        str(index) for index in range(1, len(numbered) + 1)
+                    ]
                 )
             ):
                 continue
