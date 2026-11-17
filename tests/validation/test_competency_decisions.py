@@ -50,7 +50,9 @@ def test_choose_original_code_with_provenance_and_no_merge():
     assert new.nodes[0].id == '26/5003/1|competency|УНК-03'
     resolution = new.nodes[-1]
     assert resolution.attributes['selected_value'] == 'ПКП-УНК-03'
-    assert [r.file for r in resolution.source_refs] == ['matrix.json', 'rpd.json']
+    assert resolution.source_refs == []
+    assert [r.file for r in resolution.decision_basis_refs] == ['matrix.json', 'rpd.json']
+    assert resolution.attribute_sources == {}
     assert len(resolution.attributes['original_variants']) == 2
     assert resolution.attributes['status'] == 'confirmed'
     assert resolution.attributes['source_node_ids'] == [
@@ -192,7 +194,9 @@ def test_exact_source_coordinates_allow_confirmation_and_preserve_graph():
     updated = record_confirmed_decision(g, ProposedDecision(f, 'accept', 'document', variant_index=0),
                                         confirmed_by='reviewer', explicit_confirmation=True)
     assert updated.nodes[-1].attributes['source_node_ids'][0] == g.nodes[0].id
-    assert updated.nodes[-1].source_refs[0] == g.nodes[0].source_refs[0]
+    assert updated.nodes[-1].source_refs == []
+    assert updated.nodes[-1].decision_basis_refs[0] == g.nodes[0].source_refs[0]
+    assert updated.nodes[-1].attribute_sources == {}
     assert g.model_dump() == snapshot
 
 

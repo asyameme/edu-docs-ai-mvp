@@ -100,8 +100,31 @@ def resolution_key(finding: Finding) -> str:
     return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
 
 
+def _evidence_fingerprint(variants: Any) -> str:
+    if not isinstance(variants, list) or not all(isinstance(v, dict) for v in variants):
+        raise ValueError('Finding must contain source variants')
+    relevant = [{field: variant.get(field) for field in
+                 ('code', 'formulation', 'document', 'source_ref')} for variant in variants]
+    # Validation input order can change between runs; the source values and
+    # coordinates, rather than their list positions, identify this decision.
+    relevant.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
+    return sha256(json.dumps(relevant, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def _decision_instance_key(key: str, fingerprint: str) -> str:
+    payload = [key, fingerprint]
+    return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def resolution_instance_key(finding: Finding) -> str:
+    """Identify a decision for this exact set of source evidence."""
+    key = resolution_key(finding)
+    fingerprint = _evidence_fingerprint(finding.evidence.get('variants'))
+    return _decision_instance_key(key, fingerprint)
+
+
 def get_confirmed_resolutions(graph: Any) -> dict[str, dict[str, Any]]:
-    """Read confirmed audit nodes; reject ambiguity rather than silently choosing.
+    """Read confirmed audit nodes for their exact evidence snapshot.
 
     Callers can explicitly consume this overlay when building a resolved view.
     Source nodes/edges remain untouched. No resolution is applied automatically.
@@ -117,21 +140,32 @@ def get_confirmed_resolutions(graph: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(key, str) or not key:
             # Older records without a stable key cannot be safely associated.
             continue
-        if key in result:
-            raise ValueError(f'Conflicting confirmed decisions for resolution key {key}')
-        result[key] = dict(attrs)
+        instance_key = attrs.get('resolution_instance_key')
+        if not isinstance(instance_key, str) or not instance_key:
+            # Migrate prior audit nodes in memory. Their stored variants still
+            # identify the evidence on which the human decision was based.
+            try:
+                fingerprint = attrs.get('evidence_fingerprint')
+                if not isinstance(fingerprint, str) or not fingerprint:
+                    fingerprint = _evidence_fingerprint(attrs.get('original_variants'))
+                instance_key = _decision_instance_key(key, fingerprint)
+            except ValueError:
+                continue
+        if instance_key in result:
+            raise ValueError(f'Conflicting confirmed decisions for resolution instance {instance_key}')
+        result[instance_key] = dict(attrs)
     return result
 
 
 def resolution_for_finding(graph: Any, finding: Finding) -> dict[str, Any] | None:
     """Lookup a prior accept/reject for a validation finding without mutating it."""
-    return get_confirmed_resolutions(graph).get(resolution_key(finding))
+    return get_confirmed_resolutions(graph).get(resolution_instance_key(finding))
 
 
 def pending_competency_findings(graph: Any, findings: list[Finding]) -> list[Finding]:
     """Exclude already decided findings from a user-facing pending queue."""
     decided = get_confirmed_resolutions(graph)
-    return [finding for finding in findings if resolution_key(finding) not in decided]
+    return [finding for finding in findings if resolution_instance_key(finding) not in decided]
 
 
 def _source_competency_node_ids(graph: Any, finding: Finding,
@@ -208,8 +242,10 @@ def record_confirmed_decision(graph: Any, proposal: ProposedDecision, *,
     # Validate that every claimed document variant is present in this graph.
     source_node_ids = _source_competency_node_ids(graph, proposal.finding, variants)
     key = resolution_key(proposal.finding)
-    if key in get_confirmed_resolutions(graph):
-        raise ValueError('This competency already has a confirmed decision; explicit revision workflow required')
+    fingerprint = _evidence_fingerprint(variants)
+    instance_key = _decision_instance_key(key, fingerprint)
+    if instance_key in get_confirmed_resolutions(graph):
+        raise ValueError('This evidence already has a confirmed decision; explicit revision workflow required')
     source_refs = list(dict.fromkeys(SourceRef.model_validate(v['source_ref']).model_dump_json() for v in variants))
     new_graph = graph.model_copy(deep=True)
     identifier = decision_id or str(uuid4())
@@ -218,6 +254,8 @@ def record_confirmed_decision(graph: Any, proposal: ProposedDecision, *,
     attrs = {
         'rule': 'R-01' if kind == 'code_match' else 'R-07',
         'resolution_key': key,
+        'resolution_instance_key': instance_key,
+        'evidence_fingerprint': fingerprint,
         'finding_code': proposal.finding.code,
         'subject_codes': list(proposal.finding.evidence.get('codes') or
                               [proposal.finding.evidence.get('code')]),
@@ -236,5 +274,5 @@ def record_confirmed_decision(graph: Any, proposal: ProposedDecision, *,
     }
     new_graph.add_node(GraphNode(id=f'competency-resolution:{identifier}',
                                  entity_type='competency_resolution', attributes=attrs,
-                                 source_refs=[SourceRef.model_validate(json.loads(x)) for x in source_refs]))
+                                 decision_basis_refs=[SourceRef.model_validate(json.loads(x)) for x in source_refs]))
     return new_graph

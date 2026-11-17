@@ -15,12 +15,12 @@ if __package__:
     from .semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from .semantic_llm import SemanticEvaluator
     from .semantic_rpd import evaluate_rpd_alignment
-    from .semantic_competency import evaluate_competency_pair, CompetencyEvaluator
+    from .semantic_competency import evaluate_competency_group, CompetencyEvaluator
 else:  # Поддерживаем и прямой запуск validator.py.
     from semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from semantic_llm import SemanticEvaluator
     from semantic_rpd import evaluate_rpd_alignment
-    from semantic_competency import evaluate_competency_pair, CompetencyEvaluator
+    from semantic_competency import evaluate_competency_group, CompetencyEvaluator
 
 try:
     import yaml
@@ -717,10 +717,20 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                              evaluator: CompetencyEvaluator | None = None) -> RuleResult:
     """R-07: compare all formulations of a code as peers, one finding per code.
 
-    All cross-document pairs are evaluated; a CKMV/characteristic formulation is
-    never authoritative. Grouping variants avoids contradictory pairwise choices.
+    Cross-document pairs are reported individually, while all distinct text
+    variants for one code share at most one semantic model request. A
+    CKMV/characteristic formulation is never authoritative.
     """
-    checks, findings = 0, []
+    checks, findings, llm_calls = 0, [], 0
+    llm_config = rule.get('llm', {})
+    if not isinstance(llm_config, Mapping):
+        llm_config = {}
+    max_calls = llm_config.get('max_calls_per_run', 50)
+    max_variants = llm_config.get('max_group_variants', 8)
+    if not isinstance(max_calls, int) or isinstance(max_calls, bool) or max_calls < 0:
+        max_calls = 50
+    if not isinstance(max_variants, int) or isinstance(max_variants, bool) or max_variants < 2:
+        max_variants = 8
     for _pid, group in _program_groups(docs).items():
         by_code: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         for doc in group:
@@ -734,6 +744,8 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
             variants = [{'document': d.label, 'code': code, 'formulation': row.get('formulation'),
                          'source_ref': _source_ref(d, row)} for d, row in records]
             comparisons = []
+            semantic_pairs: dict[tuple[str, str], None] = {}
+            semantic_texts: dict[str, str] = {}
             differs = False
             missing = False
             for i, (left_doc, left_row) in enumerate(records):
@@ -751,10 +763,39 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                         comparison.update(status='technically_equivalent', reason='Различия только в оформлении')
                     else:
                         differs = True
-                        result = evaluate_competency_pair(code, left, right, evaluator=evaluator,
-                                                          config=rule.get('llm', {}))
-                        comparison.update(status=result['status'], reason=result['reason'])
+                        left_key, right_key = _canonical_formulation(left), _canonical_formulation(right)
+                        pair_key = tuple(sorted((left_key, right_key)))
+                        semantic_texts.setdefault(left_key, left)
+                        semantic_texts.setdefault(right_key, right)
+                        semantic_pairs.setdefault(pair_key, None)
+                        comparison['_semantic_pair'] = pair_key
                     comparisons.append(comparison)
+            if semantic_pairs:
+                keys = list(dict.fromkeys(key for pair in semantic_pairs for key in pair))
+                if len(keys) > max_variants:
+                    reason = (f'Число вариантов ({len(keys)}) превышает лимит группового сравнения '
+                              f'({max_variants}); требуется ручная проверка.')
+                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
+                                       for pair in semantic_pairs}
+                elif llm_calls >= max_calls:
+                    reason = f'Достигнут лимит семантических запросов на запуск ({max_calls}); требуется ручная проверка.'
+                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
+                                       for pair in semantic_pairs}
+                else:
+                    llm_calls += 1
+                    evaluated = evaluate_competency_group(
+                        code, [semantic_texts[key] for key in keys],
+                        evaluator=evaluator, config=llm_config)
+                    index_by_key = {key: index for index, key in enumerate(keys)}
+                    results_by_pair = {}
+                    for pair in semantic_pairs:
+                        result = evaluated.get(tuple(sorted((index_by_key[pair[0]], index_by_key[pair[1]]))))
+                        results_by_pair[pair] = result or {
+                            'status': 'uncertain', 'reason': 'Модель не вернула результат для этой пары.'}
+                for comparison in comparisons:
+                    pair_key = comparison.pop('_semantic_pair', None)
+                    if pair_key is not None:
+                        comparison.update(results_by_pair[pair_key])
             if not missing and not differs:
                 continue
             # One user decision covers every document variant for the given code.

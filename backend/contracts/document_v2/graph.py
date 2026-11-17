@@ -17,6 +17,9 @@ class GraphNode(BaseModel):
     entity_type: str
     attributes: dict[str, Any] = Field(default_factory=dict)
     source_refs: list[SourceRef] = Field(default_factory=list)
+    # Evidence for a human resolution is context for the decision, not evidence
+    # that the decision's attributes were extracted from these documents.
+    decision_basis_refs: list[SourceRef] = Field(default_factory=list)
 
     attribute_sources: dict[str, list[AttributeEvidence]] = Field(default_factory=dict)
 
@@ -79,6 +82,10 @@ class EducationalGraph(BaseModel):
         for ref in incoming.source_refs:
             if ref not in existing.source_refs:
                 existing.source_refs.append(ref)
+
+        for ref in incoming.decision_basis_refs:
+            if ref not in existing.decision_basis_refs:
+                existing.decision_basis_refs.append(ref)
 
         for key, evidences in incoming.attribute_sources.items():
             for evidence in evidences:
