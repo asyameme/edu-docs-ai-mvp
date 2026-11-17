@@ -122,11 +122,8 @@ class ReviewRepository:
                 (program_id, key),
             ).fetchone():
                 raise DomainError(409, "Ключ использован для сохранения версии")
-            if purpose == "prepare" and not self.settings.analysis_url:
-                raise DomainError(503, "Для анализа документов не настроен сервис /analyze")
             if (
-                purpose != "prepare"
-                and not self.settings.analysis_url
+                not self.settings.analysis_url
                 and not self.settings.local_validation_enabled
             ):
                 raise DomainError(503, "ML-анализ не настроен; фиктивный результат не создаётся")

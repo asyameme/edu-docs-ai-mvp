@@ -11,6 +11,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.document_adapter import to_snapshot_v2
+from app.document_analysis import analyze_documents
 from app.document_reconciliation import validate_document_mutation_variants
 from app.domain import SnapshotV2
 from app.errors import DomainError
@@ -95,8 +96,6 @@ class ReviewActivities:
         purpose = job["parameters"]["purpose"]
         try:
             if job["parameters"].get("executor", "http") == "local":
-                if purpose == "prepare" and job["parameters"].get("schema_version", 1) == 2:
-                    raise ValueError("Документный анализ AnalysisV2 требует настроенный /analyze")
                 input_data = job["parameters"]["input"]
                 rules = job["parameters"].get("local_rules") or load_rules()
                 expected_implementation = job["parameters"].get("implementation_revision")
@@ -109,7 +108,17 @@ class ReviewActivities:
                     for item in input_data["documents"]
                 ]
                 ruleset = validation_ruleset(rules, inputs)
-                if purpose == "prepare":
+                if purpose == "prepare" and job["parameters"].get("schema_version", 1) == 2:
+                    parsed_request = PrepareRequestV2.model_validate({
+                        "schema_version": 2, "operation": "prepare",
+                        "job_id": job["id"], "program_id": job["program_id"],
+                        "version_id": job["input_version_id"], **input_data,
+                    })
+                    raw = analyze_documents(
+                        [item.model_dump(mode="json") for item in parsed_request.documents],
+                        job["id"], config=rules,
+                    )
+                elif purpose == "prepare":
                     files = [
                         {"document_id": item["document_id"], "output": item["parsed"]}
                         for item in input_data["documents"]

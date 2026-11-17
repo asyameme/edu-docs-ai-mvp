@@ -27,6 +27,8 @@ def validation_implementation_revision():
     worker = root / "worker" / "validation"
     files = [
         Path(__file__).resolve(),
+        root / "app" / "document_analysis.py",
+        root / "app" / "document_reconciliation.py",
         worker / "validator.py",
         worker / "semantic_competency.py",
         worker / "semantic_llm.py",
@@ -142,7 +144,11 @@ def project_snapshot_documents(documents, snapshot):
                     raise ValueError(f"В исходных данных нет поля {field}")
                 value[field] = new_value
                 return 1
-            return sum(update_record(child, locator, field, new_value) for child in value.values())
+            return sum(
+                update_record(child, locator, field, new_value)
+                for key, child in value.items()
+                if key not in {"meta", "parse_issues", "source_ref"}
+            )
         if isinstance(value, list):
             return sum(update_record(child, locator, field, new_value) for child in value)
         return 0
@@ -153,7 +159,8 @@ def project_snapshot_documents(documents, snapshot):
                 return [value[field]] if field in value else []
             return [
                 found
-                for child in value.values()
+                for key, child in value.items()
+                if key not in {"meta", "parse_issues", "source_ref"}
                 for found in record_values(child, locator, field)
             ]
         if isinstance(value, list):
@@ -214,6 +221,11 @@ def project_snapshot_documents(documents, snapshot):
     ]
 
 
+def validation_rule_revision(config, rule):
+    """Сохраняет заданную ревизию; хэш конфигурации нужен лишь при её отсутствии."""
+    return str(rule.get("revision") or config.get("revision") or digest(rule))
+
+
 def validation_ruleset(config, documents):
     available = {item.role for item in documents if item.role}
     enabled = [rule for rule in config["rules"] if rule.get("status") == "ready"]
@@ -235,10 +247,8 @@ def validation_ruleset(config, documents):
     }
 
 
-def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
-    """Проверяет сохранённые документы и связывает замечания с их источниками."""
-    config = config or load_rules()
-
+def validation_documents(documents):
+    """Добавляет служебную идентичность в копии входов, сохраняя оригиналы."""
     def attach_identity(value, document_id):
         if isinstance(value, dict):
             for child in value.values():
@@ -259,6 +269,29 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
         original_name = meta.get("file_name") if isinstance(meta, dict) else None
         label = original_name if isinstance(original_name, str) and original_name else identity
         inputs.append(Document(parsed, label, identity))
+    return inputs
+
+
+def run_document_rules(inputs, config, *, phase):
+    """Запускает общий движок с тем же профилем и бюджетом на указанной стадии."""
+    active_config = {
+        **config,
+        "rules": [
+            rule for rule in config["rules"]
+            if rule.get("status") in {"ready", "ready_with_semantic_fallback", "draft"}
+        ],
+    }
+    budget = _ValidationBudget()
+    return run_validation(
+        inputs, active_config, phase=phase,
+        semantic_evaluator=budget.semantic, competency_evaluator=budget.competency,
+    ).to_dict()
+
+
+def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
+    """Проверяет сохранённые документы и связывает замечания с их источниками."""
+    config = config or load_rules()
+    inputs = validation_documents(documents)
     ruleset = ruleset or validation_ruleset(config, inputs)
     if ruleset.get("id") == "education-backend-validation":
         expected = validation_ruleset(config, inputs)
@@ -266,22 +299,7 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
             raise ValueError(
                 "Профиль или ревизия локального валидатора несовместима с сохранённым заданием"
             )
-    active_config = {
-        **config,
-        "rules": [
-            rule
-            for rule in config["rules"]
-            if rule.get("status") in {"ready", "ready_with_semantic_fallback"}
-        ],
-    }
-    budget = _ValidationBudget()
-    report = run_validation(
-        inputs,
-        active_config,
-        phase="graph_validation",
-        semantic_evaluator=budget.semantic,
-        competency_evaluator=budget.competency,
-    ).to_dict()
+    report = run_document_rules(inputs, config, phase="graph_validation")
     refs = {}
     document_aliases = {}
     for document in inputs:
@@ -314,7 +332,7 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
             "needs_review": "needs_review",
             "skipped": "skipped",
         }[status]
-        rule_revision = digest(result_by_id[result["rule_id"]])
+        rule_revision = validation_rule_revision(config, result_by_id[result["rule_id"]])
         coverage.append(
             {
                 "rule_code": result["rule_id"],
