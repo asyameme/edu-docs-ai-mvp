@@ -87,8 +87,10 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
         details = http.get(root + f'/versions/{version["id"]}/review').json()
         report = details["check_report"]
         coverage = {entry["rule_code"]: entry for entry in report["coverage"]}
-        assert set(coverage) == {rule["id"] for rule in load_rules()["rules"]}
-        assert len(coverage) == 17
+        assert set(coverage) == {
+            rule["id"] for rule in load_rules()["rules"] if rule["status"] != "draft"
+        }
+        assert len(coverage) == 5
         assert coverage["R-07"]["status"] == "passed"
         assert all("checks" not in entry for entry in report["coverage"])
         assert all("evidence" not in issue and "checks" not in issue for issue in report["issues"])

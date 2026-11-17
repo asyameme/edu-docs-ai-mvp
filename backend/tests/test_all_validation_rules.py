@@ -15,7 +15,7 @@ from worker.validation.validator import load_rules, run_validation
 ORIGINALS = Path(__file__).resolve().parents[2] / "tests" / "originals"
 
 
-def test_backend_runs_all_rules_on_real_documents(monkeypatch):
+def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
     monkeypatch.setattr("app.validation_bridge.VALIDATION_MAX_LLM_CALLS", 0)
     program_id = uuid4()
     members = [
@@ -37,11 +37,11 @@ def test_backend_runs_all_rules_on_real_documents(monkeypatch):
     projected = project_snapshot_documents(inputs, snapshot)
     result = run_local_check(projected, snapshot, uuid4(), config=config)
     coverage = {entry["rule_code"]: entry for entry in result["coverage"]}
-    all_rules = {rule["id"] for rule in config["rules"]}
+    all_rules = {rule["id"] for rule in config["rules"] if rule["status"] != "draft"}
     assert set(coverage) == all_rules
-    assert len(coverage) == 17
+    assert len(coverage) == 5
     assert all(issue["rule_code"] in all_rules for issue in result["issues"])
-    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
     assert all(entry["checks"] > 0 for entry in coverage.values() if entry["status"] == "passed")
     assert inputs == original
     assert config == original_config
@@ -69,6 +69,8 @@ def test_draft_detects_known_error_then_accepts_correction(rule_id, documents, f
     config = load_rules()
     rule = next(item for item in config["rules"] if item["id"] == rule_id)
     assert rule["status"] in {"draft", "ready"}
+    # Проверка обработчика черновика отдельно от штатного профиля.
+    rule["status"] = "ready"
     if rule_id == "R-13":
         rule["inputs"]["required_sections"] = ["Содержание"]
     config["rules"] = [rule]

@@ -36,6 +36,7 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
                          "graph_validation": {"input": "graph_projection"}},
               "rules": [{
         "id": "hours", "name": "Часы и ЗЕТ", "status": "ready", "type": "credit_hours",
+        "inputs": {"hours_per_credit_unit": 36},
         "phases": ["document_reconciliation", "graph_validation"],
     }]}
     ruleset = validation_ruleset(config, [Document(original["parsed"], "rpd")])

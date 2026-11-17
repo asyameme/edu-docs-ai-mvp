@@ -107,17 +107,17 @@ def test_missing_nullable_formulation_can_be_filled_from_an_existing_document_va
                and change["value"] == "Проверяемая формулировка" for change in changes)
 
 
-def test_pregraph_analysis_runs_all_rules_without_changing_profile():
+def test_pregraph_analysis_runs_active_rules_without_changing_profile():
     documents = package()
     config = load_rules()
     original = deepcopy(config)
     result = analyze_documents(documents, uuid4(), config=config)
     assert {item["rule_code"] for item in result["coverage"]} == {
-        rule["id"] for rule in config["rules"]
+        rule["id"] for rule in config["rules"] if rule["status"] != "draft"
     }
-    assert len(result["coverage"]) == 17
+    assert len(result["coverage"]) == 5
     assert config == original
-    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
 
 
 @pytest.mark.parametrize("shared_locator", [False, True])
@@ -151,17 +151,17 @@ def test_r07_maps_normalized_codes_and_null_formulations_to_exact_rows(shared_lo
                for parsed in resolved.values() for row in parsed["competencies"])
 
 
-def test_graph_check_runs_all_rules_and_keeps_drafts_out_of_required_profile():
+def test_graph_check_omits_drafts_and_keeps_active_rules():
     documents = package()
     config = load_rules()
     result = run_local_check(documents, SnapshotV2(), uuid4(), config=config)
 
     assert {item["rule_code"] for item in result["coverage"]} == {
-        rule["id"] for rule in config["rules"]
+        rule["id"] for rule in config["rules"] if rule["status"] != "draft"
     }
-    assert len(result["coverage"]) == 17
-    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference"]
-    assert any(item["rule_code"] == "R-03" for item in result["coverage"])
+    assert len(result["coverage"]) == 5
+    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+    assert not any(item["rule_code"] == "R-03" for item in result["coverage"])
 
 
 def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp_path):
