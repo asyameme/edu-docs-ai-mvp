@@ -5,8 +5,9 @@
 существующий конвейер (``review_storage`` → ``validation_issues``), чтобы
 повторная проверка после правок ложилась в ту же таблицу и тот же чат.
 
-Статус ``failed`` остаётся блокирующим, а ``needs_review`` требует внимания
-человека и не считается успешной проверкой.
+Уровень замечаний сохраняет политику main: все находки предупреждающие.
+``failed`` сохраняется как открытая находка, а ``needs_review`` требует
+внимания человека; ни один из этих статусов не означает успешную проверку.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def findings_to_issues(
                     "rule_code": result.rule_id,
                     "rule_revision": str(revision),
                     "type": finding.code,
-                    "severity": "blocking" if finding.status == "failed" else "warning",
+                    "severity": "warning",
                     "status": status,
                     "details": {
                         "message": finding.message,
