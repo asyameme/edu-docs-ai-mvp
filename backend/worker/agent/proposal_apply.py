@@ -301,7 +301,7 @@ def generation_inputs(
 
 
 def touched_document_ids(snapshot: SnapshotV2, changes: list[ApprovedChange]) -> set[UUID]:
-    """Документы, которых коснутся правки (для отчёта до применения)."""
+    """Документы, которых коснутся правки (для показа до применения)."""
 
     refs = {ref.id: ref.document_id for ref in snapshot.source_refs}
     documents: set[UUID] = set()
