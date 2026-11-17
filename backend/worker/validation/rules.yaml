@@ -1,7 +1,21 @@
-schema_version: 1
+# Конфигурация rule engine.
+# YAML задаёт метаданные и параметры; каждый type должен иметь обработчик в коде.
+# Правила взяты из реестра issue #6; этот файл сам по себе их не исполняет.
+# Статусы draft исключены из запуска; ready и ready_with_semantic_fallback запускаются.
+
+schema_version: 2
+
+# До графа правила проверяют набор распарсенных JSON. После решений пользователя
+# та же логика запускается на проекции проверяемой версии графа.
+phases:
+  document_reconciliation:
+    input: parsed_documents
+  graph_validation:
+    input: graph_projection
 
 rules:
   - id: "R-03"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Внутренняя сумма часов"
     type: "sum_components_equals_total"
     status: "draft"
@@ -42,6 +56,7 @@ rules:
       Справочные часы активных форм и ЗЕТ в сумму не входят.
 
   - id: "R-05"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ между РПД и учебным планом"
     type: "compare_fields_across_documents"
     status: "draft"
@@ -72,33 +87,49 @@ rules:
       внутри РПД и сумм по семестрам РПП в этот черновик не входят.
 
   - id: "R-01"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность кодов компетенций и связей дисциплин (без матрицы)"
     type: "competency_consistency"
     status: "ready"
+    match_threshold: 0.94  # Порог предложения кандидата; соответствие подтверждает пользователь.
     notes: >-
       Проверяет ссылки на существующие коды и соответствие явных связей
       учебного плана и РПД/РПП по названию и семестру. Отсутствие кода
       в неполном каталоге ЦКМВ/характеристики требует ручной проверки;
       непредставленные дисциплины не считаются ошибками.
+      Дополнительно предлагает возможные соответствия различных кодов
+      при высокой схожести формулировок (настраиваемый порог 0.94); хранит все источники; пользователь подтверждает
+      или отклоняет кандидата. Автоматическое объединение запрещено.
 
   - id: "R-07"
-    name: "Согласованность формулировок компетенций (без матрицы)"
+    phases: ["document_reconciliation", "graph_validation"]
+    name: "Сопоставление формулировок компетенций с одинаковым кодом"
     type: "competency_formulations"
     status: "ready_with_semantic_fallback"
     llm:
       model_env: "VALIDATION_LLM_MODEL"
       api_key_env: "VALIDATION_LLM_API_KEY"
       api_base_env: "VALIDATION_LLM_API_BASE"
+      timeout_seconds: 45
+      max_tokens: 2400
+      max_calls_per_run: 50
+      max_group_variants: 8
     notes: >-
-      Сравнивает одинаковые коды с приоритетом ЦКМВ, затем характеристики.
+      Сравнивает все варианты одного кода между документами одним событием проверки, включая
+      РПД, РПП, ЦКМВ, характеристику и матрицу, без автоматического эталона.
       Различия только в регистре, пробелах и конечной пунктуации допустимы.
-      Существенные различия оцениваются LLM при наличии конфигурации,
-      иначе помечаются для ручного ревью; разные коды не отождествляются.
+      LLM описывает смысловые и грамматические различия, включая добавленный
+      уровень; при её недоступности требуется ручное ревью.
+      Разные варианты одного кода сравниваются одним групповым запросом;
+      на один запуск ограничено 50 запросов, в группе — до 8 уникальных
+      формулировок. Превышение лимитов переводит сравнения в uncertain для ручного ревью.
+      Выбор формулировки делает пользователь, разные коды не объединяются.
 
   - id: "R-08-local-reference"
-    name: "Ссылка индикатора на существующую компетенцию внутри РПД"
+    phases: ["document_reconciliation", "graph_validation"]
+    name: "Ссылка индикатора на существующую компетенцию внутри документа"
     type: "reference_exists"
-    status: "draft"
+    status: "ready"
     scope:
       document_types: ["rpd", "rpp", "ckmv"]
     inputs:
@@ -118,9 +149,10 @@ rules:
       формулировок и кодов индикаторов относительно ЦКМВ.
 
   - id: "R-08-semantic"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая согласованность индикаторов с одинаковым кодом"
     type: "semantic_indicator_consistency"
-    status: "draft"
+    status: "ready_with_semantic_fallback"
     scope:
       document_types: ["rpd", "rpp", "ckmv"]
     inputs:
@@ -149,6 +181,7 @@ rules:
       экспертной проверки и не являются нормативным нарушением.
 
   - id: "R-11"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая связь результатов обучения с содержанием и оцениванием в РПД"
     type: "semantic_rpd_alignment"
     status: "draft"
@@ -185,6 +218,7 @@ rules:
       VALIDATION_LLM_MODEL и VALIDATION_LLM_API_KEY; VALIDATION_LLM_API_BASE необязателен.
 
   - id: "R-06"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Поиск дубликатов внутри списков сущностей"
     type: "unique_by_fields"
     status: "draft"
@@ -210,29 +244,36 @@ rules:
 
   # Правила, не использующие матрицу компетенций.
   - id: "R-02"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сверка часов учебного плана и РПД/РПП"
     type: "hours_against_curriculum"
     status: "draft"
     notes: "Для РПП сравнивается нагрузка конкретного семестра; для РПД — только односеместровая запись."
 
   - id: "R-04"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Соответствие ЗЕТ и часов"
     type: "credit_hours"
-    status: "draft"
-    notes: "36 часов на 1 ЗЕТ — принятое для проекта допущение, нормативное основание требует подтверждения."
+    status: "ready"
+    inputs:
+      hours_per_credit_unit: 36
+    notes: "Для проекта утверждено значение 36 часов на 1 ЗЕТ."
 
   - id: "R-05-title"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ титула и таблицы нагрузки"
     type: "title_credit_units"
     status: "draft"
 
   - id: "R-03-RPP"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Сумма нагрузки практики по семестрам"
     type: "semester_workload_totals"
     status: "draft"
     notes: "Проверяется сумма часов и ЗЕТ по semester_workload против общего итога РПП."
 
   - id: "R-09"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Покрытие компетенций по полному учебному плану"
     type: "competency_coverage"
     status: "draft"
@@ -241,12 +282,14 @@ rules:
     notes: "Выключено до подтверждения полноты учебного плана и обязательного перечня компетенций: неполный образец не должен давать ложные ошибки."
 
   - id: "R-10"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Связь результатов обучения с индикаторами"
     type: "outcome_indicator_links"
     status: "draft"
     notes: "В ЦКМВ используются явные indicator_outcome_links; в РПД/РПП допускается опосредованная связь через компетенцию."
 
   - id: "R-15"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Принадлежность индикатора компетенции по коду"
     type: "indicator_hierarchy"
     status: "draft"
@@ -254,6 +297,7 @@ rules:
 
 
   - id: "R-13"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Обязательные разделы ЦКМВ"
     type: "required_sections"
     status: "draft"
@@ -262,6 +306,7 @@ rules:
     notes: "До утверждения перечня разделов и появления document_sections в ЦКМВ проверка пропускается."
 
   - id: "R-14"
+    phases: ["document_reconciliation", "graph_validation"]
     name: "Язык обучения дисциплины и программы"
     type: "education_language"
     status: "draft"

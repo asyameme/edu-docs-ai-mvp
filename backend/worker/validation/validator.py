@@ -2,24 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-import unicodedata
-
+from typing import Any, Literal, Mapping, Sequence
 
 if __package__:
     from .semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from .semantic_llm import SemanticEvaluator
     from .semantic_rpd import evaluate_rpd_alignment
-    from .semantic_competency import evaluate_competency_pair, CompetencyEvaluator
+    from .semantic_competency import evaluate_competency_group, CompetencyEvaluator
 else:  # Поддерживаем и прямой запуск validator.py.
     from semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from semantic_llm import SemanticEvaluator
     from semantic_rpd import evaluate_rpd_alignment
-    from semantic_competency import evaluate_competency_pair, CompetencyEvaluator
+    from semantic_competency import evaluate_competency_group, CompetencyEvaluator
 
 try:
     import yaml
@@ -29,6 +30,10 @@ except ImportError:  # PyYAML устанавливается из backend/requir
 
 DEFAULT_RULES = Path(__file__).with_name("rules.yaml")
 DOC_TYPES = {"rpd", "rpp", "curriculum", "matrix", "characteristic", "ckmv"}
+ValidationPhase = Literal["document_reconciliation", "graph_validation"]
+VALIDATION_PHASES = {"document_reconciliation", "graph_validation"}
+RULE_STATUSES = {"draft", "ready", "ready_with_semantic_fallback"}
+RUNNABLE_RULE_STATUSES = {"ready", "ready_with_semantic_fallback"}
 
 
 class ValidationError(Exception):
@@ -73,6 +78,7 @@ class RuleResult:
 
 @dataclass
 class ValidationReport:
+    phase: ValidationPhase
     results: list[RuleResult]
 
     def to_dict(self) -> dict[str, Any]:
@@ -80,6 +86,7 @@ class ValidationReport:
         for result in self.results:
             counts[result.status] += 1
         return {
+            "phase": self.phase,
             "summary": {"rules_total": len(self.results), "rules_by_status": dict(counts)},
             "results": [
                 {**asdict(result), "findings": [asdict(item) for item in result.findings]}
@@ -95,10 +102,66 @@ def load_rules(path: str | Path = DEFAULT_RULES) -> dict[str, Any]:
         config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise ValidationError(f"Не удалось прочитать rules.yaml: {exc}") from exc
-    if not isinstance(config, dict) or config.get("schema_version") != 1:
-        raise ValidationError("Ожидается rules.yaml со schema_version: 1")
+    return _validate_rules_config(config)
+
+
+def _validate_rules_config(config: Any) -> dict[str, Any]:
+    if not isinstance(config, dict) or config.get("schema_version") != 2:
+        raise ValidationError("Ожидается rules.yaml со schema_version: 2")
+    phases = config.get("phases")
+    if not isinstance(phases, dict) or set(phases) != VALIDATION_PHASES:
+        raise ValidationError(
+            "rules.yaml должен объявлять фазы document_reconciliation и graph_validation"
+        )
+    expected_inputs = {
+        "document_reconciliation": "parsed_documents",
+        "graph_validation": "graph_projection",
+    }
+    for phase, expected_input in expected_inputs.items():
+        if not isinstance(phases[phase], dict) or phases[phase].get("input") != expected_input:
+            raise ValidationError(
+                f"Фаза {phase} должна использовать вход {expected_input}"
+            )
     if not isinstance(config.get("rules"), list):
         raise ValidationError("Поле rules в rules.yaml должно быть списком")
+    for rule in config["rules"]:
+        if not isinstance(rule, dict):
+            raise ValidationError("Каждое правило в rules.yaml должно быть объектом")
+        rule_status = rule.get("status")
+        if not isinstance(rule_status, str) or rule_status not in RULE_STATUSES:
+            raise ValidationError(
+                f"Правило {rule.get('id', '<без id>')} должно содержать один из статусов: "
+                f"{', '.join(sorted(RULE_STATUSES))}"
+            )
+        if rule.get("type") == "credit_hours" and rule_status in RUNNABLE_RULE_STATUSES:
+            inputs = rule.get("inputs")
+            hours_per_credit_unit = (
+                inputs.get("hours_per_credit_unit") if isinstance(inputs, dict) else None
+            )
+            if (
+                isinstance(hours_per_credit_unit, bool)
+                or not isinstance(hours_per_credit_unit, (int, float))
+                or (
+                    isinstance(hours_per_credit_unit, float)
+                    and not math.isfinite(hours_per_credit_unit)
+                )
+                or hours_per_credit_unit <= 0
+            ):
+                raise ValidationError(
+                    f"Для активного правила {rule.get('id', '<без id>')} "
+                    "задайте положительное конечное значение inputs.hours_per_credit_unit"
+                )
+        rule_phases = rule.get("phases")
+        if (
+            not isinstance(rule_phases, list)
+            or not rule_phases
+            or any(not isinstance(value, str) for value in rule_phases)
+            or len(rule_phases) != len(set(rule_phases))
+            or not set(rule_phases).issubset(VALIDATION_PHASES)
+        ):
+            raise ValidationError(
+                f"Правило {rule.get('id', '<без id>')} должно содержать уникальные допустимые phases"
+            )
     return config
 
 
@@ -388,6 +451,7 @@ def _hours_against_curriculum(rule: Mapping[str, Any], docs: Sequence[Document])
 
 def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     """R-04: проверить трудоёмкость там, где одни и те же часы и ЗЕТ сопоставимы."""
+    hours_per_credit_unit = rule["inputs"]["hours_per_credit_unit"]
     checks, findings = 0, []
     for doc in docs:
         if doc.role == "curriculum":
@@ -401,8 +465,8 @@ def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResu
             if not isinstance(hours, int) or not isinstance(units, int) or isinstance(hours,bool) or isinstance(units,bool):
                 continue
             checks += 1
-            if hours != units * 36:
-                findings.append(Finding("credit_hours_mismatch", "failed", f"{doc.label}: {hours} ч не соответствуют {units} ЗЕТ (36 ч/ЗЕТ).", {"credit_units":units,"hours_total":hours,"source_refs": [_source_ref(doc,row)]}))
+            if hours != units * hours_per_credit_unit:
+                findings.append(Finding("credit_hours_mismatch", "failed", f"{doc.label}: {hours} ч не соответствуют {units} ЗЕТ ({hours_per_credit_unit:g} ч/ЗЕТ).", {"credit_units":units,"hours_total":hours,"hours_per_credit_unit":hours_per_credit_unit,"source_refs": [_source_ref(doc,row)]}))
     return _result(rule, checks, findings)
 
 
@@ -579,6 +643,62 @@ def _program_groups(docs: Sequence[Document]) -> dict[str, list[Document]]:
     return groups
 
 
+def _competency_match_candidates(group: Sequence[Document], *, threshold: float = 0.94) -> tuple[int, list[Finding]]:
+    """Suggest different-code candidates with ALL source evidence, never merge.
+
+    Similarity is a configurable preliminary heuristic, not proof of equivalence.
+    Suppress a pair if the two codes coexist in a single source document.
+    """
+    if not 0.0 <= threshold <= 1.0:
+        raise ValidationError('R-01 match_threshold must be between 0 and 1')
+    rows: dict[str, list[tuple[Document, Mapping[str, Any], str]]] = defaultdict(list)
+    for doc in group:
+        for row in _records(doc, '$.competencies[*]'):
+            code, formulation = _code(row.get('code')), row.get('formulation')
+            if code and isinstance(formulation, str) and formulation.strip():
+                rows[code].append((doc, row, _canonical_formulation(formulation)))
+    findings, checks = [], 0
+    codes = sorted(rows)
+    for i, first in enumerate(codes):
+        for second in codes[i + 1:]:
+            if {id(doc) for doc, _, _ in rows[first]} & {id(doc) for doc, _, _ in rows[second]}:
+                continue
+            evidence_pairs = []
+            matched_variants = []
+            best = 0.0
+            for left_doc, left_row, left_text in rows[first]:
+                for right_doc, right_row, right_text in rows[second]:
+                    if left_doc is right_doc or not left_text or not right_text:
+                        continue
+                    checks += 1
+                    similarity = SequenceMatcher(None, left_text, right_text).ratio()
+                    if similarity < threshold:
+                        continue
+                    best = max(best, similarity)
+                    left_variant = {'code': first, 'formulation': left_row['formulation'],
+                                    'document': left_doc.label, 'source_ref': _source_ref(left_doc, left_row)}
+                    right_variant = {'code': second, 'formulation': right_row['formulation'],
+                                     'document': right_doc.label, 'source_ref': _source_ref(right_doc, right_row)}
+                    evidence_pairs.append({'left': left_variant, 'right': right_variant,
+                                           'similarity': round(similarity, 4)})
+                    for variant in (left_variant, right_variant):
+                        if variant not in matched_variants:
+                            matched_variants.append(variant)
+            if not evidence_pairs:
+                continue
+            matched_variants.sort(key=lambda v: (v['code'], v['document'], str(v['source_ref'])))
+            findings.append(Finding('competency_code_match_candidate', 'needs_review',
+                f'Возможное соответствие разных кодов {first} и {second}; требуется подтверждение пользователя.',
+                {'codes': [first, second], 'program_id': group[0].program_id,
+                 'similarity': round(best, 4), 'match_threshold': threshold,
+                 'match_method': 'normalized_formulation_similarity',
+                 'heuristic_only': True, 'evidence_pairs': evidence_pairs,
+                 'variants': matched_variants,
+                 'source_refs': [v['source_ref'] for v in matched_variants],
+                 'requires_user_confirmation': True, 'auto_merge': False}))
+    return checks, findings
+
+
 def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     """R-01 without matrix: validate codes, links, and matched curriculum coverage.
 
@@ -586,6 +706,9 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
     """
     checks, findings = 0, []
     for pid, group in _program_groups(docs).items():
+        candidate_checks, candidates = _competency_match_candidates(group, threshold=float(rule.get('match_threshold', 0.94)))
+        checks += candidate_checks
+        findings.extend(candidates)
         declared: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         authoritative: set[str] = set()
         for doc in group:
@@ -655,57 +778,102 @@ def _canonical_formulation(value: str) -> str:
 
 def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                              evaluator: CompetencyEvaluator | None = None) -> RuleResult:
-    """R-07: canonical reference comparison with optional real semantic judgment.
+    """R-07: compare all formulations of a code as peers, one finding per code.
 
-    Different codes are never treated as equivalent. Without a semantic model,
-    a nontrivial text difference is marked for manual review, never passed.
+    Cross-document pairs are reported individually, while all distinct text
+    variants for one code share at most one semantic model request. A
+    CKMV/characteristic formulation is never authoritative.
     """
-    checks, findings = 0, []
-    for pid, group in _program_groups(docs).items():
+    checks, findings, llm_calls = 0, [], 0
+    llm_config = rule.get('llm', {})
+    if not isinstance(llm_config, Mapping):
+        llm_config = {}
+    max_calls = llm_config.get('max_calls_per_run', 50)
+    max_variants = llm_config.get('max_group_variants', 8)
+    if not isinstance(max_calls, int) or isinstance(max_calls, bool) or max_calls < 0:
+        max_calls = 50
+    if not isinstance(max_variants, int) or isinstance(max_variants, bool) or max_variants < 2:
+        max_variants = 8
+    for _pid, group in _program_groups(docs).items():
         by_code: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         for doc in group:
-            if doc.role not in {'rpd', 'rpp', 'ckmv', 'characteristic', 'curriculum'}:
+            if doc.role not in {'rpd', 'rpp', 'ckmv', 'characteristic', 'curriculum', 'matrix'}:
                 continue
             for row in _records(doc, '$.competencies[*]'):
                 code = _code(row.get('code'))
                 if code:
                     by_code[code].append((doc, row))
         for code, records in sorted(by_code.items()):
-            # Prefer CKMV as the comparative reference; characteristic is fallback.
-            baseline = next(((d, r) for role in ('ckmv', 'characteristic')
-                             for d, r in records if d.role == role and _code(r.get('formulation'))), None)
-            if baseline is None:
-                # Without an approved catalogue, cross-document text comparisons
-                # must not be presented as normative validity.
+            variants = [{'document': d.label, 'code': code, 'formulation': row.get('formulation'),
+                         'source_ref': _source_ref(d, row)} for d, row in records]
+            comparisons = []
+            semantic_pairs: dict[tuple[str, str], None] = {}
+            semantic_texts: dict[str, str] = {}
+            differs = False
+            missing = False
+            for i, (left_doc, left_row) in enumerate(records):
+                for j in range(i + 1, len(records)):
+                    right_doc, right_row = records[j]
+                    if left_doc is right_doc:
+                        continue
+                    checks += 1
+                    left, right = left_row.get('formulation'), right_row.get('formulation')
+                    comparison = {'variant_indices': [i, j]}
+                    if not isinstance(left, str) or not left.strip() or not isinstance(right, str) or not right.strip():
+                        missing = True
+                        comparison.update(status='missing', reason='Отсутствует формулировка')
+                    elif _canonical_formulation(left) == _canonical_formulation(right):
+                        comparison.update(status='technically_equivalent', reason='Различия только в оформлении')
+                    else:
+                        differs = True
+                        left_key, right_key = _canonical_formulation(left), _canonical_formulation(right)
+                        pair_key = tuple(sorted((left_key, right_key)))
+                        semantic_texts.setdefault(left_key, left)
+                        semantic_texts.setdefault(right_key, right)
+                        semantic_pairs.setdefault(pair_key, None)
+                        comparison['_semantic_pair'] = pair_key
+                    comparisons.append(comparison)
+            if semantic_pairs:
+                keys = list(dict.fromkeys(key for pair in semantic_pairs for key in pair))
+                if len(keys) > max_variants:
+                    reason = (f'Число вариантов ({len(keys)}) превышает лимит группового сравнения '
+                              f'({max_variants}); требуется ручная проверка.')
+                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
+                                       for pair in semantic_pairs}
+                elif llm_calls >= max_calls:
+                    reason = f'Достигнут лимит семантических запросов на запуск ({max_calls}); требуется ручная проверка.'
+                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
+                                       for pair in semantic_pairs}
+                else:
+                    llm_calls += 1
+                    evaluated = evaluate_competency_group(
+                        code, [semantic_texts[key] for key in keys],
+                        evaluator=evaluator, config=llm_config)
+                    index_by_key = {key: index for index, key in enumerate(keys)}
+                    results_by_pair = {}
+                    for pair in semantic_pairs:
+                        result = evaluated.get(tuple(sorted((index_by_key[pair[0]], index_by_key[pair[1]]))))
+                        results_by_pair[pair] = result or {
+                            'status': 'uncertain', 'reason': 'Модель не вернула результат для этой пары.'}
+                for comparison in comparisons:
+                    pair_key = comparison.pop('_semantic_pair', None)
+                    if pair_key is not None:
+                        comparison.update(results_by_pair[pair_key])
+            if not missing and not differs:
                 continue
-            bdoc, brow = baseline
-            base_text = brow['formulation']
-            for doc, row in records:
-                if doc is bdoc and row is brow:
-                    continue
-                checks += 1
-                text = row.get('formulation')
-                refs = [_source_ref(bdoc, brow), _source_ref(doc, row)]
-                if not isinstance(text, str) or not text.strip():
-                    findings.append(Finding('competency_formulation_missing', 'needs_review',
-                        f'Нет формулировки компетенции {code} в {doc.label}.',
-                        {'code': code, 'source_refs': refs}))
-                    continue
-                if _canonical_formulation(base_text) == _canonical_formulation(text):
-                    continue
-                outcome = evaluate_competency_pair(code, base_text, text, evaluator=evaluator,
-                                                  config=rule.get('llm', {}))
-                if outcome['status'] == 'equivalent':
-                    continue
-                status = 'failed' if outcome['status'] == 'changed' else 'needs_review'
-                findings.append(Finding('competency_formulation_mismatch' if status == 'failed' else 'competency_formulation_review',
-                    status, f'Формулировка компетенции {code} отличается от источника {bdoc.label}.',
-                    {'code': code, 'reference_text': base_text, 'document_text': text,
-                     'semantic_status': outcome['status'], 'reason': outcome['reason'],
-                     'source_refs': refs}))
+            # One user decision covers every document variant for the given code.
+            findings.append(Finding(
+                'competency_formulation_missing' if missing else 'competency_formulation_review',
+                'needs_review',
+                f'Варианты формулировки компетенции {code} в разных документах требуют выбора пользователя.',
+                {'code': code, 'program_id': group[0].program_id,
+                 'variants': variants, 'comparisons': comparisons,
+                 'source_refs': [v['source_ref'] for v in variants],
+                 'requires_user_confirmation': True,
+                 'auto_select': False}))
     return _result(rule, checks, findings)
 
-  
+
 def _semantic_indicator_consistency(
     rule: Mapping[str, Any],
     docs: Sequence[Document],
@@ -766,13 +934,25 @@ def run_validation(
     documents: Sequence[Mapping[str, Any] | Document],
     rules_config: Mapping[str, Any] | None = None,
     *,
+    phase: ValidationPhase = "document_reconciliation",
     semantic_evaluator: SemanticEvaluator | None = None,
     competency_evaluator: CompetencyEvaluator | None = None,
 ) -> ValidationReport:
-    config = rules_config if rules_config is not None else load_rules()
+    """Проверить документы либо проекцию актуальной версии графа выбранной фазой.
+
+    Для graph_validation вызывающая сторона должна передать JSON-проекции той
+    версии графа, которую проверяет, а не исходный, уже устаревший пакет.
+    """
+    if phase not in VALIDATION_PHASES:
+        raise ValidationError(f"Неизвестная фаза валидации: {phase}")
+    config = _validate_rules_config(rules_config) if rules_config is not None else load_rules()
     docs = _documents(documents)
     results = []
     for rule in config.get("rules", []):
+        if rule["status"] not in RUNNABLE_RULE_STATUSES:
+            continue
+        if phase not in rule.get("phases", []):
+            continue
         handler = HANDLERS.get(rule.get("type"))
         if handler is None:
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
@@ -782,17 +962,23 @@ def run_validation(
             results.append(handler(rule, docs, semantic_evaluator))
         else:
             results.append(handler(rule, docs))
-    return ValidationReport(results)
+    return ValidationReport(phase, results)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Проверить JSON по rules.yaml")
     parser.add_argument("json_files", nargs="+", type=Path)
     parser.add_argument("--rules", type=Path, default=DEFAULT_RULES)
+    parser.add_argument(
+        "--phase",
+        choices=sorted(VALIDATION_PHASES),
+        default="document_reconciliation",
+        help="graph_validation принимает проекции проверяемой версии графа",
+    )
     args = parser.parse_args(argv)
     try:
         docs = [json.loads(path.read_text(encoding="utf-8")) for path in args.json_files]
-        report = run_validation(docs, load_rules(args.rules))
+        report = run_validation(docs, load_rules(args.rules), phase=args.phase)
     except (OSError, json.JSONDecodeError, ValidationError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
