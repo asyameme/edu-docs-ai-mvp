@@ -162,7 +162,7 @@ def extract_indicators(text, competency_code, source_ref):
             ))
 
         return indicators, issues
-    
+
     if text[:matches[0].start()].strip():
         issues.append(ParseIssue(
             category="unparsed_row",

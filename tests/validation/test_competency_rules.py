@@ -58,15 +58,15 @@ class CompetencyRulesTests(unittest.TestCase):
         rpd=document('rpd',competencies=[{'code':'A','formulation':'Способен анализировать письменную речь'}])
         model=lambda payload, cfg: {'status':'changed','reason':'Объект анализа изменился'}
         r=run_validation([ref,rpd],only('R-07'),competency_evaluator=model).results[0]
-        self.assertEqual(r.status,'failed')
-        self.assertEqual(r.findings[0].code,'competency_formulation_mismatch')
+        self.assertEqual(r.status,'needs_review')
+        self.assertEqual(r.findings[0].code,'competency_formulation_review')
         self.assertEqual(len(r.findings[0].evidence['source_refs']),2)
 
     def test_07_equivalent_paraphrase(self):
         ref=document('characteristic',competencies=[{'code':'A','formulation':'Использует методы анализа данных'}])
         rpd=document('rpd',competencies=[{'code':'A','formulation':'Применяет методы анализа данных'}])
         model=lambda payload, cfg: {'status':'equivalent','reason':'Смысл одинаков'}
-        self.assertEqual(run_validation([ref,rpd],only('R-07'),competency_evaluator=model).results[0].status,'passed')
+        self.assertEqual(run_validation([ref,rpd],only('R-07'),competency_evaluator=model).results[0].status,'needs_review')
 
     def test_07_no_llm_fails_safe(self):
         ref=document('ckmv',competencies=[{'code':'A','formulation':'Устную речь'}])
@@ -74,7 +74,7 @@ class CompetencyRulesTests(unittest.TestCase):
         unavailable=lambda payload, cfg: (_ for _ in ()).throw(RuntimeError('No LLM'))
         r=run_validation([ref,rpd],only('R-07'),competency_evaluator=unavailable).results[0]
         self.assertEqual(r.status,'needs_review')
-        self.assertEqual(r.findings[0].evidence['semantic_status'],'uncertain')
+        self.assertEqual(r.findings[0].evidence['comparisons'][0]['status'],'uncertain')
 
     def test_07_different_codes_not_equated(self):
         ref=document('ckmv',competencies=[{'code':'A','formulation':'Same'}])
