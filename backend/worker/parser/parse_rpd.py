@@ -60,6 +60,7 @@ from .results import (
     split_competencies,
     split_competency,
 )
+from .sections import extract_document_sections
 
 __all__ = [
     'normalize',
@@ -113,6 +114,10 @@ def finalize_rpd(output, document, file_name):
     )
     output.score_scale.extend(scale)
     output.parse_issues.extend(scale_issues)
+
+    sections, section_issues = extract_document_sections(document, file_name)
+    output.document_sections.extend(sections)
+    output.parse_issues.extend(section_issues)
 
     return finalize_output(output, document)
 
@@ -195,7 +200,7 @@ def parse_rpd(
         meta=RPDMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_docx_v4",
+            parser_config="rpd_docx_v5",
             program_id=program_id,
         ),
         disciplines=[discipline],
@@ -210,7 +215,8 @@ def parse_rpd(
                 "Частичный разбор: извлекаются дисциплина, нагрузка, "
                 "компетенции, индикаторы, результаты обучения, "
                 "пререквизиты, табличное содержание, оценочные средства "
-                "и табличные шкалы оценивания. "
+                "и табличные шкалы оценивания. Доступный исходный текст содержания "
+                "и оценочных материалов сохраняется в document_sections."
             ),
             source_ref=SourceRef(file=file_path.name),
         )

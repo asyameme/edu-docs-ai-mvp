@@ -151,7 +151,7 @@ class TestRppParser(unittest.TestCase):
         output = self.original
         self.assertEqual(output.meta.doc_type, "RPP")
         self.assertEqual(output.meta.schema_version, 2)
-        self.assertEqual(output.meta.parser_config, "rpp_docx_v4")
+        self.assertEqual(output.meta.parser_config, "rpp_docx_v5")
         practice = output.disciplines[0]
         self.assertEqual((practice.credit_units, practice.hours_total), (18, 648))
         self.assertEqual(practice.semesters, [2, 3, 4, 5])
