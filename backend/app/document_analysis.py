@@ -5,7 +5,6 @@ from uuid import UUID, uuid5
 
 from app.document_reconciliation import validate_document_mutation_variants
 from app.errors import DomainError
-from app.review_contract import AnalysisV2
 from app.review_logic import digest
 from app.validation_bridge import (
     run_document_rules,
@@ -103,7 +102,7 @@ def _variants(finding, sources, documents, issue_id):
 
 
 def analyze_documents(documents, job_id, *, config=None):
-    """Выдаёт AnalysisV2 по исходным документам, не создавая сущностей и связей."""
+    """Собирает сырой результат валидатора до проекции в AnalysisV2."""
     config = config if config is not None else load_rules()
     inputs = validation_documents(documents)
     ruleset = validation_ruleset(config, inputs)
@@ -115,9 +114,13 @@ def analyze_documents(documents, job_id, *, config=None):
         coverage.append({
             "rule_code": result["rule_id"], "rule_revision": revision,
             "status": result["status"], "checks": result["checks"],
-            "reason": ("Нет выполненных сравнений: данные отсутствуют или правило неприменимо"
-                       if result["checks"] == 0 else
-                       "Проверены исходные документы; нормализованный граф ещё не построен"),
+            "reason": (
+                "Валидатор не смог сделать однозначный вывод; требуется ручная проверка"
+                if result["status"] == "needs_review"
+                else "Нет выполненных сравнений: данные отсутствуют или правило неприменимо"
+                if result["checks"] == 0
+                else "Проверены исходные документы; нормализованный граф ещё не построен"
+            ),
         })
         for index, finding in enumerate(result["findings"]):
             issue_id = uuid5(UUID(str(job_id)),
@@ -141,6 +144,5 @@ def analyze_documents(documents, job_id, *, config=None):
                 "source_ref_ids": [], "evidence": evidence,
                 "requires_decision": bool(variants), "variants": variants,
             })
-    return AnalysisV2.model_validate({"schema_version": 2, "ruleset": ruleset,
-                                     "coverage": coverage, "issues": issues,
-                                     "artifacts": []}).model_dump(mode="json")
+    return {"schema_version": 2, "ruleset": ruleset, "coverage": coverage,
+            "issues": issues, "artifacts": []}

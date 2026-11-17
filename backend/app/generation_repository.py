@@ -15,6 +15,7 @@ from app.graph_storage import load_graph
 from app.repository import Repository
 from app.review_contract import CheckResult
 from app.review_logic import content_hash, digest
+from app.review_projection import project_legacy_review_result
 
 
 def _source_files(cur, graph_id):
@@ -76,7 +77,9 @@ class GenerationRepository:
             or content_hash(checked_version["snapshot"]) != confirmation.content_hash
         ):
             raise DomainError(409, "Проверенный граф отличается от подтверждённого")
-        result = CheckResult.model_validate(checked["report"]["result"])
+        result = CheckResult.model_validate(
+            project_legacy_review_result(checked["report"]["result"])
+        )
         if digest(result.ruleset.model_dump(mode="json")) != digest(
             checked["parameters"]["ruleset"]
         ):

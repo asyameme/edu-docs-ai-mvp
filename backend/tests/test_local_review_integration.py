@@ -80,12 +80,19 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
                        {"version_id": version["id"]}, 202)
         checked = wait(http, root + f'/reviews/{job["id"]}/checks/' + checked["id"])
         assert checked["status"] == "completed", checked
+        assert all("checks" not in entry for entry in checked["report"]["coverage"])
+        assert all("evidence" not in issue and "checks" not in issue
+                   for issue in checked["report"]["issues"])
         details = http.get(root + f'/versions/{version["id"]}/review').json()
         report = details["check_report"]
         coverage = {entry["rule_code"]: entry for entry in report["coverage"]}
-        assert len(coverage) == 17
+        assert set(coverage) == {"R-01", "R-07"}
         assert coverage["R-07"]["status"] == "passed"
+        assert all("checks" not in entry for entry in report["coverage"])
+        assert all("evidence" not in issue and "checks" not in issue for issue in report["issues"])
         assert not any(i["severity"] == "blocking" for i in report["issues"])
+        assert all("evidence" not in issue and "checks" not in issue
+                   for issue in details["issues"])
         confirmed = post(http, root + f'/reviews/{job["id"]}/confirm', {
             "expected_version_id": version["id"], "check_job_id": checked["id"],
             "signature": "Локальная приёмка",

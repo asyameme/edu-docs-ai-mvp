@@ -11,7 +11,6 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from app.document_reconciliation import apply_document_mutations
-from app.review_contract import CheckResult
 from app.review_logic import digest
 from worker.validation.validator import Document, load_rules, run_validation
 
@@ -29,6 +28,7 @@ def validation_implementation_revision():
         Path(__file__).resolve(),
         root / "app" / "document_analysis.py",
         root / "app" / "document_reconciliation.py",
+        root / "app" / "review_projection.py",
         worker / "validator.py",
         worker / "semantic_competency.py",
         worker / "semantic_llm.py",
@@ -278,7 +278,7 @@ def run_document_rules(inputs, config, *, phase):
         **config,
         "rules": [
             rule for rule in config["rules"]
-            if rule.get("status") in {"ready", "ready_with_semantic_fallback", "draft"}
+            if rule.get("status") in {"ready", "ready_with_semantic_fallback"}
         ],
     }
     budget = _ValidationBudget()
@@ -342,6 +342,8 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
                 "reason": (
                     "Нет выполненных сравнений: нужные данные отсутствуют или правило неприменимо"
                     if status == "skipped"
+                    else "Валидатор не смог сделать однозначный вывод; требуется ручная проверка"
+                    if status == "needs_review"
                     else "Учтены выполненные сравнения; "
                     "полнота проверки всех записей не гарантируется"
                 ),
@@ -407,10 +409,4 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
                     "checks": result["checks"],
                 }
             )
-    return CheckResult.model_validate(
-        {
-            "ruleset": ruleset,
-            "coverage": coverage,
-            "issues": issues,
-        }
-    ).model_dump(mode="json")
+    return {"ruleset": ruleset, "coverage": coverage, "issues": issues}

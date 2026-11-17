@@ -24,6 +24,7 @@ from app.review_contract import (
     PrepareRequestV2,
 )
 from app.review_logic import apply_changes, digest, map_analysis_ids, map_analysis_v2_ids
+from app.review_projection import validator_result_for_contract
 from app.review_repository import ReviewRepository
 from app.validation_bridge import (
     project_snapshot_documents,
@@ -94,8 +95,9 @@ class ReviewActivities:
         if "outcome" in job["report"]:
             return job["report"]["outcome"]
         purpose = job["parameters"]["purpose"]
+        is_local = job["parameters"].get("executor", "http") == "local"
         try:
-            if job["parameters"].get("executor", "http") == "local":
+            if is_local:
                 input_data = job["parameters"]["input"]
                 rules = job["parameters"].get("local_rules") or load_rules()
                 expected_implementation = job["parameters"].get("implementation_revision")
@@ -196,7 +198,8 @@ class ReviewActivities:
             if purpose == "prepare":
                 documents = job["parameters"]["input"]["documents"]
                 if job["parameters"].get("schema_version", 1) == 2:
-                    parsed = AnalysisV2.model_validate(raw)
+                    response = validator_result_for_contract(raw) if is_local else raw
+                    parsed = AnalysisV2.model_validate(response)
                     required_types = {
                         value.casefold() for value in parsed.ruleset.required_document_types
                     }
@@ -218,7 +221,8 @@ class ReviewActivities:
                     result["schema_version"] = 2
                     artifacts = self.save_artifacts(result)
                 else:
-                    parsed = AnalysisV1.model_validate(raw)
+                    response = validator_result_for_contract(raw) if is_local else raw
+                    parsed = AnalysisV1.model_validate(response)
                     expected = {UUID(item["document_id"]) for item in documents}
                     if set(parsed.candidate.document_ids) != expected:
                         raise ValueError("Analysis changed document membership")
@@ -236,7 +240,8 @@ class ReviewActivities:
                             apply_changes(result["candidate"], variant["changes"])
                     artifacts = self.save_artifacts(result)
             else:
-                result = CheckResult.model_validate(raw).model_dump(mode="json")
+                response = validator_result_for_contract(raw) if is_local else raw
+                result = CheckResult.model_validate(response).model_dump(mode="json")
                 snapshot = SnapshotV2.model_validate(job["parameters"]["input"]["snapshot"])
                 refs = {str(item.id) for item in snapshot.source_refs}
                 for issue in result["issues"]:

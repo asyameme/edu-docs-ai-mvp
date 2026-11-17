@@ -2191,26 +2191,6 @@
           },
           "title": "Variants",
           "type": "array"
-        },
-        "evidence": {
-          "additionalProperties": {
-            "$ref": "#/$defs/JsonValue"
-          },
-          "title": "Evidence",
-          "type": "object"
-        },
-        "checks": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Checks"
         }
       },
       "required": [
@@ -2314,25 +2294,11 @@
           "enum": [
             "passed",
             "failed",
-            "needs_review",
             "skipped",
             "not_applicable"
           ],
           "title": "Status",
           "type": "string"
-        },
-        "checks": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Checks"
         },
         "reason": {
           "anyOf": [

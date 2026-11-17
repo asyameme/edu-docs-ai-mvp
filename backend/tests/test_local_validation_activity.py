@@ -48,13 +48,15 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
     class Repository:
         def __init__(self):
             self.results = []
+            self.raw_results = []
 
         def job_by_id(self, identity):
             assert identity == job_id
             return job
 
-        def publish(self, identity, result, *args):
+        def publish(self, identity, result, artifacts, raw, raw_hash):
             self.results.append(deepcopy(result))
+            self.raw_results.append(deepcopy(raw))
             job["report"]["outcome"] = "completed"
             return "completed"
 
@@ -62,7 +64,11 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
     activity.repo = Repository()
     assert activity.execute({"job_id": str(job_id)}) == "completed"
     assert activity.repo.results[0]["coverage"][0]["status"] == "passed"
-    assert activity.repo.results[0]["coverage"][0]["checks"] == 1
+    assert "checks" not in activity.repo.results[0]["coverage"][0]
+    assert "checks" in activity.repo.raw_results[0]["coverage"][0]
+    assert activity.repo.raw_results[0]["coverage"][0]["checks"] == 1
+    assert all("evidence" not in issue and "checks" not in issue
+               for issue in activity.repo.results[0]["issues"])
     assert original["parsed"]["disciplines"][0]["hours_total"] == 108
     assert activity.execute({"job_id": str(job_id)}) == "completed"
     assert len(activity.repo.results) == 1

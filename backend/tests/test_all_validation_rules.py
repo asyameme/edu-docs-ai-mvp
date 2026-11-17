@@ -15,8 +15,8 @@ from worker.validation.validator import load_rules, run_validation
 ORIGINALS = Path(__file__).resolve().parents[2] / "tests" / "originals"
 
 
-def test_backend_runs_all_17_rules_on_real_documents(monkeypatch):
-    # Живая модель проверяется отдельно; здесь проверяем честный отказ от её оценки.
+def test_backend_runs_only_non_draft_rules_on_real_documents(monkeypatch):
+    # Черновики проверяются отдельно вызовом движка, но не входят в Backend-профиль.
     monkeypatch.setattr("app.validation_bridge.VALIDATION_MAX_LLM_CALLS", 0)
     program_id = uuid4()
     members = [
@@ -38,10 +38,14 @@ def test_backend_runs_all_17_rules_on_real_documents(monkeypatch):
     projected = project_snapshot_documents(inputs, snapshot)
     result = run_local_check(projected, snapshot, uuid4(), config=config)
     coverage = {entry["rule_code"]: entry for entry in result["coverage"]}
-    assert set(coverage) == {rule["id"] for rule in config["rules"]}
-    assert len(coverage) == 17
+    active_rules = {
+        rule["id"] for rule in config["rules"]
+        if rule["status"] in {"ready", "ready_with_semantic_fallback"}
+    }
+    assert set(coverage) == active_rules == {"R-01", "R-07"}
+    assert len(coverage) == 2
+    assert all(issue["rule_code"] in active_rules for issue in result["issues"])
     assert result["ruleset"]["required_rules"] == ["R-01"]
-    assert coverage["R-09"]["status"] == coverage["R-13"]["status"] == "skipped"
     assert all(entry["checks"] > 0 for entry in coverage.values() if entry["status"] == "passed")
     assert inputs == original
     assert config == original_config

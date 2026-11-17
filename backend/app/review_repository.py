@@ -21,6 +21,10 @@ from app.review_logic import (
     content_hash,
     digest,
 )
+from app.review_projection import (
+    project_legacy_review_issue,
+    project_legacy_review_result,
+)
 from app.review_storage import insert_issues, insert_version, previous_version
 
 
@@ -677,7 +681,9 @@ class ReviewRepository:
                 or checked["parameters"].get("content_hash") != content_hash(snapshot)
             ):
                 raise DomainError(409, "Нужна завершённая проверка точной текущей версии")
-            result = CheckResult.model_validate(checked["report"]["result"])
+            result = CheckResult.model_validate(
+                project_legacy_review_result(checked["report"]["result"])
+            )
             if digest(result.ruleset.model_dump(mode="json")) != digest(
                 checked["parameters"]["ruleset"]
             ):
@@ -756,7 +762,11 @@ class ReviewRepository:
                 (program_id, job_ids),
             ).fetchall()
         issues = [
-            {**item["details"], "source_version_id": item["version_id"], "job_id": item["job_id"]}
+            {
+                **project_legacy_review_issue(item["details"]),
+                "source_version_id": item["version_id"],
+                "job_id": item["job_id"],
+            }
             for item in stored
         ]
         build_errors = review["report"].get("result", {}).get("graph_build_issues", [])
@@ -779,7 +789,6 @@ class ReviewRepository:
                         "source_document_ids": [item["document_id"]],
                         "requires_decision": False,
                         "variants": [],
-                        "evidence": {"category": item["category"]},
                         "source_version_id": version_id,
                         "job_id": snapshot.review.review_id,
                     }
@@ -806,10 +815,16 @@ class ReviewRepository:
             "confirmed": snapshot.review.confirmation is not None,
             "confirmation": snapshot.review.confirmation,
             "check_job_id": latest["id"] if latest else None,
-            "check_report": latest["report"].get("result") if latest else None,
+            "check_report": (
+                project_legacy_review_result(latest["report"]["result"])
+                if latest
+                else None
+            ),
             "prepare_report": {
                 key: value
-                for key, value in review["report"]["result"].items()
+                for key, value in project_legacy_review_result(
+                    review["report"]["result"]
+                ).items()
                 if key not in {"candidate", "artifacts"}
             },
         }

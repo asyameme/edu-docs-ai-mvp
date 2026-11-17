@@ -12,6 +12,7 @@ from app.document_reconciliation import apply_document_mutations
 from app.domain import SnapshotV2
 from app.review_activities import ReviewActivities
 from app.review_contract import AnalysisV2
+from app.review_projection import validator_result_for_contract
 from app.validation_bridge import run_local_check, validation_implementation_revision
 from worker.validation.validator import load_rules
 
@@ -39,7 +40,7 @@ def test_real_rule_yields_document_choices_without_building_graph(monkeypatch):
     job_id = uuid4()
     config = hours_config()
     result = analyze_documents(documents, job_id, config=config)
-    AnalysisV2.model_validate(result)
+    AnalysisV2.model_validate(validator_result_for_contract(result))
     assert result == analyze_documents(documents, job_id, config=config)
     assert "candidate" not in result
     assert len(result["issues"]) == 1
@@ -84,12 +85,13 @@ def test_duplicate_filenames_are_resolved_by_document_identity():
     assert len(result["issues"][0]["variants"]) == 2
 
 
-def test_full_profile_produces_17_coverages_without_changing_rules():
+def test_pregraph_analysis_omits_draft_rules_without_changing_profile():
     documents = package()
     config = load_rules()
     original = deepcopy(config)
     result = analyze_documents(documents, uuid4(), config=config)
-    assert len(result["coverage"]) == 17
+    assert {item["rule_code"] for item in result["coverage"]} == {"R-01", "R-07"}
+    assert len(result["coverage"]) == 2
     assert config == original
     assert result["ruleset"]["required_rules"] == ["R-01"]
 
@@ -114,7 +116,9 @@ def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp
 
         def publish(self, identity, result, artifacts, raw, raw_hash):
             assert "candidate" not in raw and "candidate" not in result
-            AnalysisV2.model_validate(raw)
+            AnalysisV2.model_validate(validator_result_for_contract(raw))
+            assert any("evidence" in item for item in raw["issues"])
+            assert all("evidence" not in item for item in result["issues"])
             published.append(result)
             job["report"]["outcome"] = "completed"
             return "completed"
