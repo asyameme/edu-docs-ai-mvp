@@ -55,6 +55,7 @@ export function useImportJob() {
     if (result.status === "accepted") {
       signatureRef.current = result.signature;
       setSignature(result.signature);
+      setNotice("");
     } else {
       setNotice(result.status === "invalid"
         ? "Введите имя для подписи длиной от 1 до 120 символов."
