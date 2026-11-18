@@ -100,6 +100,13 @@ export type ReviewVariant = {
   changes: ReviewMutation[];
 };
 
+export type RpdAlignmentSummary = {
+  outcome_id: string | null;
+  outcome_text: string | null;
+  classification: "supported" | "gap" | "uncertain" | "invalid" | null;
+  reason: string | null;
+};
+
 export type ReviewIssue = {
   id: string;
   rule_code: string;
@@ -112,6 +119,7 @@ export type ReviewIssue = {
   source_document_ids?: string[];
   requires_decision: boolean;
   variants: ReviewVariant[];
+  rpd_alignment?: RpdAlignmentSummary | null;
   effective_status?: string;
   decision?: { variant_id: string; author: string | null } | null;
 };

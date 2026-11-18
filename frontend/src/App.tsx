@@ -26,7 +26,8 @@ type ReconciliationFinding = {
   ruleCode?: string;
 };
 
-type ValidationIssue = {
+type PlainValidationIssue = {
+  kind: "plain";
   id: string;
   severity: "error" | "warning" | "info";
   title: string;
@@ -34,6 +35,22 @@ type ValidationIssue = {
   ruleId?: string;
   count?: number;
 };
+
+type RpdAlignmentIssue = {
+  kind: "rpd-alignment";
+  id: string;
+  severity: "error" | "warning" | "info";
+  title: string;
+  source: string;
+  ruleId: string;
+  outcomeId: string | null;
+  outcomeText: string | null;
+  reason: string | null;
+  classification: "supported" | "gap" | "uncertain" | "invalid" | null;
+  count?: number;
+};
+
+type ValidationIssue = PlainValidationIssue | RpdAlignmentIssue;
 
 type ParsedProgram = {
   documentCount: number;
@@ -122,6 +139,7 @@ const demoProgram: ParsedProgram = {
   ],
   issues: [
     {
+      kind: "plain",
       id: "issue-1",
       severity: "error",
       title: "Для компетенции не найден индикатор достижения",
@@ -129,6 +147,7 @@ const demoProgram: ParsedProgram = {
       ruleId: "R-04",
     },
     {
+      kind: "plain",
       id: "issue-2",
       severity: "warning",
       title: "Формулировка результата обучения отличается от учебного плана",
@@ -136,6 +155,7 @@ const demoProgram: ParsedProgram = {
       ruleId: "R-11",
     },
     {
+      kind: "plain",
       id: "issue-3",
       severity: "warning",
       title: "В документах различаются формулировки результатов обучения",
@@ -287,15 +307,52 @@ function formatIssueSummary(issues: ValidationIssue[]) {
   ].filter(Boolean).join(" · ") || "Проверка завершена";
 }
 
-type FindingFilter = "all" | "R-01" | "R-07" | "R-08";
+type FindingFilter = "all" | "R-01" | "R-07" | "R-08" | "R-11";
 type FindingStatusFilter = "all" | "pending" | "saved";
 
 function findingRuleGroup(ruleCode?: string) {
-  return ruleCode?.match(/^R-(01|07|08)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
+  return ruleCode?.match(/^R-(01|07|08|11)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
 }
 
 function issueRuleGroup(ruleId?: string) {
-  return ruleId?.match(/^R-(01|07|08)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
+  return ruleId?.match(/^R-(01|07|08|11)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
+}
+
+function rpdAlignmentTitle(type: string, classification: RpdAlignmentIssue["classification"]) {
+  switch (type) {
+    case "rpd_section_2_missing": return "Не найдено содержание раздела 2";
+    case "rpd_multiple_disciplines_unsupported": return "В РПД несколько дисциплин — проверка неоднозначна";
+    case "rpd_outcome_id_ambiguous": return "Результат обучения не удалось однозначно определить";
+    case "rpd_outcome_competency_link_missing": return "Не найдена связь результата с компетенцией";
+    case "rpd_section_3_evidence_missing": return "Не найдены связанные данные раздела 3";
+    case "rpd_semantic_model_unavailable": return "Смысловую проверку не удалось выполнить";
+    case "rpd_semantic_response_invalid":
+    case "rpd_semantic_result_missing_or_duplicate":
+    case "rpd_semantic_unexpected_outcome_ids": return "Ответ смысловой проверки требует проверки";
+    case "rpd_semantic_alignment_gap": return "Возможный пробел в содержании или оценивании";
+    case "rpd_semantic_alignment_uncertain": return "Связь требует экспертной оценки";
+    case "rpd_semantic_evidence_missing": return "Не хватает подтверждений для вывода";
+    default:
+      if (classification === "gap") return "Возможный пробел в содержании или оценивании";
+      if (classification === "uncertain") return "Связь требует экспертной оценки";
+      return "Результат смысловой проверки требует экспертной оценки";
+  }
+}
+
+function rpdAlignmentExplanation(type: string, reason: string | null) {
+  if (reason) return reason;
+  switch (type) {
+    case "rpd_semantic_model_unavailable":
+      return "Проверка не завершилась. Это не вывод о содержании РПД; смысловую сверку нужно повторить.";
+    case "rpd_semantic_response_invalid":
+      return "Ответ модели нельзя использовать для вывода. Результат проверки не определён.";
+    case "rpd_semantic_result_missing_or_duplicate":
+      return "Для результата обучения не получена ровно одна оценка модели.";
+    case "rpd_semantic_unexpected_outcome_ids":
+      return "Модель вернула оценки для результатов, которых нет в этой РПД.";
+    default:
+      return null;
+  }
 }
 
 // Подсветка только визуальная: показывает отличающиеся слова, а не вывод о смысловой эквивалентности.
@@ -364,9 +421,25 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
         choices,
       };
     });
-  const reviewIssues = details.issues.map((issue: ReviewIssue) => {
+  const reviewIssues: ValidationIssue[] = details.issues.map((issue: ReviewIssue) => {
     const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
+    if (issue.rule_code === "R-11") {
+      const alignment = issue.rpd_alignment;
+      return {
+        kind: "rpd-alignment",
+        id: issue.id,
+        severity: issue.severity === "blocking" ? "error" : "warning",
+        title: rpdAlignmentTitle(issue.type, alignment?.classification ?? null),
+        source: source.source,
+        ruleId: "R-11 · Смысловая сверка РПД",
+        outcomeId: alignment?.outcome_id ?? null,
+        outcomeText: alignment?.outcome_text ?? null,
+        reason: rpdAlignmentExplanation(issue.type, alignment?.reason ?? null),
+        classification: alignment?.classification ?? null,
+      };
+    }
     return {
+      kind: "plain",
       id: issue.id,
       severity: issue.severity === "blocking" ? "error" as const : "warning" as const,
       title: issue.message,
@@ -375,6 +448,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
     };
   });
   const importIssues = (job ? groupImportIssues(job) : []).map((issue) => ({
+    kind: "plain" as const,
     id: `import-${issue.id}`,
     severity: issue.severity,
     title: issue.message,
@@ -1040,7 +1114,7 @@ function App() {
                   <>
                     <div className="competency-filter-toolbar" aria-label="Фильтры результатов проверки">
                       <div className="competency-filter-rules" role="group" aria-label="Фильтр по правилу">
-                        {(["all", "R-01", "R-07", "R-08"] as const).map((filter) => (
+                        {(["all", "R-01", "R-07", "R-08", "R-11"] as const).map((filter) => (
                           <button key={filter} type="button"
                             className={`competency-filter-button${findingFilter === filter ? " is-active" : ""}`}
                             aria-pressed={findingFilter === filter}
@@ -1059,8 +1133,9 @@ function App() {
                       </label>
                     </div>
                     {findingFilter === "R-08" && <p className="competency-toolbar-note">R-08 сравнивает смысл описаний индикаторов с одинаковым кодом в РПД, РПП и ЦКМВ. Если LLM недоступна, сравнение помечается как невыполненное в замечаниях ниже.</p>}
+                    {findingFilter === "R-11" && <p className="competency-toolbar-note">R-11 сопоставляет каждый результат обучения в РПД с содержанием раздела 2 и оцениванием из раздела 3. Это смысловая подсказка, а не нормативный вывод: замечания нужно оценить специалисту.</p>}
                     <div className="finding-list">
-                      {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранным фильтрам нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Проверьте замечания R-08 ниже." : "Попробуйте другой фильтр."}</p>}
+                      {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранным фильтрам нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Проверьте замечания R-08 ниже." : findingFilter === "R-11" ? "R-11 не предлагает готовый вариант: его замечания показаны ниже для экспертной оценки." : "Попробуйте другой фильтр."}</p>}
                       {visibleFindings.map((finding, index) => {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
@@ -1241,16 +1316,26 @@ function App() {
                       })}
                     </div>
 
-                    <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" ? true : undefined}>
+                    <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
                       <summary>Замечания проверки · {visibleIssueCount}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
                       <ul className="issue-list">
                         {visibleIssues.length === 0 && <li className="competency-empty-issues">Для выбранного правила замечаний нет.</li>}
                         {visibleIssues.map((issue) => (
-                          <li className="issue-row" key={issue.id}>
+                          <li className={`issue-row${issue.kind === "rpd-alignment" ? " issue-row--rpd-alignment" : ""}`} key={issue.id}>
                             <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
                             <span className="issue-copy">
                               <strong>{issue.title}</strong>
-                              <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}{issue.count && issue.count > 1 ? ` · ×${issue.count}` : ""}</span>
+                              {issue.kind === "rpd-alignment" ? (
+                                <span className="rpd-alignment-details">
+                                  {issue.outcomeText && <span><b>Результат обучения:</b> {issue.outcomeText}</span>}
+                                  {!issue.outcomeText && issue.outcomeId && <span><b>Результат обучения:</b> {issue.outcomeId}</span>}
+                                  {issue.reason && <span><b>Пояснение:</b> {issue.reason}</span>}
+                                  <span>{issue.source} · {issue.ruleId}</span>
+                                  <span>Смысловая подсказка: итог оценивает специалист; это не автоматическое нормативное решение.</span>
+                                </span>
+                              ) : (
+                                <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}{issue.count && issue.count > 1 ? ` · ×${issue.count}` : ""}</span>
+                              )}
                             </span>
                             <span className={`severity-label severity-label--${issue.severity}`}>
                               {issue.severity === "error" ? "Ошибка" : issue.severity === "warning" ? "Предупреждение" : "Информация"}

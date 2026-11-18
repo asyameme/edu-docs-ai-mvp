@@ -98,6 +98,13 @@ class Variant(Contract):
     changes: list[ReviewMutation] = Field(min_length=1)
 
 
+class RpdAlignmentSummary(Contract):
+    outcome_id: str | None = None
+    outcome_text: str | None = None
+    classification: Literal["supported", "gap", "uncertain", "invalid"] | None = None
+    reason: str | None = None
+
+
 class ReviewIssue(Contract):
     id: UUID
     rule_code: str = Field(min_length=1)
@@ -110,6 +117,7 @@ class ReviewIssue(Contract):
     source_document_ids: list[UUID] = Field(default_factory=list)
     requires_decision: bool = False
     variants: list[Variant] = Field(default_factory=list)
+    rpd_alignment: RpdAlignmentSummary | None = None
 
     @model_validator(mode="after")
     def variants_are_distinct(self) -> Self:

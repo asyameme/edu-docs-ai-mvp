@@ -755,6 +755,11 @@ h1 {
   border-top: 1px solid #edf0f2;
 }
 
+.issue-row--rpd-alignment {
+  align-items: start;
+  padding: 14px 0;
+}
+
 .severity-dot {
   width: 8px;
   height: 8px;
@@ -791,6 +796,22 @@ h1 {
   font-size: 11px;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+.rpd-alignment-details {
+  display: grid;
+  gap: 6px;
+}
+
+.rpd-alignment-details > span {
+  color: #4f5b66;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rpd-alignment-details b {
+  color: #39434d;
+  font-weight: 650;
 }
 
 .severity-label {

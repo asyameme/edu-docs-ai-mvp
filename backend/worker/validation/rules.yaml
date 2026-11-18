@@ -203,7 +203,7 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Смысловая связь результатов обучения с содержанием и оцениванием в РПД"
     type: "semantic_rpd_alignment"
-    status: "draft"
+    status: "ready_with_semantic_fallback"
     scope:
       document_types: ["rpd"]
     inputs:

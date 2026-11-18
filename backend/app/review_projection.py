@@ -17,8 +17,41 @@ _ISSUE_FIELDS = {
     "source_document_ids",
     "requires_decision",
     "variants",
+    "rpd_alignment",
 }
 _COVERAGE_FIELDS = {"rule_code", "rule_revision", "status", "reason"}
+
+
+def _rpd_alignment_summary(issue):
+    if issue.get("rule_code") != "R-11":
+        return None
+    source = issue.get("rpd_alignment")
+    if not isinstance(source, dict):
+        source = issue.get("evidence")
+    if not isinstance(source, dict):
+        source = {}
+    classification = source.get("classification")
+    if classification not in ("supported", "gap", "uncertain", "invalid"):
+        classification = None
+    return {
+        "outcome_id": (
+            source.get("outcome_id") if isinstance(source.get("outcome_id"), str) else None
+        ),
+        "outcome_text": (
+            source.get("outcome_text")
+            if isinstance(source.get("outcome_text"), str)
+            else None
+        ),
+        "classification": classification,
+        "reason": source.get("reason") if isinstance(source.get("reason"), str) else None,
+    }
+
+
+def _project_issue(issue):
+    public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
+    public_issue["rpd_alignment"] = _rpd_alignment_summary(issue)
+    public_issue["severity"] = issue_severity(issue)
+    return public_issue
 
 
 def _project_result(result):
@@ -29,14 +62,7 @@ def _project_result(result):
         for key in tuple(item):
             if key not in _COVERAGE_FIELDS:
                 item.pop(key)
-    projected["issues"] = [
-        {
-            **{key: value for key, value in item.items() if key in _ISSUE_FIELDS},
-            # Статус failed остаётся исходом валидатора; графовые сбои задаются Backend.
-            "severity": issue_severity(item),
-        }
-        for item in projected.get("issues", [])
-    ]
+    projected["issues"] = [_project_issue(item) for item in projected.get("issues", [])]
     return projected
 
 
@@ -62,6 +88,4 @@ def project_prepare_report(result):
 
 def project_legacy_review_issue(issue):
     """Возвращает сохранённое замечание в формате, совместимом с контрактом main."""
-    public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
-    public_issue["severity"] = issue_severity(public_issue)
-    return ReviewIssue.model_validate(public_issue).model_dump(mode="json")
+    return ReviewIssue.model_validate(_project_issue(issue)).model_dump(mode="json")
