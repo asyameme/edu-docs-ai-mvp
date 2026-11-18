@@ -91,6 +91,11 @@ def _mini_program_snapshot() -> tuple[SnapshotV2, dict]:
                 "semesters": [1],
                 "credit_units": 3,
                 "hours_total": 108,
+                "hours_by_kind": {
+                    "лекции": 36,
+                    "практические занятия": 36,
+                    "семинары": 36,
+                },
             }
         ],
         "competencies": [

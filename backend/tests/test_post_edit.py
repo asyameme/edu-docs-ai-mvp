@@ -39,8 +39,11 @@ def test_hours_change_creates_credit_hours_finding():
     assert outcome.status == "applied"
     assert len(outcome.applied) == 1
     findings = outcome.applied[0].findings
-    assert [finding.rule_code for finding in findings] == ["R-04"]
-    finding = findings[0]
+    assert {finding.rule_code for finding in findings} == {
+        "R-03", "R-02", "R-04"
+    }
+    assert len(findings) == 3
+    finding = next(f for f in findings if f.rule_code == "R-04")
     assert finding.type == "credit_hours_mismatch"
     assert finding.severity == "warning"
     assert finding.status == "open"
@@ -89,8 +92,14 @@ def test_each_change_is_validated_against_its_own_snapshot():
     outcome = apply_proposal_in_memory(snapshot, proposal, include_semantic=False)
     assert outcome.status == "applied"
     assert len(outcome.applied) == 2
-    assert [finding.rule_code for finding in outcome.applied[0].findings] == ["R-04"]
-    assert [finding.rule_code for finding in outcome.applied[1].findings] == ["R-04"]
+    assert {f.rule_code for f in outcome.applied[0].findings} == {
+        "R-03", "R-02", "R-04"
+    }
+    assert {f.rule_code for f in outcome.applied[1].findings} == {
+        "R-03", "R-02", "R-04", "R-05", "R-05-title"
+    }
+    assert len(outcome.applied[0].findings) == 3
+    assert len(outcome.applied[1].findings) == 5
     entity = next(
         item for item in outcome.final_snapshot.entities if item.id == data["discipline"]
     )
