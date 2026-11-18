@@ -23,15 +23,15 @@ else:  # Поддерживаем импорт при прямом запуск�
     )
 
 
-SYSTEM_PROMPT = """Ты проверяешь согласованность описаний индикаторов с одинаковым кодом
-в документах одной образовательной программы. Учитывай действие, объект,
-объём и смысловую роль родительской компетенции.
+SYSTEM_PROMPT = """Ты проверяешь согласованность формулировок индикаторов с одинаковым кодом
+в документах одной образовательной программы. Сравнивай только формулировки
+индикаторов.
 
 Для каждой группы выбери один статус:
 - equivalent — формулировки передают одну и ту же основную мысль; различия
   стиля, пунктуации и порядка слов сами по себе не означают различия смысла;
-- material_difference — меняются действие, объект, объём, ожидаемый результат
-  или смысловая связь с родительской компетенцией;
+- material_difference — меняются действие, объект, область применения или
+  ожидаемый результат индикатора;
 - uncertain — данных недостаточно для уверенного сравнения.
 
 Не выбирай правильную или эталонную формулировку и не делай нормативных выводов.
@@ -49,7 +49,6 @@ class IndicatorDocument:
     document_type: str
     program_id: str | None
     indicators: Sequence[Mapping[str, Any]]
-    competencies: Sequence[Mapping[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -60,8 +59,6 @@ class IndicatorOccurrence:
     document_type: str
     code: str
     text: str
-    competency_code: str | None
-    competency_text: str | None
     source_ref: Mapping[str, Any]
 
     def model_input(self) -> dict[str, Any]:
@@ -71,8 +68,6 @@ class IndicatorOccurrence:
             "document": self.document_label,
             "code": self.code,
             "text": self.text,
-            "parent_competency_code": self.competency_code,
-            "parent_competency_text": self.competency_text,
         }
 
 
@@ -113,6 +108,34 @@ def _finding(
     if extra:
         evidence.update(extra)
     return {"code": code, "status": "needs_review", "message": message, "evidence": evidence}
+
+
+def _group_variants(occurrences: Sequence[IndicatorOccurrence]) -> list[dict[str, Any]]:
+    """Точные варианты формулировки для выбора; канонический текст не назначается."""
+    if len({item.text for item in occurrences}) < 2:
+        return []
+    return [
+        {
+            "document": item.document_label,
+            "code": item.code,
+            "text": item.text,
+            "source_ref": dict(item.source_ref),
+        }
+        for item in occurrences
+    ]
+
+
+def _choice_extra(
+    occurrences: Sequence[IndicatorOccurrence],
+    **extra: Any,
+) -> dict[str, Any]:
+    variants = _group_variants(occurrences)
+    return {
+        "variants": variants,
+        "requires_user_confirmation": bool(variants),
+        "auto_select": False,
+        **extra,
+    }
 
 
 def _batch_finding(
@@ -194,17 +217,6 @@ def _batch_comparable_groups(
     return batches, oversized
 
 
-def _competencies_by_code(
-    rows: Sequence[Mapping[str, Any]],
-) -> dict[str, list[Mapping[str, Any]]]:
-    result: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for row in rows:
-        code = row.get("code")
-        if isinstance(code, str) and code.strip():
-            result[_normalise_code(code)].append(row)
-    return result
-
-
 def _collect_occurrences(
     documents: Sequence[IndicatorDocument],
 ) -> tuple[dict[tuple[str, str], list[IndicatorOccurrence]], int, list[dict[str, Any]]]:
@@ -212,7 +224,6 @@ def _collect_occurrences(
     checks = 0
     findings: list[dict[str, Any]] = []
     for document_key, document in enumerate(documents):
-        competencies = _competencies_by_code(document.competencies)
         package_key = document.program_id or "__single_validation_package__"
         for index, row in enumerate(document.indicators, start=1):
             code = row.get("code")
@@ -226,35 +237,10 @@ def _collect_occurrences(
                     f"Нельзя сравнить индикатор в {document.label}: отсутствует корректный код или формулировка.",
                     [IndicatorOccurrence(
                         f"D{document_key + 1}-I{index}", document_key, document.label,
-                        document.document_type, str(code or ""), str(text or ""), None, None, source_ref,
+                        document.document_type, str(code or ""), str(text or ""), source_ref,
                     )],
                 ))
                 continue
-
-            competency_code = row.get("competency_code")
-            competency_code = competency_code if isinstance(competency_code, str) else None
-            parent_rows = competencies.get(_normalise_code(competency_code), []) if competency_code else []
-            parent_text = None
-            if len(parent_rows) == 1:
-                value = parent_rows[0].get("formulation")
-                parent_text = value if isinstance(value, str) else None
-
-            if (
-                not competency_code
-                or len(parent_rows) != 1
-                or not isinstance(parent_text, str)
-                or not parent_text.strip()
-            ):
-                checks += 1
-                findings.append(_finding(
-                    "indicator_parent_context_missing",
-                    f"Для индикатора {code.strip()} в {document.label} не удалось однозначно получить родительскую компетенцию.",
-                    [IndicatorOccurrence(
-                        f"D{document_key + 1}-I{index}", document_key, document.label,
-                        document.document_type, code.strip(), text.strip(), competency_code,
-                        parent_text, source_ref,
-                    )],
-                ))
 
             occurrence = IndicatorOccurrence(
                 occurrence_id=f"D{document_key + 1}-I{index}",
@@ -263,57 +249,18 @@ def _collect_occurrences(
                 document_type=document.document_type,
                 code=code.strip(),
                 text=text.strip(),
-                competency_code=competency_code,
-                competency_text=parent_text,
                 source_ref=source_ref,
             )
             groups[(package_key, _normalise_code(code))].append(occurrence)
     return groups, checks, findings
 
 
-def _same_description_and_parent(occurrences: Sequence[IndicatorOccurrence]) -> bool:
-    signatures = {
-        (
-            _normalise_text(item.text),
-            _normalise_code(item.competency_code) if item.competency_code else "",
-            _normalise_text(item.competency_text),
-        )
-        for item in occurrences
-    }
-    return len(signatures) <= 1
+def _same_normalised_indicator_text(occurrences: Sequence[IndicatorOccurrence]) -> bool:
+    return len({_normalise_text(item.text) for item in occurrences}) <= 1
 
 
-def _group_variants(occurrences: Sequence[IndicatorOccurrence]) -> list[dict[str, Any]]:
-    """Варианты текста индикатора из документов; выбор значения остаётся за пользователем.
-
-    Пустой список, если текст во всех документах одинаков (различие только
-    в родительском контексте — выбирать нечего).
-    """
-    if len({_normalise_text(item.text) for item in occurrences}) < 2:
-        return []
-    return [
-        {
-            "document": item.document_label,
-            "code": item.code,
-            "text": item.text,
-            "source_ref": dict(item.source_ref),
-        }
-        for item in occurrences
-    ]
-
-
-def _choice_extra(
-    occurrences: Sequence[IndicatorOccurrence],
-    **extra: Any,
-) -> dict[str, Any]:
-    """Дополняет evidence вариантами выбора; канонический текст не назначается."""
-    variants = _group_variants(occurrences)
-    return {
-        "variants": variants,
-        "requires_user_confirmation": bool(variants),
-        "auto_select": False,
-        **extra,
-    }
+def _same_exact_indicator_text(occurrences: Sequence[IndicatorOccurrence]) -> bool:
+    return len({item.text for item in occurrences}) <= 1
 
 
 def evaluate_indicator_consistency(
@@ -322,17 +269,28 @@ def evaluate_indicator_consistency(
     llm_config: Mapping[str, Any],
     evaluator: SemanticEvaluator | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Сверяет группы одноимённых кодов, не назначая эталонный текст."""
+    """Сверяет формулировки индикаторов с одинаковым кодом без выбора эталона."""
     grouped, checks, findings = _collect_occurrences(documents)
     comparable_groups: list[tuple[str, list[IndicatorOccurrence]]] = []
+    group_number = 0
     for _, occurrences in sorted(grouped.items(), key=lambda item: item[0]):
         distinct_documents = {item.document_key for item in occurrences}
         if len(distinct_documents) < 2:
             continue
         checks += 1
-        if _same_description_and_parent(occurrences):
+        if _same_exact_indicator_text(occurrences):
             continue
-        group_id = f"G{len(comparable_groups) + 1:03d}"
+
+        group_number += 1
+        group_id = f"G{group_number:03d}"
+        if _same_normalised_indicator_text(occurrences):
+            findings.append(_finding(
+                "indicator_formulation_variant",
+                f"Формулировки индикатора {occurrences[0].code} различаются только регистром, пробелами или Unicode-формой. Выберите вариант для документов.",
+                occurrences,
+                extra=_choice_extra(occurrences, group_id=group_id),
+            ))
+            continue
         comparable_groups.append((group_id, occurrences))
 
     if not comparable_groups:
@@ -341,11 +299,13 @@ def evaluate_indicator_consistency(
     batches, oversized = _batch_comparable_groups(comparable_groups, llm_config)
     max_prompt_tokens = llm_config.get("max_prompt_tokens", 12000)
     for group, estimate in oversized:
-        findings.append(_finding(
+        findings.append(_batch_finding(
             "indicator_semantic_request_too_large",
             f"Сравнение группы индикатора не отправлено: запрос превышает лимит {max_prompt_tokens} токенов.",
             [group],
-            extra=_choice_extra(group[1], estimated_prompt_tokens=estimate),
+            extra=_choice_extra(
+                group[1], group_id=group[0], estimated_prompt_tokens=estimate,
+            ),
         ))
 
     for group_batch in batches:
@@ -364,8 +324,6 @@ def evaluate_indicator_consistency(
                 if getattr(exc, "status_code", None) == 429 or type(exc).__name__ == "RateLimitError"
                 else f"ошибка {type(exc).__name__}"
             )
-            # Карточка на каждый код индикатора: пользователь выбирает вариант даже
-            # когда сравнение моделью не выполнено.
             for group_id, occurrences in group_batch:
                 findings.append(_finding(
                     "indicator_semantic_model_unavailable",
@@ -430,6 +388,17 @@ def evaluate_indicator_consistency(
                 ))
                 continue
             if status == "equivalent":
+                findings.append(_finding(
+                    "indicator_formulation_variant",
+                    f"Формулировки индикатора {occurrences[0].code} различаются, но модель считает их смыслово эквивалентными. Выберите вариант для документов.",
+                    occurrences,
+                    extra=_choice_extra(
+                        occurrences,
+                        group_id=group_id,
+                        model_status=status,
+                        model_reason=reason,
+                    ),
+                ))
                 continue
             label = (
                 "формулировки могут существенно различаться"
@@ -441,7 +410,8 @@ def evaluate_indicator_consistency(
                 f"Для кода {occurrences[0].code} {label}. {reason}",
                 occurrences,
                 extra=_choice_extra(
-                    occurrences, group_id=group_id, model_status=status, model_reason=reason,
+                    occurrences, group_id=group_id,
+                    model_status=status, model_reason=reason,
                 ),
             ))
 

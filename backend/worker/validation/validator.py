@@ -967,7 +967,6 @@ def _semantic_indicator_consistency(
             document_type=doc.role or "unknown",
             program_id=doc.program_id,
             indicators=indicators,
-            competencies=_records(doc, inputs["competencies_path"]),
         ))
 
     checks, raw_findings = evaluate_indicator_consistency(

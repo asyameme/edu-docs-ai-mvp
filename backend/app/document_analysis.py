@@ -21,7 +21,8 @@ _FIELDS = {
     "competency_formulation_mismatch": "formulation",
     "competency_formulation_missing": "formulation",
     "competency_code_match_candidate": "code",
-    # R-08: выбор текста индикатора из документов остаётся за пользователем.
+    # R-08 сравнивает индикаторы одного кода; итоговый текст выбирает пользователь.
+    "indicator_formulation_variant": "text",
     "indicator_semantic_mismatch": "text",
     "indicator_semantic_uncertain": "text",
     "indicator_semantic_model_unavailable": "text",
@@ -62,9 +63,7 @@ def _sources(finding, documents):
             for variant in variants
             if isinstance(variant, dict) and isinstance(variant.get("source_ref"), dict)
         )
-    if not references and "variants" not in evidence:
-        # Явный пустой список вариантов означает, что выбора нет (например, тексты
-        # индикаторов совпадают и различие только в родительском контексте).
+    if not references:
         references.extend((ref, None) for ref in evidence.get("source_refs", []))
     seen = set()
     for ref, variant in references:
@@ -94,8 +93,8 @@ def _sources(finding, documents):
                     and row["code"].strip() == code)
                 and ("formulation" not in variant
                      or row.get("formulation") == variant["formulation"])
-                and ("text" not in variant
-                     or row.get("text") == variant["text"])
+                and ("text" not in variant or isinstance(row.get("text"), str)
+                     and row["text"].strip() == variant["text"])
             ]
         sources.append((str(item["document_id"]), matches))
     return sources, limitations
