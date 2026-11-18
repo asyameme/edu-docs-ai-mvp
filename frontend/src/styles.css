@@ -3939,14 +3939,48 @@ textarea:focus-visible {
   background: #fff; color: #24333d; font: inherit;
 }
 .competency-custom-editor input:focus-visible { outline: 2px solid #258eed; outline-offset: 2px; }
-/* На экране компетенций источники не скрываются в компактном режиме. */
-.competency-finding-group .choice-content { display: grid; gap: 3px; }
-.competency-finding-group .choice-source,
-.competency-finding-group .choice-location {
-  display: block; font-size: 11px; white-space: normal; overflow-wrap: anywhere;
+/* Выбор компетенции: значение видно сразу, документы раскрываются отдельно. */
+.competency-choice-prompt { margin: 6px 0 10px; color: #526274; font-size: 13px; }
+.competency-finding-group .choice-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  align-items: start;
 }
-.competency-finding-group .choice-value { white-space: normal; font-size: 12px; }
-.competency-finding-group .choice-card { align-items: flex-start; padding: 10px 12px; }
+.competency-finding-group .choice-option { min-width: 0; }
+.competency-finding-group .choice-card {
+  min-height: 48px;
+  width: 100%;
+  box-sizing: border-box;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-color: #d4dee8;
+  border-radius: 9px;
+  background: #fff;
+}
+.competency-finding-group .choice-card.is-selected {
+  border-color: #258eed;
+  background: #f2f9ff;
+}
+.competency-finding-group .choice-card input {
+  position: static;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  opacity: 1;
+}
+.competency-finding-group .choice-content { display: grid; gap: 5px; }
+.competency-finding-group .choice-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.competency-finding-group .choice-document-count { color: #64748b; font-size: 11px; }
+.choice-sources { margin: 5px 0 2px 30px; color: #526274; font-size: 11px; }
+.choice-sources summary { width: fit-content; cursor: pointer; color: #426581; }
+.choice-sources ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 16px; }
+.choice-sources li { overflow-wrap: anywhere; }
 
 
 /* Competency review: filtering, side-by-side comparison and draft preview */
@@ -3959,14 +3993,6 @@ textarea:focus-visible {
 .competency-status-filter { display:flex; align-items:center; gap:8px; font-size:13px; color:#475569; }
 .competency-status-filter select { background:white; color:#182b41; border:1px solid #c8d3df; border-radius:8px; padding:8px; font:inherit; }
 .competency-empty-state, .competency-toolbar-note { font-size:13px; background:#f4f7fa; color:#475569; border-radius:10px; padding:14px; margin:4px 0 14px; }
-.competency-comparison { padding:14px; border:1px solid #dce5ef; border-radius:12px; margin:10px 0; background:#fafcff; }
-.competency-comparison-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; font-size:13px; }
-.competency-comparison-heading span { color:#64748b; font-size:12px; }
-.competency-comparison-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
-.competency-comparison-card { min-width:0; display:flex; flex-direction:column; gap:8px; border:1px solid #dae3ee; border-radius:10px; padding:12px; background:white; }
-.competency-comparison-source { font-size:12px; font-weight:700; color:#294e70; overflow-wrap:anywhere; }
-.competency-comparison-value { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; font-size:13px; color:#23364a; }
-.competency-comparison-location { margin-top:auto; font-size:11px; color:#687f93; overflow-wrap:anywhere; }
 .competency-diff-word { background:#ffebad; color:#4b3310; border-radius:3px; padding:1px 2px; }
 .competency-comparison-hint { margin:10px 0 0; font-size:11px; color:#697b8f; }
 .competency-decision-preview { padding:14px; border:1px solid #a6bdd1; border-radius:10px; background:#f1f7fc; margin:12px 0; overflow-wrap:anywhere; }
@@ -3976,4 +4002,4 @@ textarea:focus-visible {
 .competency-decision-preview small { color:#64748b; font-size:11px; }
 .competency-decision-preview .competency-preview-notice { font-size:11px; color:#566d81; }
 .competency-empty-issues { font-size:13px; color:#64748b; padding:10px; list-style:none; }
-@media(max-width:650px) { .competency-comparison-grid { grid-template-columns:1fr; } .competency-filter-toolbar { align-items:stretch; } }
+@media(max-width:650px) { .competency-filter-toolbar { align-items:stretch; } }

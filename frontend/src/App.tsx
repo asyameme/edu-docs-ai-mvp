@@ -12,9 +12,9 @@ type ProgramDocument = {
 
 type FindingChoice = {
   id: string;
-  source: string;
   value: string;
-  location: string;
+  documents: string[];
+  documentCount: number;
 };
 
 type ReconciliationFinding = {
@@ -101,21 +101,21 @@ const demoProgram: ParsedProgram = {
       choices: [
         {
           id: "study-plan",
-          source: "Учебный план.docx",
           value: "Оставить УК-2",
-          location: "стр. 8",
+          documents: ["Учебный план.docx"],
+          documentCount: 1,
         },
         {
           id: "rpd",
-          source: "РПД_Анализ_данных.docx",
           value: "Оставить УК-3",
-          location: "разд. 3.2",
+          documents: ["РПД_Анализ_данных.docx"],
+          documentCount: 1,
         },
         {
           id: "both",
-          source: "Учебный план.docx · РПД_Анализ_данных.docx",
           value: "Оба варианта",
-          location: "стр. 8 · разд. 3.2",
+          documents: ["Учебный план.docx", "РПД_Анализ_данных.docx"],
+          documentCount: 2,
         },
       ],
     },
@@ -262,6 +262,14 @@ function formatCountWithWords(count: number, one: string, few: string, many: str
   return `${count} ${many}`;
 }
 
+function shortDocumentName(name: string) {
+  return name.replaceAll("\\", "/").split("/").pop() || name;
+}
+
+function shortChoiceLabel(label: string) {
+  return label.replace(/^Выбрать значение из документов:\s*/i, "").trim();
+}
+
 function formatIssueSummary(issues: ValidationIssue[]) {
   const counts = issues.reduce(
     (total, issue) => {
@@ -312,7 +320,6 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
   const sourceDescription = (
     ids: string[],
     documentIds: string[] = [],
-    fieldPaths: string[] = [],
   ) => {
     const sources = ids.map((id) => sourceRefs.get(id)).filter((source) => source !== undefined);
     const sourceDocumentIds = [...new Set([
@@ -322,16 +329,13 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
     const names = [...new Set(
       sourceDocumentIds
         .map((id) => documentNames.get(id))
-        .filter((name) => name !== undefined),
+        .filter((name) => name !== undefined)
+        .map(shortDocumentName),
     )];
-    const sections = [...new Set(sources.map((source) => source.section).filter((section) => section !== null))];
     return {
       source: names.length ? names.join(" · ") : "Источник пакета документов",
-      location: sections.length
-        ? sections.join(" · ")
-        : fieldPaths.length
-          ? fieldPaths.join(" · ")
-          : "Фрагмент исходного документа",
+      documents: names,
+      documentCount: sourceDocumentIds.length,
     };
   };
   const findings = details.issues.filter((issue) => issue.requires_decision)
@@ -344,25 +348,18 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
         const changeDocumentIds = variant.changes.flatMap((change) =>
           change.op === "set_document_value" ? [change.document_id] : [],
         );
-        const fieldPaths = variant.changes.flatMap((change) =>
-          "field_path" in change ? [change.field_path] : [],
-        );
-        const location = sourceDescription(
+        const source = sourceDescription(
           changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
           changeDocumentIds.length ? changeDocumentIds : issue.source_document_ids ?? [],
-          fieldPaths,
         );
-        return { id: variant.id, value: variant.label, ...location };
+        return { id: variant.id, value: shortChoiceLabel(variant.label), documents: source.documents, documentCount: source.documentCount };
       });
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
-      const sourceSummary = [...new Set(choices.map((choice) => `${choice.source}, ${choice.location}`))].join(" · ");
       return {
         id: issue.id,
         ruleCode: issue.rule_code,
         title: issue.message,
-        description: choiceSummary
-          ? `${choiceSummary}${sourceSummary ? ` | ${sourceSummary}` : ""}`
-          : `Правило ${issue.rule_code} · ${issue.type}`,
+        description: choiceSummary || `Правило ${issue.rule_code} · ${issue.type}`,
         selectedChoiceId: issue.decision?.variant_id,
         choices,
       };
@@ -1078,30 +1075,11 @@ function App() {
                               </span>
                             </div>
                             <h3>{finding.title}</h3>
-                            <p className="finding-description">{finding.description}</p>
+                            {!isCompetencyFinding && <p className="finding-description">{finding.description}</p>}
                             {isCompetencyFinding && finding.choices.length > 0 && (
-                              <section className="competency-comparison" aria-label="Сравнение вариантов из документов">
-                                <div className="competency-comparison-heading">
-                                  <strong>{ruleGroup === "R-01" ? "Предлагаемые коды" : "Сравнение формулировок"}</strong>
-                                  <span>{finding.choices.length} {finding.choices.length === 1 ? "вариант" : "варианта(ов)"} · без автоматического эталона</span>
-                                </div>
-                                <div className="competency-comparison-grid">
-                                  {finding.choices.map((choice) => (
-                                    <div className="competency-comparison-card" key={choice.id}>
-                                      <span className="competency-comparison-source">{choice.source}</span>
-                                      <div className="competency-comparison-value">
-                                        {ruleGroup === "R-07" && finding.choices.length > 1
-                                          ? <ComparisonText value={choice.value} otherValues={finding.choices.filter((item) => item.id !== choice.id).map((item) => item.value)} />
-                                          : choice.value}
-                                      </div>
-                                      <span className="competency-comparison-location">{choice.location}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                                {ruleGroup === "R-07" && finding.choices.length > 1 && (
-                                  <p className="competency-comparison-hint">Подсвечены слова, отсутствующие хотя бы в одном другом варианте. Это текстовое отличие, не оценка смысла.</p>
-                                )}
-                              </section>
+                              <p className="competency-choice-prompt">
+                                {ruleGroup === "R-01" ? "Выберите, какой код оставить:" : "Выберите формулировку:"}
+                              </p>
                             )}
                             {finding.choices.length === 0 && (
                               <p className="finding-help">Для этого расхождения сервер пока не подготовил варианты решения.</p>
@@ -1111,27 +1089,39 @@ function App() {
                               <fieldset className="choice-list">
                                 <legend className="visually-hidden">Выберите верное значение</legend>
                                 {finding.choices.map((choice) => (
-                                  <label
-                                    className={`choice-card${selectedChoiceId === choice.id ? " is-selected" : ""}`}
-                                    key={choice.id}
-                                    title={`${choice.source} · ${choice.location}`}
-                                  >
-                                    <input
-                                      type="radio"
-                                      name={`choice-${finding.id}`}
-                                      value={choice.id}
-                                      checked={selectedChoiceId === choice.id}
-                                      aria-label={`${choice.value} · ${choice.source} · ${choice.location}`}
-                                      disabled={isConfirmed || processing.reviewBusy}
-                                      onChange={() => chooseFindingChoice(finding.id, choice.id)}
-                                    />
-                                    <span className="choice-content">
-                                      <span className="choice-value">{choice.value}</span>
-                                      <span className="choice-source">{choice.source}</span>
-                                      <span className="choice-location">{choice.location}</span>
-                                    </span>
-                                  </label>
+                                  <div className="choice-option" key={choice.id}>
+                                    <label className={`choice-card${selectedChoiceId === choice.id ? " is-selected" : ""}`}>
+                                      <input
+                                        type="radio"
+                                        name={`choice-${finding.id}`}
+                                        value={choice.id}
+                                        checked={selectedChoiceId === choice.id}
+                                        aria-label={choice.value}
+                                        disabled={isConfirmed || processing.reviewBusy}
+                                        onChange={() => chooseFindingChoice(finding.id, choice.id)}
+                                      />
+                                      <span className="choice-content">
+                                        <span className="choice-value">
+                                          {ruleGroup === "R-07" && finding.choices.length > 1
+                                            ? <ComparisonText value={choice.value} otherValues={finding.choices.filter((item) => item.id !== choice.id).map((item) => item.value)} />
+                                            : choice.value}
+                                        </span>
+                                        {isCompetencyFinding && choice.documentCount > 0 && (
+                                          <span className="choice-document-count">{formatCountWithWords(choice.documentCount, "документ", "документа", "документов")}</span>
+                                        )}
+                                      </span>
+                                    </label>
+                                    {isCompetencyFinding && choice.documents.length > 0 && (
+                                      <details className="choice-sources">
+                                        <summary>Показать документы</summary>
+                                        <ul>{choice.documents.map((document) => <li key={document}>{document}</li>)}</ul>
+                                      </details>
+                                    )}
+                                  </div>
                                 ))}
+                                {ruleGroup === "R-07" && finding.choices.length > 1 && (
+                                  <p className="competency-comparison-hint">Подсветка показывает текстовые отличия между формулировками.</p>
+                                )}
                                 {isCompetencyFinding && (
                                   <>
                                     <label className={`choice-card${isCustom ? " is-selected" : ""}`}>
@@ -1201,7 +1191,7 @@ function App() {
                                     <p><span>{ruleGroup === "R-01" ? "Код:" : "Формулировка:"}</span> {customText.trim() || "Значение не введено"}</p>
                                   </> : <>
                                     <p>{finding.choices.find((choice) => choice.id === selectedChoiceId)?.value ?? "Вариант не найден"}</p>
-                                    <small>{finding.choices.find((choice) => choice.id === selectedChoiceId)?.source}</small>
+                                    <small>{finding.choices.find((choice) => choice.id === selectedChoiceId)?.documents.join(" · ")}</small>
                                   </>}
                                 <p className="competency-preview-notice">Выбор не изменяет исходные документы. Сохранение выполняется только после отдельного подтверждения и ответа сервера.</p>
                               </section>
