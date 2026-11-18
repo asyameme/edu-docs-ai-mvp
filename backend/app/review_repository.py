@@ -219,12 +219,27 @@ class ReviewRepository:
                 snapshot = self.checked_snapshot(
                     self.version(cur, program_id, body.version_id), review_id
                 )
+                source_documents = review["parameters"]["input"]["documents"]
                 ruleset = review["report"]["result"]["ruleset"]
                 if executor == "local":
-                    parameters["implementation_revision"] = review["parameters"].get(
-                        "implementation_revision"
+                    # A pending review can outlive the image that prepared it. A new check
+                    # must use the validator code and rules currently running in the worker,
+                    # rather than inherit a revision that would make the check fail as stale.
+                    from app.validation_bridge import (
+                        validation_documents,
+                        validation_implementation_revision,
+                        validation_ruleset,
                     )
-                source_documents = review["parameters"]["input"]["documents"]
+                    from worker.validation.validator import load_rules
+
+                    local_rules = load_rules()
+                    ruleset = validation_ruleset(
+                        local_rules, validation_documents(source_documents)
+                    )
+                    parameters["implementation_revision"] = (
+                        validation_implementation_revision()
+                    )
+                    parameters["local_rules"] = local_rules
                 parameters.update(
                     content_hash=content_hash(snapshot),
                     ruleset=ruleset,
@@ -777,6 +792,18 @@ class ReviewRepository:
             }
             for item in stored
         ]
+        if latest:
+            # The completed graph check re-evaluates R-08 against the current version.
+            # Hide its superseded prepare-time findings so old transient LLM failures do
+            # not remain beside the fresh R-08 result in the UI.
+            issues = [
+                item
+                for item in issues
+                if not (
+                    str(item["job_id"]) == str(review["id"])
+                    and str(item["rule_code"]).startswith("R-08")
+                )
+            ]
         build_errors = review["report"].get("result", {}).get("graph_build_issues", [])
         if snapshot.review.graph_ready is False:
             for item in build_errors:

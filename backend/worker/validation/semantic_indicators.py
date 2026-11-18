@@ -11,12 +11,14 @@ if __package__:
     from .semantic_llm import (
         SemanticEvaluator,
         SemanticEvaluationUnavailable,
+        estimate_prompt_tokens,
         evaluate_semantic_payload,
     )
 else:  # Поддерживаем импорт при прямом запуске validator.py.
     from semantic_llm import (
         SemanticEvaluator,
         SemanticEvaluationUnavailable,
+        estimate_prompt_tokens,
         evaluate_semantic_payload,
     )
 
@@ -113,6 +115,85 @@ def _finding(
     return {"code": code, "status": "needs_review", "message": message, "evidence": evidence}
 
 
+def _batch_finding(
+    code: str,
+    message: str,
+    group_batch: Sequence[tuple[str, list[IndicatorOccurrence]]],
+    *,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    occurrences = [item for _, group in group_batch for item in group]
+    evidence = {
+        "group_ids": [group_id for group_id, _ in group_batch],
+        "indicator_codes": list(dict.fromkeys(group[0].code for _, group in group_batch)),
+    }
+    if extra:
+        evidence.update(extra)
+    return _finding(code, message, occurrences, extra=evidence)
+
+
+def _indicator_batch_payload(
+    group_batch: Sequence[tuple[str, list[IndicatorOccurrence]]],
+) -> dict[str, Any]:
+    return {
+        "indicator_groups": [
+            {
+                "group_id": group_id,
+                "indicator_code": occurrences[0].code,
+                "occurrences": [item.model_input() for item in occurrences],
+            }
+            for group_id, occurrences in group_batch
+        ]
+    }
+
+
+def _estimate_prompt_tokens(payload: Mapping[str, Any], llm_config: Mapping[str, Any]) -> int:
+    return estimate_prompt_tokens(payload, SYSTEM_PROMPT, llm_config)
+
+
+def _batch_comparable_groups(
+    comparable_groups: Sequence[tuple[str, list[IndicatorOccurrence]]],
+    llm_config: Mapping[str, Any],
+) -> tuple[
+    list[list[tuple[str, list[IndicatorOccurrence]]]],
+    list[tuple[tuple[str, list[IndicatorOccurrence]], int]],
+]:
+    max_groups = llm_config.get("max_groups_per_request", 20)
+    if not isinstance(max_groups, int) or isinstance(max_groups, bool) or not 1 <= max_groups <= 32:
+        max_groups = 20
+
+    max_prompt_tokens = llm_config.get("max_prompt_tokens", 12000)
+    if (
+        not isinstance(max_prompt_tokens, int)
+        or isinstance(max_prompt_tokens, bool)
+        or not 1024 <= max_prompt_tokens <= 24000
+    ):
+        max_prompt_tokens = 12000
+
+    batches: list[list[tuple[str, list[IndicatorOccurrence]]]] = []
+    oversized: list[tuple[tuple[str, list[IndicatorOccurrence]], int]] = []
+    current: list[tuple[str, list[IndicatorOccurrence]]] = []
+    for group in comparable_groups:
+        single_tokens = _estimate_prompt_tokens(_indicator_batch_payload([group]), llm_config)
+        if single_tokens > max_prompt_tokens:
+            oversized.append((group, single_tokens))
+            continue
+
+        candidate = [*current, group]
+        if current and (
+            len(candidate) > max_groups
+            or _estimate_prompt_tokens(_indicator_batch_payload(candidate), llm_config) > max_prompt_tokens
+        ):
+            batches.append(current)
+            current = [group]
+        else:
+            current = candidate
+
+    if current:
+        batches.append(current)
+    return batches, oversized
+
+
 def _competencies_by_code(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, list[Mapping[str, Any]]]:
@@ -202,6 +283,39 @@ def _same_description_and_parent(occurrences: Sequence[IndicatorOccurrence]) -> 
     return len(signatures) <= 1
 
 
+def _group_variants(occurrences: Sequence[IndicatorOccurrence]) -> list[dict[str, Any]]:
+    """Варианты текста индикатора из документов; выбор значения остаётся за пользователем.
+
+    Пустой список, если текст во всех документах одинаков (различие только
+    в родительском контексте — выбирать нечего).
+    """
+    if len({_normalise_text(item.text) for item in occurrences}) < 2:
+        return []
+    return [
+        {
+            "document": item.document_label,
+            "code": item.code,
+            "text": item.text,
+            "source_ref": dict(item.source_ref),
+        }
+        for item in occurrences
+    ]
+
+
+def _choice_extra(
+    occurrences: Sequence[IndicatorOccurrence],
+    **extra: Any,
+) -> dict[str, Any]:
+    """Дополняет evidence вариантами выбора; канонический текст не назначается."""
+    variants = _group_variants(occurrences)
+    return {
+        "variants": variants,
+        "requires_user_confirmation": bool(variants),
+        "auto_select": False,
+        **extra,
+    }
+
+
 def evaluate_indicator_consistency(
     *,
     documents: Sequence[IndicatorDocument],
@@ -224,107 +338,118 @@ def evaluate_indicator_consistency(
     if not comparable_groups:
         return checks, findings
 
-    payload = {
-        "indicator_groups": [
-            {
-                "group_id": group_id,
-                "indicator_code": occurrences[0].code,
-                "occurrences": [item.model_input() for item in occurrences],
-            }
-            for group_id, occurrences in comparable_groups
-        ]
-    }
-    try:
-        response = evaluate_semantic_payload(
-            payload,
-            llm_config,
-            system_prompt=SYSTEM_PROMPT,
-            evaluator=evaluator,
-        )
-    except Exception as exc:
-        error_message = (
-            str(exc) if isinstance(exc, SemanticEvaluationUnavailable)
-            else f"ошибка {type(exc).__name__}"
-        )
-        for group_id, occurrences in comparable_groups:
-            findings.append(_finding(
-                "indicator_semantic_model_unavailable",
-                f"Не удалось сравнить индикатор {occurrences[0].code}: {error_message}",
-                occurrences,
-                extra={"group_id": group_id},
-            ))
-        return checks, findings
-
-    raw_results = response.get("comparisons") if isinstance(response, Mapping) else None
-    if not isinstance(raw_results, list):
-        for group_id, occurrences in comparable_groups:
-            findings.append(_finding(
-                "indicator_semantic_response_invalid",
-                f"Модель не вернула корректное сравнение индикатора {occurrences[0].code}.",
-                occurrences,
-                extra={"group_id": group_id},
-            ))
-        return checks, findings
-
-    expected = {group_id: occurrences for group_id, occurrences in comparable_groups}
-    results_by_id: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    unexpected_ids: list[str] = []
-    for item in raw_results:
-        if not isinstance(item, Mapping):
-            continue
-        group_id = item.get("group_id")
-        if isinstance(group_id, str) and group_id in expected:
-            results_by_id[group_id].append(item)
-        else:
-            unexpected_ids.append(str(group_id or ""))
-
-    for group_id, occurrences in comparable_groups:
-        items = results_by_id.get(group_id, [])
-        if len(items) != 1:
-            findings.append(_finding(
-                "indicator_semantic_result_missing_or_duplicate",
-                f"Для индикатора {occurrences[0].code} модель не вернула ровно один результат.",
-                occurrences,
-                extra={"group_id": group_id},
-            ))
-            continue
-
-        item = items[0]
-        status = item.get("status")
-        reason = item.get("reason")
-        if (
-            not isinstance(status, str)
-            or status not in {"equivalent", "material_difference", "uncertain"}
-            or not isinstance(reason, str)
-            or not reason.strip()
-        ):
-            findings.append(_finding(
-                "indicator_semantic_result_invalid",
-                f"Модель вернула некорректную оценку индикатора {occurrences[0].code}.",
-                occurrences,
-                extra={"group_id": group_id},
-            ))
-            continue
-        if status == "equivalent":
-            continue
-        label = (
-            "формулировки могут существенно различаться"
-            if status == "material_difference"
-            else "смысл сравнить уверенно не удалось"
-        )
+    batches, oversized = _batch_comparable_groups(comparable_groups, llm_config)
+    max_prompt_tokens = llm_config.get("max_prompt_tokens", 12000)
+    for group, estimate in oversized:
         findings.append(_finding(
-            "indicator_semantic_mismatch" if status == "material_difference" else "indicator_semantic_uncertain",
-            f"Для кода {occurrences[0].code} {label}. {reason}",
-            occurrences,
-            extra={"group_id": group_id, "model_status": status, "model_reason": reason},
+            "indicator_semantic_request_too_large",
+            f"Сравнение группы индикатора не отправлено: запрос превышает лимит {max_prompt_tokens} токенов.",
+            [group],
+            extra=_choice_extra(group[1], estimated_prompt_tokens=estimate),
         ))
 
-    if unexpected_ids:
-        all_occurrences = [item for _, items in comparable_groups for item in items]
-        findings.append(_finding(
-            "indicator_semantic_response_unexpected_groups",
-            "Модель вернула результаты для неизвестных групп индикаторов; ответ требует ручной проверки.",
-            all_occurrences,
-            extra={"unexpected_group_ids": unexpected_ids},
-        ))
+    for group_batch in batches:
+        payload = _indicator_batch_payload(group_batch)
+        estimated_tokens = _estimate_prompt_tokens(payload, llm_config)
+        try:
+            response = evaluate_semantic_payload(
+                payload,
+                llm_config,
+                system_prompt=SYSTEM_PROMPT,
+                evaluator=evaluator,
+            )
+        except Exception as exc:
+            error_message = str(exc) if isinstance(exc, SemanticEvaluationUnavailable) else (
+                "ограничение запросов модели (HTTP 429) после повторов"
+                if getattr(exc, "status_code", None) == 429 or type(exc).__name__ == "RateLimitError"
+                else f"ошибка {type(exc).__name__}"
+            )
+            # Карточка на каждый код индикатора: пользователь выбирает вариант даже
+            # когда сравнение моделью не выполнено.
+            for group_id, occurrences in group_batch:
+                findings.append(_finding(
+                    "indicator_semantic_model_unavailable",
+                    f"Не удалось сравнить индикатор {occurrences[0].code}: {error_message}.",
+                    occurrences,
+                    extra=_choice_extra(
+                        occurrences,
+                        group_id=group_id,
+                        estimated_prompt_tokens=estimated_tokens,
+                    ),
+                ))
+            continue
+
+        raw_results = response.get("comparisons") if isinstance(response, Mapping) else None
+        if not isinstance(raw_results, list):
+            for group_id, occurrences in group_batch:
+                findings.append(_finding(
+                    "indicator_semantic_response_invalid",
+                    f"Модель вернула некорректный ответ; индикатор {occurrences[0].code} не сравнён.",
+                    occurrences,
+                    extra=_choice_extra(occurrences, group_id=group_id),
+                ))
+            continue
+
+        expected = {group_id: occurrences for group_id, occurrences in group_batch}
+        results_by_id: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        unexpected_ids: list[str] = []
+        for item in raw_results:
+            if not isinstance(item, Mapping):
+                continue
+            group_id = item.get("group_id")
+            if isinstance(group_id, str) and group_id in expected:
+                results_by_id[group_id].append(item)
+            else:
+                unexpected_ids.append(str(group_id or ""))
+
+        for group_id, occurrences in group_batch:
+            items = results_by_id.get(group_id, [])
+            if len(items) != 1:
+                findings.append(_finding(
+                    "indicator_semantic_result_missing_or_duplicate",
+                    f"Для индикатора {occurrences[0].code} модель не вернула ровно один результат.",
+                    occurrences,
+                    extra=_choice_extra(occurrences, group_id=group_id),
+                ))
+                continue
+
+            item = items[0]
+            status = item.get("status")
+            reason = item.get("reason")
+            if (
+                not isinstance(status, str)
+                or status not in {"equivalent", "material_difference", "uncertain"}
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                findings.append(_finding(
+                    "indicator_semantic_result_invalid",
+                    f"Модель вернула некорректную оценку индикатора {occurrences[0].code}.",
+                    occurrences,
+                    extra=_choice_extra(occurrences, group_id=group_id),
+                ))
+                continue
+            if status == "equivalent":
+                continue
+            label = (
+                "формулировки могут существенно различаться"
+                if status == "material_difference"
+                else "смысл сравнить уверенно не удалось"
+            )
+            findings.append(_finding(
+                "indicator_semantic_mismatch" if status == "material_difference" else "indicator_semantic_uncertain",
+                f"Для кода {occurrences[0].code} {label}. {reason}",
+                occurrences,
+                extra=_choice_extra(
+                    occurrences, group_id=group_id, model_status=status, model_reason=reason,
+                ),
+            ))
+
+        if unexpected_ids:
+            findings.append(_batch_finding(
+                "indicator_semantic_response_unexpected_groups",
+                "Модель вернула результаты для неизвестных групп индикаторов; ответ требует ручной проверки.",
+                group_batch,
+                extra={"unexpected_group_ids": unexpected_ids},
+            ))
     return checks, findings

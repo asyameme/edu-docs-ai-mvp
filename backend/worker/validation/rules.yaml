@@ -114,15 +114,25 @@ rules:
       max_tokens: 2400
       max_calls_per_run: 50
       max_group_variants: 8
+      max_groups_per_request: 7
+      max_prompt_tokens: 12000
+      rate_limit_retries: 2
+      rate_limit_retry_delay_seconds: 2
+      rate_limit_max_retry_delay_seconds: 60
+      minimum_request_interval_seconds: 31
+      semantic_retries: 1
+      semantic_retry_delay_seconds: 1
     notes: >-
       Сравнивает все варианты одного кода между документами одним событием проверки, включая
       РПД, РПП, ЦКМВ, характеристику и матрицу, без автоматического эталона.
       Различия только в регистре, пробелах и конечной пунктуации допустимы.
       LLM описывает смысловые и грамматические различия, включая добавленный
       уровень; при её недоступности требуется ручное ревью.
-      Разные варианты одного кода сравниваются одним групповым запросом;
-      на один запуск ограничено 50 запросов, в группе — до 8 уникальных
-      формулировок. Превышение лимитов переводит сравнения в uncertain для ручного ревью.
+      Разные варианты кодов объединяются в компактные запросы; на один запуск
+      ограничено 50 запросов, в группе — до 8 уникальных формулировок. Размер
+      запроса ограничен оценкой токенов; между запросами выдерживается пауза
+      для лимита провайдера. Превышение лимитов переводит сравнения в uncertain
+      для ручного ревью.
       Выбор формулировки делает пользователь, разные коды не объединяются.
 
   - id: "R-08-local-reference"
@@ -164,8 +174,19 @@ rules:
       api_base_env: "VALIDATION_LLM_API_BASE"
       prompt_version: "r08-v1"
       timeout_seconds: 60
-      max_tokens: 2400
+      # Батч и лимит вывода подобраны под потолок 45 с на вызов в validation_bridge:
+      # 8 групп и 1200 токенов ответа укладываются в таймаут при 30–40 ток/с Qwen.
+      max_tokens: 1200
       disable_thinking: true
+      max_groups_per_request: 8
+      max_prompt_tokens: 24000
+      rate_limit_retries: 2
+      # Задержка ретрая не меньше интервала прокси, иначе повтор бьётся в тот же лимит.
+      rate_limit_retry_delay_seconds: 31
+      rate_limit_max_retry_delay_seconds: 60
+      minimum_request_interval_seconds: 31
+      semantic_retries: 1
+      semantic_retry_delay_seconds: 1
     basis:
       kind: "project_consistency_rule"
       issue: 6

@@ -15,12 +15,20 @@ if __package__:
     from .semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from .semantic_llm import SemanticEvaluator
     from .semantic_rpd import evaluate_rpd_alignment
-    from .semantic_competency import evaluate_competency_group, CompetencyEvaluator
+    from .semantic_competency import (
+        _batch_competency_groups,
+        evaluate_competency_groups,
+        CompetencyEvaluator,
+    )
 else:  # Поддерживаем и прямой запуск validator.py.
     from semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from semantic_llm import SemanticEvaluator
     from semantic_rpd import evaluate_rpd_alignment
-    from semantic_competency import evaluate_competency_group, CompetencyEvaluator
+    from semantic_competency import (
+        _batch_competency_groups,
+        evaluate_competency_groups,
+        CompetencyEvaluator,
+    )
 
 try:
     import yaml
@@ -781,9 +789,9 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                              evaluator: CompetencyEvaluator | None = None) -> RuleResult:
     """R-07: compare all formulations of a code as peers, one finding per code.
 
-    Cross-document pairs are reported individually, while all distinct text
-    variants for one code share at most one semantic model request. A
-    CKMV/characteristic formulation is never authoritative.
+    Cross-document pairs are reported individually. Semantic requests batch
+    independent competency codes while keeping every code's variants separate.
+    A CKMV/characteristic formulation is never authoritative.
     """
     checks, findings, llm_calls = 0, [], 0
     llm_config = rule.get('llm', {})
@@ -804,6 +812,8 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                 code = _code(row.get('code'))
                 if code:
                     by_code[code].append((doc, row))
+        code_states: list[dict[str, Any]] = []
+        semantic_groups: list[dict[str, Any]] = []
         for code, records in sorted(by_code.items()):
             variants = [{'document': d.label, 'code': code, 'formulation': row.get('formulation'),
                          'source_ref': _source_ref(d, row)} for d, row in records]
@@ -834,37 +844,98 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                         semantic_pairs.setdefault(pair_key, None)
                         comparison['_semantic_pair'] = pair_key
                     comparisons.append(comparison)
+            state: dict[str, Any] = {
+                'code': code,
+                'records': records,
+                'variants': variants,
+                'comparisons': comparisons,
+                'semantic_pairs': semantic_pairs,
+                'semantic_texts': semantic_texts,
+                'differs': differs,
+                'missing': missing,
+                'group_id': None,
+                'results_by_pair': {},
+            }
             if semantic_pairs:
                 keys = list(dict.fromkeys(key for pair in semantic_pairs for key in pair))
                 if len(keys) > max_variants:
                     reason = (f'Число вариантов ({len(keys)}) превышает лимит группового сравнения '
                               f'({max_variants}); требуется ручная проверка.')
-                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
-                                       for pair in semantic_pairs}
-                elif llm_calls >= max_calls:
-                    reason = f'Достигнут лимит семантических запросов на запуск ({max_calls}); требуется ручная проверка.'
-                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
-                                       for pair in semantic_pairs}
+                    state['results_by_pair'] = {
+                        pair: {'status': 'uncertain', 'reason': reason}
+                        for pair in semantic_pairs
+                    }
                 else:
-                    llm_calls += 1
-                    evaluated = evaluate_competency_group(
-                        code, [semantic_texts[key] for key in keys],
-                        evaluator=evaluator, config=llm_config)
+                    group_id = f'C{len(semantic_groups) + 1:03d}'
+                    state['group_id'] = group_id
+                    state['semantic_keys'] = keys
+                    semantic_groups.append({
+                        'group_id': group_id,
+                        'competency_code': code,
+                        'formulations': [semantic_texts[key] for key in keys],
+                    })
+            code_states.append(state)
+
+        batches, oversized = _batch_competency_groups(semantic_groups, llm_config)
+        oversized_by_id = {
+            item['group_id']: estimate for item, estimate in oversized
+        }
+        evaluated_by_id: dict[str, dict[tuple[int, int], dict[str, str]]] = {}
+        for batch in batches:
+            if llm_calls >= max_calls:
+                continue
+            llm_calls += 1
+            evaluated_by_id.update(evaluate_competency_groups(
+                batch, evaluator=evaluator, config=llm_config,
+            ))
+
+        for state in code_states:
+            code = state['code']
+            variants = state['variants']
+            comparisons = state['comparisons']
+            semantic_pairs = state['semantic_pairs']
+            results_by_pair = state['results_by_pair']
+            group_id = state['group_id']
+            if group_id:
+                if group_id in oversized_by_id:
+                    reason = (
+                        'Запрос этой группы превышает настроенный предел токенов; '
+                        'требуется ручная проверка.'
+                    )
+                    results_by_pair = {
+                        pair: {'status': 'uncertain', 'reason': reason}
+                        for pair in semantic_pairs
+                    }
+                elif group_id not in evaluated_by_id:
+                    reason = (
+                        f'Достигнут лимит семантических запросов на запуск ({max_calls}); '
+                        'требуется ручная проверка.'
+                    )
+                    results_by_pair = {
+                        pair: {'status': 'uncertain', 'reason': reason}
+                        for pair in semantic_pairs
+                    }
+                else:
+                    keys = state['semantic_keys']
                     index_by_key = {key: index for index, key in enumerate(keys)}
-                    results_by_pair = {}
-                    for pair in semantic_pairs:
-                        result = evaluated.get(tuple(sorted((index_by_key[pair[0]], index_by_key[pair[1]]))))
-                        results_by_pair[pair] = result or {
-                            'status': 'uncertain', 'reason': 'Модель не вернула результат для этой пары.'}
-                for comparison in comparisons:
-                    pair_key = comparison.pop('_semantic_pair', None)
-                    if pair_key is not None:
-                        comparison.update(results_by_pair[pair_key])
-            if not missing and not differs:
+                    evaluated = evaluated_by_id[group_id]
+                    results_by_pair = {
+                        pair: evaluated.get(
+                            tuple(sorted((index_by_key[pair[0]], index_by_key[pair[1]]))),
+                            {'status': 'uncertain', 'reason': 'Модель не вернула результат для этой пары.'},
+                        )
+                        for pair in semantic_pairs
+                    }
+            for comparison in comparisons:
+                pair_key = comparison.pop('_semantic_pair', None)
+                if pair_key is not None:
+                    comparison.update(results_by_pair[pair_key])
+
+            if not state['missing'] and not state['differs']:
                 continue
             # One user decision covers every document variant for the given code.
             findings.append(Finding(
-                'competency_formulation_missing' if missing else 'competency_formulation_review',
+                'competency_formulation_missing' if state['missing'] else 'competency_formulation_review',
                 'needs_review',
                 f'Варианты формулировки компетенции {code} в разных документах требуют выбора пользователя.',
                 {'code': code, 'program_id': group[0].program_id,

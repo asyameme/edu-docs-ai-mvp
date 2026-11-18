@@ -60,6 +60,68 @@ def test_backend_r08_semantic_preserves_manual_review_on_model_failure(
         assert all(finding["status"] == "needs_review" for finding in result["findings"])
 
 
+@pytest.mark.parametrize("phase", ["document_reconciliation", "graph_validation"])
+def test_backend_r08_semantic_failure_offers_document_variants(phase, monkeypatch):
+    """Сбой модели не лишает пользователя выбора текста индикатора."""
+    from app.validation_bridge import run_document_rules
+
+    def unavailable(*args):
+        raise RuntimeError("Тест: модель недоступна")
+
+    monkeypatch.setattr("app.validation_bridge._ValidationBudget.semantic", unavailable)
+    config = load_rules()
+    config["rules"] = [rule for rule in config["rules"] if rule["id"] == "R-08-semantic"]
+    documents = [{
+        "meta": {"doc_type": kind, "program_id": "P", "file_name": f"{kind}.docx"},
+        "competencies": [{"code": "A", "formulation": formulation}],
+        "indicators": [
+            {"code": "A.1", "competency_code": "A", "text": text,
+             "source_ref": {"file": f"{kind}.docx", "section": "1.7.2"}},
+        ],
+    } for kind, text, formulation in [
+        ("RPD", "Первая формулировка", "Компетенция"),
+        ("CKMV", "Вторая формулировка", "Компетенция"),
+    ]]
+
+    findings = run_document_rules(documents, config, phase=phase)["results"][0]["findings"]
+
+    assert [finding["code"] for finding in findings] == ["indicator_semantic_model_unavailable"]
+    evidence = findings[0]["evidence"]
+    assert evidence["requires_user_confirmation"] is True
+    assert {variant["text"] for variant in evidence["variants"]} == {
+        "Первая формулировка", "Вторая формулировка",
+    }
+    assert {variant["document"] for variant in evidence["variants"]} == {"RPD.docx", "CKMV.docx"}
+
+
+@pytest.mark.parametrize("phase", ["document_reconciliation", "graph_validation"])
+def test_backend_r08_semantic_same_text_keeps_finding_without_variants(phase, monkeypatch):
+    """Различие только в родительском контексте не создаёт бессмысленный выбор."""
+    from app.validation_bridge import run_document_rules
+
+    def unavailable(*args):
+        raise RuntimeError("Тест: модель недоступна")
+
+    monkeypatch.setattr("app.validation_bridge._ValidationBudget.semantic", unavailable)
+    config = load_rules()
+    config["rules"] = [rule for rule in config["rules"] if rule["id"] == "R-08-semantic"]
+    documents = [{
+        "meta": {"doc_type": kind, "program_id": "P"},
+        "competencies": [{"code": "A", "formulation": formulation}],
+        "indicators": [
+            {"code": "A.1", "competency_code": "A", "text": "Одинаковый текст",
+             "source_ref": {"file": f"{kind}.docx", "section": "1.7.2"}},
+        ],
+    } for kind, formulation in [("RPD", "Первая"), ("CKMV", "Вторая")]]
+
+    findings = run_document_rules(documents, config, phase=phase)["results"][0]["findings"]
+
+    assert findings
+    for finding in findings:
+        assert finding["evidence"]["variants"] == []
+        assert finding["evidence"]["requires_user_confirmation"] is False
+
+
 def test_all_current_rules_have_both_explicit_phases():
     config = load_rules()
     assert config["phases"] == {

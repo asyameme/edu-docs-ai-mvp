@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -19,6 +20,33 @@ class SemanticEvaluationUnavailable(RuntimeError):
     """Семантическая модель не настроена или вернула непригодный ответ."""
 
 
+def estimate_prompt_tokens(
+    payload: Mapping[str, Any],
+    system_prompt: str,
+    config: Mapping[str, Any],
+) -> int:
+    """Estimate provider tokens and add headroom for provider-specific framing."""
+    model_env = config.get("model_env", "VALIDATION_LLM_MODEL")
+    model = os.getenv(str(model_env))
+    if model:
+        try:
+            from litellm import token_counter
+
+            count = token_counter(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+            )
+            return math.ceil(count * 1.15)
+        except Exception:
+            pass
+
+    # One token per character is a conservative fallback for an unknown tokenizer.
+    return len(system_prompt + json.dumps(payload, ensure_ascii=False))
+
+
 def _strip_code_fence(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("```"):
@@ -27,6 +55,34 @@ def _strip_code_fence(text: str) -> str:
     if stripped[:4].lower() == "json":
         stripped = stripped[4:].lstrip()
     return stripped
+
+
+def _first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
 
 
 def _trace(event: str, run_id: str, **fields: Any) -> None:
@@ -69,6 +125,7 @@ def evaluate_semantic_payload(
         )
     try:
         from litellm import completion
+        from litellm.exceptions import RateLimitError
     except ImportError as exc:
         raise SemanticEvaluationUnavailable(
             "Не установлен LiteLLM; установите зависимости backend."
@@ -110,6 +167,17 @@ def evaluate_semantic_payload(
     except SemanticEvaluationUnavailable:
         _trace("error", run_id, error_type="SemanticEvaluationUnavailable")
         raise
+    except RateLimitError as exc:
+        # Пробрасываем отдельный тип в общий бюджет: он повторит только 429,
+        # учитывая каждую физическую попытку в лимите запросов проверки.
+        _trace(
+            "error",
+            run_id,
+            error_type=type(exc).__name__,
+            status_code=429,
+            rate_limit_type=getattr(exc, "rate_limit_type", None),
+        )
+        raise
     except Exception as exc:
         # Тело ошибки провайдера не логируем: оно может содержать секреты или входные данные.
         _trace("error", run_id, error_type=type(exc).__name__)
@@ -117,18 +185,30 @@ def evaluate_semantic_payload(
             f"Вызов LLM завершился ошибкой ({type(exc).__name__})."
         ) from exc
 
+    cleaned = _strip_code_fence(content)
     try:
-        parsed = json.loads(_strip_code_fence(content))
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        _trace(
-            "invalid_json_response",
-            run_id,
-            raw_output=content,
-            error_type=type(exc).__name__,
-        )
-        raise SemanticEvaluationUnavailable(
-            "LLM вернула ответ, который не удалось разобрать как JSON."
-        ) from exc
+        extracted = _first_json_object(cleaned)
+        if extracted is not None:
+            try:
+                parsed = json.loads(extracted)
+            except json.JSONDecodeError:
+                parsed = None
+        else:
+            parsed = None
+        if parsed is not None:
+            pass
+        else:
+            _trace(
+                "invalid_json_response",
+                run_id,
+                raw_output=content,
+                error_type=type(exc).__name__,
+            )
+            raise SemanticEvaluationUnavailable(
+                "LLM вернула ответ, который не удалось разобрать как JSON."
+            ) from exc
 
     if not isinstance(parsed, Mapping):
         _trace("invalid_response", run_id, raw_output=content)

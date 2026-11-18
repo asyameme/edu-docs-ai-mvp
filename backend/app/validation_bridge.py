@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import logging
 import math
+import threading
 import time
 from collections.abc import Mapping
 from copy import deepcopy
@@ -17,9 +19,115 @@ from app.review_logic import digest
 from worker.validation.validator import Document, load_rules, run_validation
 
 ADAPTER_REVISION = "local-validation-adapter-v1"
-VALIDATION_BUDGET_SECONDS = 360
+VALIDATION_BUDGET_SECONDS = 470
 VALIDATION_MAX_LLM_CALLS = 20
 VALIDATION_LLM_CALL_TIMEOUT_SECONDS = 45
+logger = logging.getLogger(__name__)
+_LLM_RATE_LIMIT_LOCK = threading.Lock()
+_NEXT_LLM_REQUEST_AT = 0.0
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    try:
+        from litellm.exceptions import RateLimitError
+    except ImportError:
+        return False
+    return isinstance(error, RateLimitError)
+
+
+def _is_retryable_semantic_error(error: Exception) -> bool:
+    try:
+        from worker.validation.semantic_llm import SemanticEvaluationUnavailable
+    except ImportError:
+        return False
+    if not isinstance(error, SemanticEvaluationUnavailable):
+        return False
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "не удалось разобрать как json",
+            "не в текстовом формате",
+            "json не в виде объекта",
+            "завершился ошибкой (timeout",
+            "завершился ошибкой (connect",
+            "завершился ошибкой (readtimeout",
+            "завершился ошибкой (internalserver",
+            "завершился ошибкой (serviceunavailable",
+            "завершился ошибкой (apiconnection",
+        )
+    )
+
+
+def _rate_limit_retry_delay(error: Exception, config: Mapping[str, Any], retry_index: int) -> float | None:
+    base_delay = config.get("rate_limit_retry_delay_seconds", 2)
+    if (
+        not isinstance(base_delay, (int, float))
+        or isinstance(base_delay, bool)
+        or not math.isfinite(base_delay)
+        or base_delay <= 0
+    ):
+        base_delay = 2.0
+    max_delay = config.get("rate_limit_max_retry_delay_seconds", 15)
+    if (
+        not isinstance(max_delay, (int, float))
+        or isinstance(max_delay, bool)
+        or not math.isfinite(max_delay)
+        or max_delay < base_delay
+    ):
+        max_delay = 15.0
+
+    retry_after = _retry_after_seconds(error) or 0.0
+    delay = max(float(base_delay) * (2 ** retry_index), retry_after)
+    return delay if delay <= max_delay else None
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    for headers in (getattr(error, "headers", None), getattr(response, "headers", None)):
+        if not isinstance(headers, Mapping):
+            continue
+        value = next(
+            (value for key, value in headers.items() if str(key).lower() == "retry-after"),
+            None,
+        )
+        if value is None:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    return None
+
+
+def _wait_for_llm_request_slot(deadline: float, config: Mapping[str, Any]) -> None:
+    global _NEXT_LLM_REQUEST_AT
+    interval = config.get("minimum_request_interval_seconds", 31)
+    if (
+        not isinstance(interval, (int, float))
+        or isinstance(interval, bool)
+        or not math.isfinite(interval)
+        or not 0 < interval <= 120
+    ):
+        interval = 31.0
+    with _LLM_RATE_LIMIT_LOCK:
+        wait = max(0.0, _NEXT_LLM_REQUEST_AT - time.monotonic())
+        if time.monotonic() + wait >= deadline:
+            raise RuntimeError("Исчерпан бюджет ожидания следующего запроса LLM")
+        if wait:
+            time.sleep(wait)
+        _NEXT_LLM_REQUEST_AT = time.monotonic() + float(interval)
+
+
+def _defer_llm_requests(seconds: float) -> None:
+    global _NEXT_LLM_REQUEST_AT
+    with _LLM_RATE_LIMIT_LOCK:
+        _NEXT_LLM_REQUEST_AT = max(
+            _NEXT_LLM_REQUEST_AT,
+            time.monotonic() + seconds,
+        )
 
 
 def validation_implementation_revision():
@@ -57,21 +165,82 @@ class _ValidationBudget:
         self.calls = 0
 
     def evaluate(self, evaluator, payload: Mapping[str, Any], config: Mapping[str, Any]):
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise RuntimeError("Исчерпан общий бюджет времени семантических проверок")
-        if self.calls >= VALIDATION_MAX_LLM_CALLS:
-            raise RuntimeError("Исчерпан лимит запросов семантических проверок")
-        self.calls += 1
-        request_config = {
-            **config,
-            "timeout_seconds": min(
-                float(config.get("timeout_seconds", VALIDATION_LLM_CALL_TIMEOUT_SECONDS)),
-                VALIDATION_LLM_CALL_TIMEOUT_SECONDS,
-                remaining,
-            ),
-        }
-        return evaluator(payload, request_config)
+        retries = config.get("rate_limit_retries", 2)
+        if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 3:
+            retries = 2
+
+        rate_retry_index = 0
+        semantic_retry_index = 0
+        while True:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Исчерпан общий бюджет времени семантических проверок")
+            if self.calls >= VALIDATION_MAX_LLM_CALLS:
+                raise RuntimeError("Исчерпан лимит запросов семантических проверок")
+            _wait_for_llm_request_slot(self.deadline, config)
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Исчерпан общий бюджет времени семантических проверок")
+            self.calls += 1
+            request_config = {
+                **config,
+                "timeout_seconds": min(
+                    float(config.get("timeout_seconds", VALIDATION_LLM_CALL_TIMEOUT_SECONDS)),
+                    VALIDATION_LLM_CALL_TIMEOUT_SECONDS,
+                    remaining,
+                ),
+            }
+            try:
+                return evaluator(payload, request_config)
+            except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    if rate_retry_index >= retries:
+                        raise
+                    retry_after = _retry_after_seconds(exc)
+                    if retry_after is not None:
+                        _defer_llm_requests(retry_after)
+                    delay = _rate_limit_retry_delay(exc, config, rate_retry_index)
+                    retry_kind = "rate_limit"
+                    rate_retry_index += 1
+                elif _is_retryable_semantic_error(exc):
+                    semantic_retries = config.get("semantic_retries", 1)
+                    if (
+                        not isinstance(semantic_retries, int)
+                        or isinstance(semantic_retries, bool)
+                        or not 0 <= semantic_retries <= 2
+                    ):
+                        semantic_retries = 1
+                    if semantic_retry_index >= semantic_retries:
+                        raise
+                    delay = config.get("semantic_retry_delay_seconds", 1)
+                    if (
+                        not isinstance(delay, (int, float))
+                        or isinstance(delay, bool)
+                        or not math.isfinite(delay)
+                        or delay < 0
+                    ):
+                        delay = 1.0
+                    retry_kind = "semantic_response"
+                    semantic_retry_index += 1
+                else:
+                    raise
+                remaining = self.deadline - time.monotonic()
+                if (
+                    delay is None
+                    or remaining <= delay
+                    or self.calls >= VALIDATION_MAX_LLM_CALLS
+                ):
+                    raise
+                logger.warning(
+                    "Retrying semantic LLM request",
+                    extra={
+                        "retry_kind": retry_kind,
+                        "retry_index": rate_retry_index if retry_kind == "rate_limit" else semantic_retry_index,
+                        "retry_delay_seconds": delay,
+                        "rate_limit_type": getattr(exc, "rate_limit_type", None),
+                    },
+                )
+                time.sleep(delay)
 
     def semantic(self, payload: Mapping[str, Any], config: Mapping[str, Any]):
         from worker.validation.semantic_llm import evaluate_semantic_payload
@@ -90,9 +259,18 @@ class _ValidationBudget:
         )
 
     def competency(self, payload: Mapping[str, Any], config: Mapping[str, Any]):
-        from worker.validation.semantic_competency import _model_evaluator
+        from worker.validation.semantic_competency import competency_system_prompt
+        from worker.validation.semantic_llm import evaluate_semantic_payload
 
-        return self.evaluate(_model_evaluator, payload, config)
+        return self.evaluate(
+            lambda body, options: evaluate_semantic_payload(
+                body,
+                options,
+                system_prompt=competency_system_prompt(body),
+            ),
+            payload,
+            config,
+        )
 
 
 def project_snapshot_documents(documents, snapshot):
