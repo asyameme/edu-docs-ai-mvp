@@ -1,5 +1,6 @@
 """Pydantic AI behavior and read-only tools for the program chat."""
 
+from collections.abc import Mapping
 from typing import Annotated
 from uuid import UUID
 
@@ -8,6 +9,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModelSettings
+from temporalio.common import RetryPolicy
 
 from .contracts import (
     ChatDeps,
@@ -50,8 +52,12 @@ INSTRUCTIONS = """
 """.strip()
 
 
-def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
-    """Создаёт агента; настроенную модель передаёт backend."""
+def create_chat_agent(
+    model: Model,
+    *,
+    temporal_models: Mapping[str, Model] | None = None,
+) -> Agent[ChatDeps, ChatOutput]:
+    """Создаёт агента с необязательными алиасами моделей для backend Temporal."""
 
     agent = Agent(
         journalled(model),
@@ -59,7 +65,13 @@ def create_chat_agent(model: Model) -> Agent[ChatDeps, ChatOutput]:
         deps_type=ChatDeps,
         output_type=ChatOutput,
         instructions=INSTRUCTIONS,
-        capabilities=[TemporalDurability()],
+        capabilities=[
+            TemporalDurability(
+                models=temporal_models,
+                # Не даём сетевой ошибке модели бесконечно удерживать ход до лимита workflow.
+                model_activity_config={"retry_policy": RetryPolicy(maximum_attempts=3)},
+            )
+        ],
         model_settings=MODEL_SETTINGS,
         retries=2,
     )

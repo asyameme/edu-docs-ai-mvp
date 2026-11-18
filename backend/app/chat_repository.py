@@ -161,7 +161,7 @@ class ChatRepository:
             ).fetchone()
             if row is None:
                 raise DomainError(404, "Ход чата не найден")
-            version = conn.execute(
+            version = cur.execute(
                 """SELECT v.graph_state_id,v.review FROM chat_sessions s
                    JOIN program_versions v ON v.program_id=s.program_id AND v.id=s.version_id
                    WHERE s.id=%s""",

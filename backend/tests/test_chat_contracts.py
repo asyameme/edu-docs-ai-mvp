@@ -143,9 +143,7 @@ def test_sse_serializes_events_and_rechecks_completed_state(monkeypatch):
     )
 
     with TestClient(app) as client:
-        response = client.get(
-            f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events"
-        )
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
 
     assert response.status_code == 200
     assert "event: completed" in response.text
@@ -156,6 +154,35 @@ def test_sse_serializes_events_and_rechecks_completed_state(monkeypatch):
     )
     assert json.loads(data)["message"] == "Готово"
     assert "event: failed" not in response.text
+
+
+def test_completed_sse_uses_saved_result_without_temporal_history(monkeypatch):
+    program_id, session_id, run_id = uuid4(), uuid4(), uuid4()
+    result = {"kind": "answer", "message": "Ответ уже сохранён", "sources": []}
+
+    class Repository:
+        def turn_input(self, _):
+            return {"program_id": program_id, "session_id": session_id}
+
+        def session(self, *_):
+            return {"turns": [{"id": run_id, "status": "completed", "result": result}]}
+
+    def temporal_history_must_not_be_read(_):
+        pytest.fail("Сохранённый результат не должен зависеть от истории Temporal")
+
+    monkeypatch.setattr(chat_api, "repo", lambda _: Repository())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.resources = SimpleNamespace(
+        temporal=SimpleNamespace(get_workflow_handle=temporal_history_must_not_be_read)
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert "event: completed" in response.text
+    assert "Ответ уже сохранён" in response.text
 
 
 def test_dispatcher_pages_past_one_hundred_pending_turns():
