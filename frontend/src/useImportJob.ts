@@ -26,6 +26,10 @@ function operationHeaders(): HeadersInit {
 export function useImportJob() {
   const initial = useRef(loadSession() ?? emptySession);
   const sessionRef = useRef(initial.current);
+  const initialSessionKey = `${initial.current.programId}:${initial.current.jobId}`;
+  const [recoveredReviewFor, setRecoveredReviewFor] = useState<string | null>(
+    initial.current.reviewId ? initialSessionKey : null,
+  );
   const prepareRequestRef = useRef("");
   const busyRef = useRef(false);
   const reviewBusyRef = useRef(false);
@@ -154,6 +158,42 @@ export function useImportJob() {
     return () => { active = false; clearTimeout(timer); stream?.close(); };
   }, [session.programId, session.jobId, job?.attempt]);
 
+  useEffect(() => {
+    const sessionKey = `${session.programId}:${session.jobId}`;
+    if (
+      !session.programId || !session.jobId || session.reviewId || !program || !job ||
+      !["completed", "partial"].includes(job.status) || recoveredReviewFor === sessionKey
+    ) return;
+
+    let active = true;
+    const recover = async () => {
+      try {
+        const details = await api<ReviewDetails>(
+          `/api/v1/programs/${session.programId}/versions/${program.current_version_id}/review?limit=1&offset=0`,
+        );
+        const savedReview = details.version.snapshot.review;
+        if (savedReview?.import_job_id === session.jobId && savedReview.review_id) {
+          updateSession({
+            versionId: program.current_version_id,
+            reviewId: savedReview.review_id,
+            analysisVersionId: savedReview.analysis_version_id,
+            prepareKey: undefined,
+          });
+          setNotice("");
+        }
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 404) && active) {
+          setNotice(error instanceof Error ? error.message : "Не удалось восстановить результаты сверки");
+        }
+      } finally {
+        if (active) setRecoveredReviewFor(sessionKey);
+      }
+    };
+    void recover();
+    return () => { active = false; };
+  }, [session.programId, session.jobId, session.reviewId, program?.current_version_id,
+    job?.status, recoveredReviewFor, updateSession]);
+
   const canPrepareReview = Boolean(
     job && session.programId && session.versionId &&
     ["completed", "partial"].includes(job.status) && job.files.length > 0 &&
@@ -162,7 +202,8 @@ export function useImportJob() {
   );
 
   useEffect(() => {
-    if (!canPrepareReview || session.reviewId || prepareRequestRef.current) return;
+    const sessionKey = `${session.programId}:${session.jobId}`;
+    if (!canPrepareReview || session.reviewId || recoveredReviewFor !== sessionKey || prepareRequestRef.current) return;
     if (!session.prepareKey) {
       updateSession({ prepareKey: crypto.randomUUID() });
       return;
@@ -190,7 +231,7 @@ export function useImportJob() {
     });
     return () => { prepareRequestRef.current = ""; };
   }, [canPrepareReview, session.programId, session.jobId, session.versionId, session.reviewId,
-    session.prepareKey, prepareAttempt, updateSession]);
+    session.prepareKey, prepareAttempt, recoveredReviewFor, updateSession]);
 
   useEffect(() => {
     if (!session.programId || !session.reviewId) return;

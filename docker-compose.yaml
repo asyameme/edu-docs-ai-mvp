@@ -42,6 +42,9 @@ services:
     depends_on:
       api:
         condition: service_healthy
+        # Дополнительно перезапускает фронтенд при обновлении API в Compose;
+        # Nginx также обновляет адрес api через DNS без перезапуска.
+        restart: true
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
       interval: 15s

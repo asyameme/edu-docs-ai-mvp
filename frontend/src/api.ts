@@ -132,6 +132,9 @@ export type ReviewSnapshot = {
   }>;
   review?: {
     graph_ready?: boolean;
+    review_id?: string;
+    import_job_id?: string;
+    analysis_version_id?: string;
     decisions: Array<{ conflict_id: string; variant_id: string; author: string | null }>;
     confirmation: { author: string | null } | null;
   } | null;
