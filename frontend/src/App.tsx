@@ -773,6 +773,12 @@ function App() {
     setAcceptedWarningIds([]);
   }, [processing.checkJob?.id]);
 
+  useEffect(() => {
+    if (processing.reviewJob?.status !== "completed") return;
+    setFindingFilter("all");
+    setFindingStatusFilter("pending");
+  }, [processing.reviewJob?.id, processing.reviewJob?.status]);
+
   async function addFiles(files: FileList | File[]) {
     if (processing.busy) return;
     setNotice("");
@@ -790,6 +796,8 @@ function App() {
       setAppliedChoices({});
       setCustomValues({});
       setCustomCodes({});
+      setFindingFilter("all");
+      setFindingStatusFilter("pending");
       setDemoConfirmed(false);
       setAcceptedWarningIds([]);
       setChatMessages([]);
