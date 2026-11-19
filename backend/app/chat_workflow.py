@@ -1,15 +1,22 @@
 """Выполнение одного хода Pydantic AI с устойчивыми шагами Temporal."""
 
+from dataclasses import replace
 from datetime import timedelta
 
 from pydantic_ai import Conversation, ConversationTypeAdapter, UsageLimits
 from pydantic_ai.durable_exec.temporal import PydanticAIWorkflow
+from pydantic_ai.usage import RunUsage
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from app.chat_model import chat_agent
     from worker.agent.contracts import ChatDeps
+
+
+def _conversation_for_turn(conversation: Conversation) -> Conversation:
+    """Применяет лимиты расходов отдельно к каждому пользовательскому ходу."""
+    return replace(conversation, usage=RunUsage())
 
 
 @workflow.defn(name="ProgramChatWorkflowV1")
@@ -30,6 +37,8 @@ class ChatWorkflow(PydanticAIWorkflow):
                 if payload.get("conversation")
                 else Conversation()
             )
+            # Conversation хранит usage всего диалога, а лимиты защищают один ход.
+            conversation = _conversation_for_turn(conversation)
             result = await chat_agent.run(
                 payload["text"],
                 deps=ChatDeps(program_id=payload["program_id"], version_id=payload["version_id"]),

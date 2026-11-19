@@ -27,6 +27,20 @@ from worker.generation.patches import FieldChange, FieldEvidence, SourceEvidence
 
 TargetKind = Literal["entity", "relation"]
 
+# Импорт пока не записывает единицу измерения в observed_value (app/document_adapter).
+# Без юнита патч искал бы «108» вместо «108 ч.» и не находил текст в документе.
+# Юнит в свидетельстве всегда приоритетен; фолбэк — только по имени поля.
+_UNIT_BY_FIELD_PREFIX = (("hours", "ч"),)
+_UNIT_BY_FIELD = {"credit_units": "ЗЕТ"}
+
+
+def _fallback_unit(field_path: str) -> str | None:
+    tail = _unescape(field_path.rsplit("/", 1)[-1])
+    for prefix, unit in _UNIT_BY_FIELD_PREFIX:
+        if tail.startswith(prefix):
+            return unit
+    return _UNIT_BY_FIELD.get(tail)
+
 
 class ProposalApplicationError(ValueError):
     """Предложение нельзя применить: не совпадает с текущим состоянием версии."""
@@ -258,13 +272,18 @@ def generation_inputs(
             snapshot, change.target_kind, change.target_id, change.field_path
         ):
             used_refs.add(link.source_ref_id)
+            observed = link.observed_value
+            if "unit" not in observed:
+                unit = _fallback_unit(change.field_path)
+                if unit is not None:
+                    observed = {**observed, "unit": unit}
             links.append(
                 FieldEvidence(
                     change.target_kind,
                     str(change.target_id),
                     change.field_path,
                     str(link.source_ref_id),
-                    link.observed_value,
+                    observed,
                 )
             )
     missing = used_refs - set(refs)
@@ -282,7 +301,7 @@ def generation_inputs(
 
 
 def touched_document_ids(snapshot: SnapshotV2, changes: list[ApprovedChange]) -> set[UUID]:
-    """Документы, которых коснутся правки (для отчёта до применения)."""
+    """Документы, которых коснутся правки (для показа до применения)."""
 
     refs = {ref.id: ref.document_id for ref in snapshot.source_refs}
     documents: set[UUID] = set()

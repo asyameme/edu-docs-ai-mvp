@@ -21,6 +21,7 @@ from worker.agent.contracts import (
     ValidationFinding,
 )
 from worker.agent.read_port import configure_worker_read_port
+from worker.generation.docx_patch import DocxPatchError, read_area_text
 
 MAX_TOOL_PAYLOAD_BYTES = 64 * 1024
 
@@ -30,7 +31,16 @@ def limit_tool_payload(function):
 
     @wraps(function)
     async def checked(*args, **kwargs):
-        result = await function(*args, **kwargs)
+        try:
+            result = await function(*args, **kwargs)
+        except DomainError as error:
+            if error.status in (404, 422):
+                raise ModelRetry(
+                    f"Не удалось выполнить чтение: {error.detail}. "
+                    "Проверь идентификатор и координаты в выбранной версии, "
+                    "затем повтори запрос или сообщи пользователю, что данные не найдены."
+                ) from error
+            raise
         if len(to_json(result)) > MAX_TOOL_PAYLOAD_BYTES:
             raise ModelRetry(
                 "Результат инструмента превышает 64 КиБ. Уменьшите limit/depth, "
@@ -203,42 +213,74 @@ class PostgresChatReadPort:
     def _read_source_fragment(self, program_id, version_id, source_ref_id, context_paragraphs):
         snapshot = self.snapshot(program_id, version_id)
         ref = next((item for item in snapshot.source_refs if item.id == source_ref_id), None)
-        if ref is None or not ref.artifact_id:
+        if ref is None:
             raise DomainError(404, "Фрагмент источника недоступен")
-        with self.pool.connection() as conn:
-            row = conn.execute(
-                "SELECT storage_key FROM document_artifacts WHERE program_id=%s AND document_id=%s "
-                "AND id=%s AND kind='markdown'",
-                (program_id, ref.document_id, ref.artifact_id),
-            ).fetchone()
-        if row is None:
-            raise DomainError(404, "Фрагмент источника недоступен")
-        path = get_settings().artifact_files_path / str(UUID(row[0]))
-        if not path.is_file():
-            raise DomainError(503, "Артефакт источника временно недоступен")
-        text = path.read_text(encoding="utf-8")
-        locator = ref.artifact_locator or ""
-        line_number = (
-            int(locator.split(":", 1)[1])
-            if locator.startswith("line:") and locator[5:].isdigit()
-            else None
-        )
-        if line_number is None or line_number < 1:
-            raise DomainError(422, "Формат ссылки на фрагмент не поддерживается")
-        lines = text.splitlines()
-        start = max(0, line_number - 1 - context_paragraphs * 3)
-        end = min(len(lines), line_number + context_paragraphs * 3)
-        fragment = lines[line_number - 1][:6000] if line_number <= len(lines) else ""
-        with self.pool.connection() as conn:
-            document = conn.execute(
-                "SELECT original_name FROM source_documents WHERE program_id=%s AND id=%s",
-                (program_id, ref.document_id),
-            ).fetchone()
+        if ref.artifact_id and ref.artifact_locator and ref.artifact_locator.startswith("line:"):
+            with self.pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT storage_key FROM document_artifacts WHERE program_id=%s "
+                    "AND document_id=%s AND id=%s AND kind='markdown'",
+                    (program_id, ref.document_id, ref.artifact_id),
+                ).fetchone()
+            if row is None:
+                raise DomainError(404, "Фрагмент источника недоступен")
+            path = get_settings().artifact_files_path / str(UUID(row[0]))
+            if not path.is_file():
+                raise DomainError(503, "Артефакт источника временно недоступен")
+            text = path.read_text(encoding="utf-8")
+            locator = ref.artifact_locator
+            line_number = (
+                int(locator.split(":", 1)[1])
+                if locator.startswith("line:") and locator[5:].isdigit()
+                else None
+            )
+            if line_number is None or line_number < 1:
+                raise DomainError(422, "Формат ссылки на фрагмент не поддерживается")
+            lines = text.splitlines()
+            if line_number > len(lines):
+                raise DomainError(404, "Фрагмент источника не найден")
+            start = max(0, line_number - 1 - context_paragraphs * 3)
+            end = min(len(lines), line_number + context_paragraphs * 3)
+            fragment = lines[line_number - 1][:6000]
+            surrounding = "\n".join(lines[start:end])[:12000]
+            with self.pool.connection() as conn:
+                document = conn.execute(
+                    "SELECT original_name FROM source_documents WHERE program_id=%s AND id=%s",
+                    (program_id, ref.document_id),
+                ).fetchone()
+            document_name = document[0] if document else str(ref.document_id)
+        else:
+            try:
+                coordinates = json.loads(ref.locator)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise DomainError(422, "Координаты фрагмента источника повреждены") from error
+            if not isinstance(coordinates, dict) or not any(
+                coordinates.get(key) is not None
+                for key in ("paragraph_index", "table", "sheet_name", "cell")
+            ):
+                raise DomainError(422, "Для фрагмента источника нет точных координат")
+            from app.repository import Repository
+
+            document = Repository(self.pool).document_content(program_id, ref.document_id)
+            if not str(document["original_name"]).lower().endswith(".docx"):
+                raise DomainError(422, "Чтение фрагмента этого формата пока не поддерживается")
+            try:
+                paragraphs = read_area_text(document["content"], coordinates)
+            except DocxPatchError as error:
+                raise DomainError(
+                    422, "Координаты фрагмента источника не соответствуют DOCX"
+                ) from error
+            text = "\n".join(part for part in paragraphs if part)
+            if not text:
+                raise DomainError(404, "В указанном фрагменте источника нет текста")
+            fragment = text[:6000]
+            surrounding = fragment
+            document_name = document["original_name"]
         return SourceFragment(
             source_ref=_bounded_ref(ref),
-            document_name=document[0] if document else str(ref.document_id),
+            document_name=document_name,
             text=fragment,
-            surrounding_text="\n".join(lines[start:end])[:12000],
+            surrounding_text=surrounding,
         )
 
     @limit_tool_payload

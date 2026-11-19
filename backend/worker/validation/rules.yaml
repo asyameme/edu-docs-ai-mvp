@@ -18,7 +18,8 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Внутренняя сумма часов"
     type: "sum_components_equals_total"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
     scope:
       document_types: ["rpd"]
       records_path: "$.disciplines[*]"
@@ -54,12 +55,14 @@ rules:
     notes: >-
       Суммируются независимые виды нагрузки из hours_by_kind.
       Справочные часы активных форм и ЗЕТ в сумму не входят.
+      Неизвестный компонент требует needs_review.
 
   - id: "R-05"
     phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ между РПД и учебным планом"
     type: "compare_fields_across_documents"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
     inputs:
       left:
         document_type: "rpd"
@@ -85,6 +88,7 @@ rules:
     notes: >-
       Это только междокументная часть R-05. Проверки согласованности ЗЕТ
       внутри РПД и сумм по семестрам РПП в этот черновик не входят.
+      Сравниваются только односеместровые РПД; неполнота требует needs_review.
 
   - id: "R-01"
     phases: ["document_reconciliation", "graph_validation"]
@@ -240,7 +244,8 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Поиск дубликатов внутри списков сущностей"
     type: "unique_by_fields"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
     inputs:
       collections:
         - records_path: "$.competencies[*]"
@@ -266,8 +271,9 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Сверка часов учебного плана и РПД/РПП"
     type: "hours_against_curriculum"
-    status: "draft"
-    notes: "Для РПП сравнивается нагрузка конкретного семестра; для РПД — только односеместровая запись."
+    status: "ready"
+    required_for_confirmation: false
+    notes: "Для РПП сравнивается нагрузка конкретного семестра; для РПД — только односеместровая запись. Неоднозначность или нехватка данных требуют needs_review."
 
   - id: "R-04"
     phases: ["document_reconciliation", "graph_validation"]
@@ -282,14 +288,16 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Согласованность ЗЕТ титула и таблицы нагрузки"
     type: "title_credit_units"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
 
   - id: "R-03-RPP"
     phases: ["document_reconciliation", "graph_validation"]
     name: "Сумма нагрузки практики по семестрам"
     type: "semester_workload_totals"
-    status: "draft"
-    notes: "Проверяется сумма часов и ЗЕТ по semester_workload против общего итога РПП."
+    status: "ready"
+    required_for_confirmation: false
+    notes: "Проверяется сумма часов и ЗЕТ по semester_workload против общего итога одной практики РПП. Несколько практик без распределения нагрузки требуют needs_review."
 
   - id: "R-09"
     phases: ["document_reconciliation", "graph_validation"]

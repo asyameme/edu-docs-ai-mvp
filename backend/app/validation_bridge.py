@@ -478,7 +478,14 @@ def validation_rule_revision(config, rule):
 
 def validation_ruleset(config, documents):
     available = {item.role for item in documents if item.role}
-    enabled = [rule for rule in config["rules"] if rule.get("status") == "ready"]
+    enabled = [
+        rule for rule in config["rules"]
+        if rule.get("status") in {"ready", "ready_with_semantic_fallback"}
+        and rule.get(
+            "required_for_confirmation",
+            rule.get("status") == "ready",
+        )
+    ]
     required_documents = sorted(available)
     if not required_documents:
         raise ValueError("Нет документов поддерживаемых типов для проверки")
