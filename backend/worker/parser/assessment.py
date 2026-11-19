@@ -177,40 +177,38 @@ def _practice_assessment_name(text):
     return match.group(1) if match else None
 
 
+def is_assessment_heading(paragraph, doc_type):
+    title = re.sub(
+        r"^\d+(?:\.\d+)*\.?\s*",
+        "",
+        normalize(paragraph.text),
+    ).replace("\u00ad", "").replace("-", "")
+
+    if doc_type == "RPP":
+        return title.startswith("оценочные средства:") or title in {
+            "оценочные средства", "контрольноизмерительные материалы",
+        }
+
+    return (
+        title.startswith(
+            "методические материалы для проведения текущего контроля"
+        )
+        or title in {
+            "оценочные средства",
+            "контрольноизмерительные материалы",
+        }
+    )
+
+
 def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD"):
     """Извлечь формулировки КИМ и явные связи с индикаторами."""
     if doc_type not in {"RPD", "RPP"}:
         raise ValueError("Поддерживаются РПД и РПП")
 
-    def is_heading(paragraph):
-        title = re.sub(
-            r"^\d+(?:\.\d+)*\.?\s*",
-            "",
-            normalize(paragraph.text),
-        )
-
-        # Нормализация используется только для поиска заголовка.
-        title = title.replace("\u00ad", "").replace("-", "")
-
-        if doc_type == "RPP":
-            return title.startswith("оценочные средства:") or title in {
-                "оценочные средства", "контрольноизмерительные материалы",
-            }
-
-        return (
-            title.startswith(
-                "методические материалы для проведения текущего контроля"
-            )
-            or title in {
-                "оценочные средства",
-                "контрольноизмерительные материалы",
-            }
-        )
-
     blocks, issues = read_section(
         document,
         file_name,
-        is_heading,
+        lambda paragraph: is_assessment_heading(paragraph, doc_type),
         "оценочные средства",
         keep_numbered_items=True,
     )
@@ -300,12 +298,9 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
                         not label or label == str(index)
                         for index, label in enumerate(labels, 1)
                     )
-                    or (
-                        doc_type == "RPP"
-                        and numbered == [
-                            str(index) for index in range(1, len(numbered) + 1)
-                        ]
-                    )
+                    or numbered == [
+                        str(index) for index in range(1, len(numbered) + 1)
+                    ]
                 )
             ):
                 continue
@@ -574,30 +569,31 @@ def _headerless_ects_columns(rows):
     return {"criterion": 0, "grade_ects": 1, "grade_spbu": 2}
 
 
+def is_score_scale_heading(paragraph):
+    title = re.sub(
+        r"^\d+(?:\.\d+)*\.?\s*",
+        "",
+        normalize(paragraph.text),
+    ).replace("\u00ad", "").replace("-", "")
+
+    return (
+        title.startswith(
+            "методика проведения текущего контроля"
+        )
+        and "критерии оценивания" in title
+    ) or title.rstrip(".:") in {
+        "методика и критерии оценивания",
+        "шкала оценивания",
+        "шкалы оценивания",
+        "шкала и критерии оценивания",
+    }
+
+
 def extract_score_scale(document, file_name):
     """Прочитать таблицы оценок, ECTS, баллов и критериев."""
-    def is_heading(paragraph):
-        title = re.sub(
-            r"^\d+(?:\.\d+)*\.?\s*",
-            "",
-            normalize(paragraph.text),
-        ).replace("\u00ad", "").replace("-", "")
-
-        return (
-            title.startswith(
-                "методика проведения текущего контроля"
-            )
-            and "критерии оценивания" in title
-        ) or title.rstrip(".:") in {
-            "методика и критерии оценивания",
-            "шкала оценивания",
-            "шкалы оценивания",
-            "шкала и критерии оценивания",
-        }
-
     # Раздел может отсутствовать в шаблоне РПД.
     present = any(
-        is_heading(paragraph)
+        is_score_scale_heading(paragraph)
         and not paragraph.style.name.casefold().startswith((
             "toc",
             "оглавление",
@@ -612,7 +608,7 @@ def extract_score_scale(document, file_name):
     blocks, issues = read_section(
         document,
         file_name,
-        is_heading,
+        is_score_scale_heading,
         "шкалы и критерии оценивания",
         keep_numbered_items=True,
     )

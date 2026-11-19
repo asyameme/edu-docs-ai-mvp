@@ -152,6 +152,50 @@ class TestParserContract(unittest.TestCase):
         ref = next(ref for block, ref in blocks if getattr(block, "text", None) == "Второй источник")
         self.assertEqual(ref.paragraph_index, 9)
 
+    def test_read_section_skips_adjacent_copies_of_heading(self):
+        document = Document()
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "Титул"
+        heading = "3.1.4. Оценочные средства"
+        document.add_paragraph(heading, style="Heading 3")
+        document.add_paragraph()
+        document.add_paragraph("3.1.4\tОценочные средства")
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "Задания"
+        document.add_paragraph("3.1.5. Следующий раздел")
+        document.add_paragraph("Чужой текст")
+
+        blocks, issues = read_section(
+            document, "example.docx", lambda p: p.text.endswith("Оценочные средства"),
+            "оценочные средства",
+        )
+
+        self.assertEqual(issues, [])
+        (table, ref), = blocks
+        self.assertEqual(table.cell(0, 0).text, "Задания")
+        self.assertEqual(ref.table, 2)
+        self.assertEqual(ref.section, heading)
+
+    def test_read_section_reports_distinct_matching_headings_as_ambiguous(self):
+        cases = (
+            ("текст между заголовками", "3.1.4 Оценочные средства"),
+            (None, "3.1.5 Оценочные средства"),
+        )
+        for between, second_heading in cases:
+            with self.subTest(between=between, heading=second_heading):
+                document = Document()
+                document.add_paragraph("3.1.4. Оценочные средства")
+                if between is not None:
+                    document.add_paragraph(between)
+                document.add_paragraph(second_heading)
+                document.add_paragraph("Задания")
+
+                blocks, issues = read_section(
+                    document, "example.docx", lambda p: p.text.endswith("Оценочные средства"),
+                    "оценочные средства",
+                )
+
+                self.assertEqual(blocks, [])
+                self.assertEqual([issue.category for issue in issues], ["ambiguous"])
+
     def test_examples_are_accepted_by_v2_contract(self):
         examples = ROOT / "backend/worker/parser/json_examples_v2"
         for name in ("rpd", "rpp", "curriculum", "ckmv", "characteristic"):
