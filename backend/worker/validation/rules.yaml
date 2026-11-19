@@ -295,9 +295,9 @@ rules:
     phases: ["document_reconciliation", "graph_validation"]
     name: "Покрытие компетенций по полному учебному плану"
     type: "competency_coverage"
-    status: "draft"
+    status: "ready"
     inputs:
-      curriculum_is_complete: false
+      curriculum_is_complete: true
     llm:
       model_env: "VALIDATION_LLM_MODEL"
       api_key_env: "VALIDATION_LLM_API_KEY"
@@ -314,8 +314,8 @@ rules:
       содержание и оценочные средства связанных РПД/РПП. Сопоставление документов
       выполняется по программе, названию дисциплины и семестру; неоднозначные
       совпадения дают needs_review. Семантический вывод всегда требует экспертной
-      проверки. Правило остаётся выключенным до подтверждения полноты учебного
-      плана и обязательного перечня компетенций.
+      проверки. В этом профиле переданный учебный план считается полным; на
+      неполных пакетах выводы о покрытии могут быть ошибочными.
 
   - id: "R-10"
     phases: ["document_reconciliation", "graph_validation"]
