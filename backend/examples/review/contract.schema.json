@@ -1804,6 +1804,17 @@
           "title": "Semester Workload",
           "type": "array"
         },
+        "curriculum_workload_reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "document_sections": {
           "items": {
             "$ref": "#/$defs/DocumentSection"
