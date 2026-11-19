@@ -24,7 +24,7 @@ class ReviewWorkflow:
                 "review_execute_v1",
                 request,
                 result_type=str,
-                start_to_close_timeout=timedelta(seconds=480),
+                start_to_close_timeout=timedelta(seconds=900),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except ActivityError:

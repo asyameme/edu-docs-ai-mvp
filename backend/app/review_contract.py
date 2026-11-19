@@ -147,7 +147,7 @@ class Ruleset(Contract):
 class RuleCoverage(Contract):
     rule_code: str = Field(min_length=1)
     rule_revision: str = Field(min_length=1)
-    status: Literal["passed", "failed", "skipped", "not_applicable"]
+    status: Literal["passed", "failed", "needs_review", "skipped", "not_applicable"]
     reason: str | None = None
 
 

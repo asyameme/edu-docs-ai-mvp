@@ -20,6 +20,7 @@ if __package__:
         evaluate_competency_groups,
         CompetencyEvaluator,
     )
+    from .semantic_coverage import CoverageDocument, evaluate_competency_coverage
 else:  # Поддерживаем и прямой запуск validator.py.
     from semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
     from semantic_llm import SemanticEvaluator
@@ -29,6 +30,7 @@ else:  # Поддерживаем и прямой запуск validator.py.
         evaluate_competency_groups,
         CompetencyEvaluator,
     )
+    from semantic_coverage import CoverageDocument, evaluate_competency_coverage
 
 try:
     import yaml
@@ -579,22 +581,64 @@ def _indicator_hierarchy(rule: Mapping[str, Any], docs: Sequence[Document]) -> R
     return _result(rule,checks,findings)
 
 
-def _competency_coverage(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
+def _competency_coverage(
+    rule: Mapping[str, Any],
+    docs: Sequence[Document],
+    semantic_evaluator: SemanticEvaluator | None = None,
+) -> RuleResult:
     """R-09: полнота покрытия проверяется только при подтверждённом полном УП."""
     curriculum = _role_docs(docs,"curriculum")
-    if not rule.get("inputs",{}).get("curriculum_is_complete",False) or not curriculum:
-        return _result(rule,0,[])
+    if not rule.get("inputs", {}).get("curriculum_is_complete", False):
+        return _result(rule, 0, [])
     checks, findings = 0, []
-    for program_doc in [*_role_docs(docs,"characteristic"),*_role_docs(docs,"ckmv")]:
-        required = _records(program_doc,"$.competencies[*]")
+    for program_doc in [*_role_docs(docs, "characteristic"), *_role_docs(docs, "ckmv")]:
+        required = _records(program_doc, "$.competencies[*]")
         for competency in required:
             code = competency.get("code")
-            related = [c for c in curriculum if not (c.program_id and program_doc.program_id and c.program_id != program_doc.program_id)]
+            related = [
+                document
+                for document in curriculum
+                if not (
+                    document.program_id
+                    and program_doc.program_id
+                    and document.program_id != program_doc.program_id
+                )
+            ]
             if not related:
                 continue
             checks += 1
-            if not any(any(r.get("dst_entity")=="competency" and r.get("dst_key")==code and r.get("src_entity")=="curriculum_item" for r in _records(c,"$.relations[*]")) for c in related):
-                findings.append(Finding("competency_not_covered","failed",f"Компетенция {code!r} не связана с дисциплиной/практикой полного учебного плана.",{"source_refs": [_source_ref(program_doc,competency)]}))
+            has_curriculum_link = any(
+                relation.get("src_entity") == "curriculum_item"
+                and relation.get("dst_entity") == "competency"
+                and relation.get("kind") == "формирует"
+                and relation.get("dst_key") == code
+                for document in related
+                for relation in _records(document, "$.relations[*]")
+            )
+            if not has_curriculum_link:
+                findings.append(Finding(
+                    "competency_not_covered",
+                    "failed",
+                    f"Компетенция {code!r} не связана с дисциплиной/практикой полного учебного плана.",
+                    {"source_refs": [_source_ref(program_doc, competency)]},
+                ))
+    coverage_docs = [
+        CoverageDocument(
+            data=doc.data,
+            label=doc.label,
+            role=doc.role,
+            program_id=doc.program_id,
+            document_id=doc.document_id,
+        )
+        for doc in docs
+    ]
+    semantic_checks, semantic_findings = evaluate_competency_coverage(
+        coverage_docs,
+        llm_config=rule.get("llm", {}),
+        evaluator=semantic_evaluator,
+    )
+    checks += semantic_checks
+    findings.extend(Finding(**item) for item in semantic_findings)
     return _result(rule,checks,findings)
 
 
@@ -998,7 +1042,11 @@ HANDLERS = {
     "semantic_rpd_alignment": _semantic_rpd_alignment,
     "semantic_indicator_consistency": _semantic_indicator_consistency,
 }
-SEMANTIC_RULE_TYPES = {"semantic_rpd_alignment", "semantic_indicator_consistency"}
+SEMANTIC_RULE_TYPES = {
+    "semantic_rpd_alignment",
+    "semantic_indicator_consistency",
+    "competency_coverage",
+}
 
 
 def run_validation(

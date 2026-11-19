@@ -298,7 +298,24 @@ rules:
     status: "draft"
     inputs:
       curriculum_is_complete: false
-    notes: "Выключено до подтверждения полноты учебного плана и обязательного перечня компетенций: неполный образец не должен давать ложные ошибки."
+    llm:
+      model_env: "VALIDATION_LLM_MODEL"
+      api_key_env: "VALIDATION_LLM_API_KEY"
+      api_base_env: "VALIDATION_LLM_API_BASE"
+      prompt_version: "r09-v1"
+      timeout_seconds: 60
+      max_tokens: 4000
+      max_groups_per_request: 6
+      max_prompt_tokens: 12000
+      disable_thinking: true
+    notes: >-
+      Сначала проверяется явная связь компетенции с дисциплинами полного учебного
+      плана; затем модель оценивает совокупные результаты обучения, индикаторы,
+      содержание и оценочные средства связанных РПД/РПП. Сопоставление документов
+      выполняется по программе, названию дисциплины и семестру; неоднозначные
+      совпадения дают needs_review. Семантический вывод всегда требует экспертной
+      проверки. Правило остаётся выключенным до подтверждения полноты учебного
+      плана и обязательного перечня компетенций.
 
   - id: "R-10"
     phases: ["document_reconciliation", "graph_validation"]

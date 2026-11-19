@@ -142,6 +142,7 @@ def validation_implementation_revision():
         root / "app" / "review_projection.py",
         worker / "validator.py",
         worker / "semantic_competency.py",
+        worker / "semantic_coverage.py",
         worker / "semantic_llm.py",
         worker / "semantic_indicators.py",
         worker / "semantic_rpd.py",
