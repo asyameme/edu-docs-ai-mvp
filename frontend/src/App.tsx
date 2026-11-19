@@ -851,10 +851,13 @@ function App() {
     processing.checkJob.input_version_id === processing.versionId,
   );
   const prepareReport = processing.reviewDetails?.prepare_report ?? null;
+  const graphReady = processing.reviewDetails?.version.snapshot.review?.graph_ready === true;
   const currentCheckReport = checkMatchesCurrentVersion ? processing.checkJob?.report ?? null : null;
   const displayedCoverage = currentCheckReport?.coverage ?? prepareReport?.coverage ?? [];
   const displayedValidationIssueCount = currentCheckReport?.issues.length ?? prepareReport?.issues.length ?? 0;
   const parserDiagnosticCount = processing.job?.issues.length ?? 0;
+  const savedR09Status = prepareReport?.ruleset?.config?.rules?.find((rule) => rule.id === "R-09")?.status;
+  const r09ReadyForReview = savedR09Status === "ready" || savedR09Status === "ready_with_semantic_fallback";
   const savedR11Status = prepareReport?.ruleset?.config?.rules?.find((rule) => rule.id === "R-11")?.status;
   const checkIsRunning = Boolean(
     processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) &&
@@ -1162,18 +1165,26 @@ function App() {
                       </label>
                     </div>
                     {processing.reviewDetails && (
-                      <section className={`validation-stage-card${checkMatchesCurrentVersion ? " validation-stage-card--complete" : ""}`} aria-label="Статус проверки">
+                      <section className={`validation-stage-card${checkMatchesCurrentVersion || graphReady ? " validation-stage-card--complete" : ""}`} aria-label="Статус проверки">
                         <div className="validation-stage-heading">
                           <div>
-                            <h3>{checkMatchesCurrentVersion ? "Полная проверка версии завершена" : "Предварительная сверка после парсинга"}</h3>
+                            <h3>
+                              {checkMatchesCurrentVersion
+                                ? "Проверки по графу завершены"
+                                : graphReady
+                                  ? "Граф сущностей и связей построен"
+                                  : "Предварительная сверка после парсинга"}
+                            </h3>
                             <p>
                               {checkMatchesCurrentVersion
                                 ? `В полной проверке ${displayedValidationIssueCount} замечаний.`
-                                : `В предварительной сверке ${displayedValidationIssueCount} замечаний${parserDiagnosticCount ? `; диагностика парсинга — ${parserDiagnosticCount}` : ""}.`}
+                                : graphReady
+                                  ? "Решения сохранены, граф сущностей и связей собран."
+                                  : `В предварительной сверке ${displayedValidationIssueCount} замечаний${parserDiagnosticCount ? `; диагностика парсинга — ${parserDiagnosticCount}` : ""}.`}
                             </p>
                           </div>
-                          <span className={`status-pill ${checkMatchesCurrentVersion ? "status-pill--green" : "status-pill--warning"}`}>
-                            {checkMatchesCurrentVersion ? "Полная проверка" : "Предварительный этап"}
+                          <span className={`status-pill ${checkMatchesCurrentVersion || graphReady ? "status-pill--green" : "status-pill--warning"}`}>
+                            {checkMatchesCurrentVersion ? "Проверки завершены" : graphReady ? "Граф готов" : "Предварительный этап"}
                           </span>
                         </div>
                         <div className="validation-stage-metrics">
@@ -1184,13 +1195,43 @@ function App() {
                         </div>
                         <p className="validation-stage-message" role="status">
                           {checkIsRunning
-                            ? `Полная проверка версии выполняется · ${processing.checkJob?.progress ?? 0}%.`
+                            ? `Проверки по графу выполняются · ${processing.checkJob?.progress ?? 0}%.`
                             : checkMatchesCurrentVersion
-                              ? "Проверены результаты валидации выбранной версии."
-                              : unresolvedCount > 0
-                                ? `Полная проверка версии ещё не запускалась: сначала сохраните решения для ${unresolvedCount} расхождений.`
-                                : "Полная проверка версии ещё не запускалась. Её можно запустить кнопкой «Проверить версию» ниже."}
+                              ? "Результаты относятся к выбранной версии графа."
+                              : processing.reviewBusy && unresolvedCount > 0
+                                ? "Сохраняем выбор. После последнего обязательного решения система построит граф сущностей и связей."
+                                : unresolvedCount > 0
+                                  ? `Сохраните решения для ${unresolvedCount} расхождений. После этого система построит граф сущностей и связей.`
+                                  : !graphReady
+                                    ? "Граф ещё не готов. Завершите обязательные решения и проверьте ошибки построения графа."
+                                    : !r09ReadyForReview
+                                      ? "В сохранённой конфигурации этой сверки R-09 ещё не включено. Перезапустите сверку, чтобы правило попало в проверки."
+                                      : "Граф построен. Запустите проверки по нему кнопкой ниже."}
                         </p>
+                        {!isDemoMode && !checkMatchesCurrentVersion && (
+                          <button
+                            className="confirm-button validation-run-check-button"
+                            type="button"
+                            disabled={
+                              unresolvedCount > 0 || !graphReady || processing.reviewBusy ||
+                              checkIsRunning || isConfirmed || !r09ReadyForReview
+                            }
+                            onClick={() => void processing.runCheck()}
+                          >
+                            {checkIsRunning
+                              ? "Проверки выполняются…"
+                              : processing.reviewBusy
+                                ? "Обрабатываем…"
+                                : !r09ReadyForReview
+                                  ? "Перезапустите сверку для R-09"
+                                  : "Запустить проверки по графу"}
+                          </button>
+                        )}
+                        {!checkMatchesCurrentVersion && !r09ReadyForReview && (
+                          <p className="validation-stage-message validation-stage-message--warning">
+                            R-09 отсутствует или выключено в сохранённом наборе правил. Нажмите «Перезапустить сверку для этого пакета», чтобы подготовить проверку с текущей конфигурацией.
+                          </p>
+                        )}
                         {!checkMatchesCurrentVersion && savedR11Status === "draft" && (
                           <p className="validation-stage-message validation-stage-message--warning">
                             R-11 отсутствует в результатах этой сверки: в сохранённой конфигурации правило было черновым. Нажмите «Перезапустить сверку для этого пакета», чтобы получить результаты с текущей конфигурацией.
@@ -1479,23 +1520,27 @@ function App() {
                             : unresolvedCount
                               ? `Сначала примените решение для ${unresolvedCount} ${unresolvedCount === 1 ? "расхождения" : "расхождений"}.`
                               : !isDemoMode && !checkMatchesCurrentVersion
-                                ? "Сначала запустите повторную проверку выбранной версии."
+                                ? "Сначала запустите проверки по построенному графу."
                                 : !isDemoMode && checkBlockingCount > 0
                                   ? "Проверка нашла блокирующие замечания. Эту версию нельзя подтвердить."
-                                : !isDemoMode && skippedRequiredChecks.length > 0
+                                  : !isDemoMode && skippedRequiredChecks.length > 0
                                   ? "Не все обязательные проверки выполнены, версия пока не подтверждена."
-                                  : !isDemoMode && checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))
+                                    : !isDemoMode && checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))
                                     ? "Примите каждое предупреждение, чтобы подтвердить проверенную версию."
                                     : "После подтверждения эта версия станет основой для работы с программой."}
                         </span>
                       </div>
                       <button
                         className="confirm-button"
-                        disabled={unresolvedCount > 0 || isConfirmed || processing.reviewBusy || (!isDemoMode && checkMatchesCurrentVersion && (checkBlockingCount > 0 || skippedRequiredChecks.length > 0 || checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))))}
+                        disabled={
+                          unresolvedCount > 0 || isConfirmed || processing.reviewBusy ||
+                          (!isDemoMode && (!checkMatchesCurrentVersion || checkBlockingCount > 0 ||
+                            skippedRequiredChecks.length > 0 ||
+                            checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))))
+                        }
                         onClick={() => {
                           if (isDemoMode) setDemoConfirmed(true);
-                          else if (checkMatchesCurrentVersion) void processing.confirm(acceptedWarningIds);
-                          else void processing.runCheck();
+                          else void processing.confirm(acceptedWarningIds);
                         }}
                         type="button"
                       >
@@ -1505,11 +1550,11 @@ function App() {
                             ? "Обрабатываем…"
                             : !isDemoMode && checkMatchesCurrentVersion && checkBlockingCount > 0
                               ? "Есть блокирующие замечания"
-                            : !isDemoMode && checkMatchesCurrentVersion && skippedRequiredChecks.length > 0
-                              ? "Проверки не завершены"
-                            : isDemoMode || checkMatchesCurrentVersion
-                              ? "Подтвердить версию"
-                              : "Проверить версию"}
+                              : !isDemoMode && checkMatchesCurrentVersion && skippedRequiredChecks.length > 0
+                                ? "Проверки не завершены"
+                                : isDemoMode || checkMatchesCurrentVersion
+                                  ? "Подтвердить версию"
+                                  : "Сначала проверьте граф"}
                       </button>
                     </div>
                   </>

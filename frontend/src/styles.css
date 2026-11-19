@@ -4064,6 +4064,7 @@ textarea:focus-visible {
 .validation-stage-metrics span { color:#68798a; font-size:11px; line-height:1.3; }
 .validation-stage-message { margin:8px 0 0; color:#40566c; font-size:12px; line-height:1.45; }
 .validation-stage-message--warning { padding:9px 10px; border-radius:8px; background:#fff4d7; color:#735915; }
+.validation-run-check-button { margin-top:12px; }
 .validation-coverage-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; margin:12px 0 0; padding:0; list-style:none; }
 .validation-coverage-list li { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:4px 8px; padding:9px 10px; border:1px solid #e0e7ee; border-radius:8px; background:#fff; font-size:12px; }
 .validation-coverage-list li strong { color:#34495e; }
