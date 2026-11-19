@@ -26,6 +26,7 @@ def hours_config():
     config = load_rules()
     rule = next(r for r in config["rules"] if r["id"] == "R-02")
     rule["status"] = "ready"
+    rule["required_for_confirmation"] = True
     return {**config, "rules": [rule]}
 
 
@@ -178,7 +179,7 @@ def test_pregraph_analysis_runs_active_rules_without_changing_profile():
     assert {item["rule_code"] for item in result["coverage"]} == {
         rule["id"] for rule in config["rules"] if rule["status"] != "draft"
     }
-    assert len(result["coverage"]) == 5
+    assert len(result["coverage"]) == 11
     assert config == original
     assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
 
@@ -222,9 +223,9 @@ def test_graph_check_omits_drafts_and_keeps_active_rules():
     assert {item["rule_code"] for item in result["coverage"]} == {
         rule["id"] for rule in config["rules"] if rule["status"] != "draft"
     }
-    assert len(result["coverage"]) == 5
+    assert len(result["coverage"]) == 11
     assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
-    assert not any(item["rule_code"] == "R-03" for item in result["coverage"])
+    assert any(item["rule_code"] == "R-03" for item in result["coverage"])
 
 
 def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp_path):

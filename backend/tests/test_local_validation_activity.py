@@ -11,79 +11,39 @@ from app.validation_bridge import (
     validation_ruleset,
 )
 from worker.validation.validator import Document
+from document_cases import payload
 
 
 def test_activity_checks_changed_hours_and_does_not_publish_twice():
     document_id, entity_id, ref_id, job_id = [uuid4() for _ in range(4)]
+    parsed = payload("RPD")
+    parsed["disciplines"][0].update(
+        name="Алгебра",
+        credit_units=4,
+        hours_total=108,
+        source_ref={"file": "source.docx", "row": 1},
+    )
     original = {
         "document_id": str(document_id),
-        "parsed": {
-            "meta": {
-                "doc_type": "RPD",
-                "file_name": "rpd.docx",
-                "file_hash": "a" * 64,
-                "parser_config": "test",
-                "program_id": str(uuid4()),
-            },
-            "disciplines": [
-                {
-                    "name": "Алгебра",
-                    "credit_units": 4,
-                    "hours_total": 108,
-                    "hours_by_kind": {"contact": 30, "independent": 78},
-                    "semesters": [1],
-                    "source_ref": {"file": "rpd.docx", "row": 1},
-                }
-            ],
-        },
+        "parsed": parsed,
     }
-    snapshot = SnapshotV2.model_validate(
-        {
-            "document_ids": [document_id],
-            "entities": [
-                {
-                    "id": entity_id,
-                    "kind": "discipline",
-                    "attributes": {"hours_total": 144},
-                    "source_ref_ids": [ref_id],
-                }
-            ],
-            "source_refs": [
-                {
-                    "id": ref_id,
-                    "document_id": document_id,
-                    "locator": '{"file":"rpd.docx","row":1}',
-                }
-            ],
-            "source_links": [
-                {
-                    "id": uuid4(),
-                    "target_kind": "entity",
-                    "target_id": entity_id,
-                    "field_path": "/attributes/hours_total",
-                    "source_ref_id": ref_id,
-                    "observed_value": {"value": 108},
-                }
-            ],
-        }
-    )
-    config = {
-        "schema_version": 2,
-        "phases": {
-            "document_reconciliation": {"input": "parsed_documents"},
-            "graph_validation": {"input": "graph_projection"},
-        },
-        "rules": [
-            {
-                "id": "hours",
-                "name": "Часы и ЗЕТ",
-                "status": "ready",
-                "type": "credit_hours",
-                "inputs": {"hours_per_credit_unit": 36},
-                "phases": ["document_reconciliation", "graph_validation"],
-            }
-        ],
-    }
+    snapshot = SnapshotV2.model_validate({
+        "document_ids": [document_id],
+        "entities": [{"id": entity_id, "kind": "discipline",
+                      "attributes": {"hours_total": 144}, "source_ref_ids": [ref_id]}],
+        "source_refs": [{"id": ref_id, "document_id": document_id, "locator": '{"file":"source.docx","row":1}'}],
+        "source_links": [{"id": uuid4(), "target_kind": "entity", "target_id": entity_id,
+                          "field_path": "/attributes/hours_total", "source_ref_id": ref_id,
+                          "observed_value": {"value": 108}}],
+    })
+    config = {"schema_version": 2,
+              "phases": {"document_reconciliation": {"input": "parsed_documents"},
+                         "graph_validation": {"input": "graph_projection"}},
+              "rules": [{
+        "id": "hours", "name": "Часы и ЗЕТ", "status": "ready", "type": "credit_hours",
+        "inputs": {"hours_per_credit_unit": 36},
+        "phases": ["document_reconciliation", "graph_validation"],
+    }]}
     ruleset = validation_ruleset(config, [Document(original["parsed"], "rpd")])
     baseline = run_local_check([original], snapshot, job_id, config=config, ruleset=ruleset)
     assert baseline["coverage"][0]["status"] == "failed"
