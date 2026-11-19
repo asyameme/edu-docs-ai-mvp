@@ -3977,7 +3977,7 @@ textarea:focus-visible {
 }
 .choice-finding-group .choice-list {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   align-items: start;
 }
 .choice-finding-group .choice-option {
