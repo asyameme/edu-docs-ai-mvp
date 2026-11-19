@@ -7,6 +7,7 @@ import {
   type CheckJob,
   type ImportJob,
   type ImportSession,
+  type PrepareReviewRequest,
   type ProgramRead,
   type ReviewDetails,
   type ReviewJob,
@@ -45,6 +46,7 @@ export function useImportJob() {
   const [reviewBusy, setReviewBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [prepareAttempt, setPrepareAttempt] = useState(0);
+  const [rerunSameImport, setRerunSameImport] = useState(false);
 
   const updateSession = useCallback((patch: Partial<ImportSession>) => {
     const next = { ...sessionRef.current, ...patch };
@@ -212,17 +214,27 @@ export function useImportJob() {
     prepareRequestRef.current = requestKey;
     setReviewBusy(true);
     setNotice("Импорт завершён. Готовим сверку документов…");
+    const expectedVersionId = session.importVersionId ?? session.versionId;
+    if (!expectedVersionId) {
+      prepareRequestRef.current = "";
+      setReviewBusy(false);
+      setNotice("Не удалось определить версию импорта для сверки.");
+      return;
+    }
+    const request: PrepareReviewRequest = {
+      import_job_id: session.jobId,
+      expected_version_id: expectedVersionId,
+      rerun_same_import: rerunSameImport,
+    };
     void api<ReviewJob>(`/api/v1/programs/${session.programId}/reviews`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Idempotency-Key": requestKey },
-      body: JSON.stringify({
-        import_job_id: session.jobId,
-        expected_version_id: session.importVersionId ?? session.versionId,
-      }),
+      body: JSON.stringify(request),
     }).then((next) => {
       setReviewJob(next);
       updateSession({ reviewId: next.review_id || next.id, prepareKey: undefined });
       setNotice("");
+      setRerunSameImport(false);
     }).catch((error: unknown) => {
       setNotice(error instanceof Error ? error.message : "Не удалось подготовить сверку");
     }).finally(() => {
@@ -231,7 +243,7 @@ export function useImportJob() {
     });
     return () => { prepareRequestRef.current = ""; };
   }, [canPrepareReview, session.programId, session.jobId, session.versionId, session.reviewId,
-    session.prepareKey, prepareAttempt, recoveredReviewFor, updateSession]);
+    session.prepareKey, prepareAttempt, recoveredReviewFor, rerunSameImport, updateSession]);
 
   useEffect(() => {
     if (!session.programId || !session.reviewId) return;
@@ -384,6 +396,7 @@ export function useImportJob() {
       setReviewJob(null);
       setReviewDetails(null);
       setCheckJob(null);
+      setRerunSameImport(false);
 
       const data = new FormData();
       data.append("file", file);
@@ -505,7 +518,8 @@ export function useImportJob() {
 
   async function retryPrepare() {
     const current = sessionRef.current;
-    if (reviewJob && ["failed", "conflict"].includes(reviewJob.status)) {
+    setRerunSameImport(true);
+    if (current.reviewId || (reviewJob && ["failed", "conflict", "completed"].includes(reviewJob.status))) {
       try {
         const latest = await api<ProgramRead>(`/api/v1/programs/${current.programId}`);
         setProgram(latest);
@@ -523,6 +537,8 @@ export function useImportJob() {
         });
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Не удалось повторно подготовить сверку");
+        setRerunSameImport(false);
+        return;
       }
     } else if (!current.prepareKey) {
       updateSession({ prepareKey: crypto.randomUUID() });

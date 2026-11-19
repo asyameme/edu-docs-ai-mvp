@@ -246,6 +246,7 @@ class AnalysisV2(CheckResult):
 class ReviewCreate(Contract):
     import_job_id: UUID
     expected_version_id: UUID
+    rerun_same_import: bool = False
 
 
 class DecisionCreate(Contract):

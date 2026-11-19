@@ -3,7 +3,7 @@ import { ImportProgress } from "./ImportProgress";
 import { GenerationScreen } from "./GenerationScreen";
 import { groupImportIssues } from "./importIssues";
 import { useImportJob } from "./useImportJob";
-import type { ImportJob, ReviewDetails, ReviewIssue } from "./api";
+import type { ImportJob, ReviewDetails, ReviewIssue, RuleCoverage } from "./api";
 
 type ProgramDocument = {
   name: string;
@@ -51,6 +51,20 @@ type RpdAlignmentIssue = {
 };
 
 type ValidationIssue = PlainValidationIssue | RpdAlignmentIssue;
+
+function coverageStatusLabel(status: RuleCoverage["status"]): string {
+  switch (status) {
+    case "passed": return "Пройдена";
+    case "failed": return "Есть замечания";
+    case "needs_review": return "Нужна ручная проверка";
+    case "skipped": return "Пропущена";
+    case "not_applicable": return "Не применяется";
+    default: {
+      const exhaustive: never = status;
+      return exhaustive;
+    }
+  }
+}
 
 type ParsedProgram = {
   documentCount: number;
@@ -836,6 +850,16 @@ function App() {
     processing.checkJob?.status === "completed" && processing.checkJob.report &&
     processing.checkJob.input_version_id === processing.versionId,
   );
+  const prepareReport = processing.reviewDetails?.prepare_report ?? null;
+  const currentCheckReport = checkMatchesCurrentVersion ? processing.checkJob?.report ?? null : null;
+  const displayedCoverage = currentCheckReport?.coverage ?? prepareReport?.coverage ?? [];
+  const displayedValidationIssueCount = currentCheckReport?.issues.length ?? prepareReport?.issues.length ?? 0;
+  const parserDiagnosticCount = processing.job?.issues.length ?? 0;
+  const savedR11Status = prepareReport?.ruleset?.config?.rules?.find((rule) => rule.id === "R-11")?.status;
+  const checkIsRunning = Boolean(
+    processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) &&
+    processing.checkJob.input_version_id === processing.versionId,
+  );
   const skippedRequiredChecks = checkMatchesCurrentVersion
     ? processing.checkJob?.report?.ruleset.required_rules.filter((ruleCode) => {
       const status = processing.checkJob?.report?.coverage.find((item) => item.rule_code === ruleCode)?.status;
@@ -1109,6 +1133,11 @@ function App() {
                     <span className="status-pill status-pill--muted">Ожидает обработки</span>
                   )}
                 </div>
+                {processing.reviewDetails && (
+                  <button className="secondary-button" type="button" onClick={processing.retryPrepare} disabled={processing.reviewBusy}>
+                    Перезапустить сверку для этого пакета
+                  </button>
+                )}
 
                 {parsedProgram ? (
                   <>
@@ -1132,8 +1161,86 @@ function App() {
                         </select>
                       </label>
                     </div>
+                    {processing.reviewDetails && (
+                      <section className={`validation-stage-card${checkMatchesCurrentVersion ? " validation-stage-card--complete" : ""}`} aria-label="Статус проверки">
+                        <div className="validation-stage-heading">
+                          <div>
+                            <h3>{checkMatchesCurrentVersion ? "Полная проверка версии завершена" : "Предварительная сверка после парсинга"}</h3>
+                            <p>
+                              {checkMatchesCurrentVersion
+                                ? `В полной проверке ${displayedValidationIssueCount} замечаний.`
+                                : `В предварительной сверке ${displayedValidationIssueCount} замечаний${parserDiagnosticCount ? `; диагностика парсинга — ${parserDiagnosticCount}` : ""}.`}
+                            </p>
+                          </div>
+                          <span className={`status-pill ${checkMatchesCurrentVersion ? "status-pill--green" : "status-pill--warning"}`}>
+                            {checkMatchesCurrentVersion ? "Полная проверка" : "Предварительный этап"}
+                          </span>
+                        </div>
+                        <div className="validation-stage-metrics">
+                          <div><strong>{parsedProgram.documentCount}</strong><span>файлов обработано</span></div>
+                          <div><strong>{displayedValidationIssueCount}</strong><span>замечаний проверки</span></div>
+                          <div><strong>{unresolvedCount}</strong><span>решений ожидают</span></div>
+                          <div><strong>{displayedCoverage.length}</strong><span>правил в отчёте</span></div>
+                        </div>
+                        <p className="validation-stage-message" role="status">
+                          {checkIsRunning
+                            ? `Полная проверка версии выполняется · ${processing.checkJob?.progress ?? 0}%.`
+                            : checkMatchesCurrentVersion
+                              ? "Проверены результаты валидации выбранной версии."
+                              : unresolvedCount > 0
+                                ? `Полная проверка версии ещё не запускалась: сначала сохраните решения для ${unresolvedCount} расхождений.`
+                                : "Полная проверка версии ещё не запускалась. Её можно запустить кнопкой «Проверить версию» ниже."}
+                        </p>
+                        {!checkMatchesCurrentVersion && savedR11Status === "draft" && (
+                          <p className="validation-stage-message validation-stage-message--warning">
+                            R-11 отсутствует в результатах этой сверки: в сохранённой конфигурации правило было черновым. Нажмите «Перезапустить сверку для этого пакета», чтобы получить результаты с текущей конфигурацией.
+                          </p>
+                        )}
+                        {displayedCoverage.length > 0 && (
+                          <ul className="validation-coverage-list" aria-label="Результаты проверки правил">
+                            {displayedCoverage.map((item) => (
+                              <li key={item.rule_code}>
+                                <strong>{item.rule_code}</strong>
+                                <span className={`validation-coverage-status validation-coverage-status--${item.status}`}>
+                                  {coverageStatusLabel(item.status)}
+                                </span>
+                                {item.reason && <small>{item.reason}</small>}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </section>
+                    )}
                     {findingFilter === "R-08" && <p className="competency-toolbar-note">R-08 сравнивает смысл описаний индикаторов с одинаковым кодом в РПД, РПП и ЦКМВ. Если LLM недоступна, сравнение помечается как невыполненное в замечаниях ниже.</p>}
                     {findingFilter === "R-11" && <p className="competency-toolbar-note">R-11 сопоставляет каждый результат обучения в РПД с содержанием раздела 2 и оцениванием из раздела 3. Это смысловая подсказка, а не нормативный вывод: замечания нужно оценить специалисту.</p>}
+                    <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
+                      <summary>Замечания проверки · {visibleIssueCount}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
+                      <ul className="issue-list">
+                        {visibleIssues.length === 0 && <li className="competency-empty-issues">Для выбранного правила замечаний нет.</li>}
+                        {visibleIssues.map((issue) => (
+                          <li className={`issue-row${issue.kind === "rpd-alignment" ? " issue-row--rpd-alignment" : ""}`} key={issue.id}>
+                            <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
+                            <span className="issue-copy">
+                              <strong>{issue.title}</strong>
+                              {issue.kind === "rpd-alignment" ? (
+                                <span className="rpd-alignment-details">
+                                  {issue.outcomeText && <span><b>Результат обучения:</b> {issue.outcomeText}</span>}
+                                  {!issue.outcomeText && issue.outcomeId && <span><b>Результат обучения:</b> {issue.outcomeId}</span>}
+                                  {issue.reason && <span><b>Пояснение:</b> {issue.reason}</span>}
+                                  <span>{issue.source} · {issue.ruleId}</span>
+                                  <span>Смысловая подсказка: итог оценивает специалист; это не автоматическое нормативное решение.</span>
+                                </span>
+                              ) : (
+                                <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}{issue.count && issue.count > 1 ? ` · ×${issue.count}` : ""}</span>
+                              )}
+                            </span>
+                            <span className={`severity-label severity-label--${issue.severity}`}>
+                              {issue.severity === "error" ? "Ошибка" : issue.severity === "warning" ? "Предупреждение" : "Информация"}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
                     <div className="finding-list">
                       {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранным фильтрам нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Проверьте замечания R-08 ниже." : findingFilter === "R-11" ? "R-11 не предлагает готовый вариант: его замечания показаны ниже для экспертной оценки." : "Попробуйте другой фильтр."}</p>}
                       {visibleFindings.map((finding, index) => {
@@ -1142,33 +1249,38 @@ function App() {
                         const selectedChoiceId = selectedChoices[finding.id] ?? appliedChoiceId ?? "";
                         const isResolved = Boolean(appliedChoice && selectedChoiceId === appliedChoice.id);
                         const ruleGroup = findingRuleGroup(finding.ruleCode);
-                        const isCompetencyFinding = ruleGroup === "R-01" || ruleGroup === "R-07";
+                        const isChoiceFinding = ruleGroup === "R-01" || ruleGroup === "R-07" || ruleGroup === "R-08";
+                        const allowsCustomChoice = ruleGroup === "R-01" || ruleGroup === "R-07";
                         const isCustom = selectedChoiceId === "__custom__";
                         const isReject = selectedChoiceId === "__reject__";
                         const isUnsaved = Boolean(selectedChoiceId && !isResolved);
                         const customText = customValues[finding.id] ?? "";
 
                         return (
-                          <div className={`finding-group${isCompetencyFinding ? " competency-finding-group" : ""}`} key={finding.id}>
+                          <div className={`finding-group${isChoiceFinding ? " choice-finding-group" : ""}`} key={finding.id}>
                             <article className={`finding-card${isResolved ? " is-resolved" : ""}`}>
                             <div className="finding-topline">
-                              <span className="finding-label">{isCompetencyFinding ? `${ruleGroup} · ` : ""}Расхождение {index + 1} из {visibleFindings.length}</span>
+                              <span className="finding-label">{isChoiceFinding ? `${ruleGroup} · ` : ""}Расхождение {index + 1} из {visibleFindings.length}</span>
                               <span className={`finding-status${isResolved ? " finding-status--resolved" : ""}`}>
                                 {isResolved ? "Решено" : "Нужно решение"}
                               </span>
                             </div>
                             <h3>{finding.title}</h3>
-                            {!isCompetencyFinding && <p className="finding-description">{finding.description}</p>}
-                            {isCompetencyFinding && finding.choices.length > 0 && (
+                            {!isChoiceFinding && <p className="finding-description">{finding.description}</p>}
+                            {isChoiceFinding && finding.choices.length > 0 && (
                               <p className="competency-choice-prompt">
-                                {ruleGroup === "R-01" ? "Выберите, какой код оставить:" : "Выберите формулировку:"}
+                                {ruleGroup === "R-01"
+                                  ? "Выберите, какой код оставить:"
+                                  : ruleGroup === "R-08"
+                                    ? "Выберите формулировку индикатора:"
+                                    : "Выберите формулировку компетенции:"}
                               </p>
                             )}
                             {finding.choices.length === 0 && (
                               <p className="finding-help">Для этого расхождения сервер пока не подготовил варианты решения.</p>
                             )}
                           </article>
-                            {(finding.choices.length > 0 || isCompetencyFinding) && (
+                            {(finding.choices.length > 0 || allowsCustomChoice) && (
                               <fieldset className="choice-list">
                                 <legend className="visually-hidden">Выберите верное значение</legend>
                                 {finding.choices.map((choice) => (
@@ -1185,16 +1297,16 @@ function App() {
                                       />
                                       <span className="choice-content">
                                         <span className="choice-value">
-                                          {ruleGroup === "R-07" && finding.choices.length > 1
+                                          {(ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1
                                             ? <ComparisonText value={choice.value} otherValues={finding.choices.filter((item) => item.id !== choice.id).map((item) => item.value)} />
                                             : choice.value}
                                         </span>
-                                        {isCompetencyFinding && choice.documentCount > 0 && (
+                                        {isChoiceFinding && choice.documentCount > 0 && (
                                           <span className="choice-document-count">{formatCountWithWords(choice.documentCount, "документ", "документа", "документов")}</span>
                                         )}
                                       </span>
                                     </label>
-                                    {isCompetencyFinding && choice.documents.length > 0 && (
+                                    {isChoiceFinding && choice.documents.length > 0 && (
                                       <details className="choice-sources">
                                         <summary>Показать документы</summary>
                                         <ul>{choice.documents.map((document) => <li key={document}>{document}</li>)}</ul>
@@ -1202,10 +1314,10 @@ function App() {
                                     )}
                                   </div>
                                 ))}
-                                {ruleGroup === "R-07" && finding.choices.length > 1 && (
+                                {(ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1 && (
                                   <p className="competency-comparison-hint">Подсветка показывает текстовые отличия между формулировками.</p>
                                 )}
-                                {isCompetencyFinding && (
+                                {allowsCustomChoice && (
                                   <>
                                     <label className={`choice-card${isCustom ? " is-selected" : ""}`}>
                                       <input
@@ -1235,7 +1347,7 @@ function App() {
                                 )}
                               </fieldset>
                             )}
-                            {isCompetencyFinding && isCustom && (
+                            {allowsCustomChoice && isCustom && (
                               <div className="competency-custom-editor">
                                 {finding.ruleCode === "R-07" && (
                                   <>
@@ -1265,7 +1377,7 @@ function App() {
                                 />
                               </div>
                             )}
-                            {isCompetencyFinding && selectedChoiceId && !isResolved && (
+                            {isChoiceFinding && selectedChoiceId && !isResolved && (
                               <section className="competency-decision-preview" aria-label="Предпросмотр выбранного решения" aria-live="polite">
                                 <strong>Предпросмотр решения · не сохранено</strong>
                                 {isReject ? <p>Отклонить предложенное сопоставление кодов.</p>
@@ -1279,7 +1391,7 @@ function App() {
                                 <p className="competency-preview-notice">Выбор не изменяет исходные документы. Сохранение выполняется только после отдельного подтверждения и ответа сервера.</p>
                               </section>
                             )}
-                            {(finding.choices.length > 0 || isCompetencyFinding) && !isConfirmed && (
+                            {(finding.choices.length > 0 || allowsCustomChoice) && !isConfirmed && (
                               <div className="competency-action-row">
                                 <button
                                   className="secondary-button"
@@ -1315,35 +1427,6 @@ function App() {
                         );
                       })}
                     </div>
-
-                    <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
-                      <summary>Замечания проверки · {visibleIssueCount}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
-                      <ul className="issue-list">
-                        {visibleIssues.length === 0 && <li className="competency-empty-issues">Для выбранного правила замечаний нет.</li>}
-                        {visibleIssues.map((issue) => (
-                          <li className={`issue-row${issue.kind === "rpd-alignment" ? " issue-row--rpd-alignment" : ""}`} key={issue.id}>
-                            <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
-                            <span className="issue-copy">
-                              <strong>{issue.title}</strong>
-                              {issue.kind === "rpd-alignment" ? (
-                                <span className="rpd-alignment-details">
-                                  {issue.outcomeText && <span><b>Результат обучения:</b> {issue.outcomeText}</span>}
-                                  {!issue.outcomeText && issue.outcomeId && <span><b>Результат обучения:</b> {issue.outcomeId}</span>}
-                                  {issue.reason && <span><b>Пояснение:</b> {issue.reason}</span>}
-                                  <span>{issue.source} · {issue.ruleId}</span>
-                                  <span>Смысловая подсказка: итог оценивает специалист; это не автоматическое нормативное решение.</span>
-                                </span>
-                              ) : (
-                                <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}{issue.count && issue.count > 1 ? ` · ×${issue.count}` : ""}</span>
-                              )}
-                            </span>
-                            <span className={`severity-label severity-label--${issue.severity}`}>
-                              {issue.severity === "error" ? "Ошибка" : issue.severity === "warning" ? "Предупреждение" : "Информация"}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
 
                     {!isDemoMode && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
                       <div className="processing-caption" role="status">

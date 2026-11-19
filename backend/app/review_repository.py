@@ -147,18 +147,27 @@ class ReviewRepository:
                     previous_review = self.require_review(
                         cur, program_id, UUID(current_review["review_id"])
                     )
-                    if not previous_review["report"].get("result", {}).get(
-                        "graph_build_issues"
-                    ):
-                        raise DomainError(409, "Сначала завершите согласование текущего пакета")
-                    required = {
-                        item["id"]
-                        for item in previous_review["report"].get("result", {}).get("issues", [])
-                        if item.get("requires_decision")
-                    }
-                    decided = {str(item["conflict_id"]) for item in current_review["decisions"]}
-                    if not required.issubset(decided):
-                        raise DomainError(409, "Сначала завершите обязательные решения")
+                    same_import_rerun = (
+                        body.rerun_same_import
+                        and str(body.import_job_id) == str(current_review.get("import_job_id"))
+                        and str(body.import_job_id)
+                        == str(previous_review["parameters"].get("import_job_id"))
+                    )
+                    if not same_import_rerun:
+                        if not previous_review["report"].get("result", {}).get(
+                            "graph_build_issues"
+                        ):
+                            raise DomainError(409, "Сначала завершите согласование текущего пакета")
+                        required = {
+                            item["id"]
+                            for item in previous_review["report"].get("result", {}).get("issues", [])
+                            if item.get("requires_decision")
+                        }
+                        decided = {
+                            str(item["conflict_id"]) for item in current_review["decisions"]
+                        }
+                        if not required.issubset(decided):
+                            raise DomainError(409, "Сначала завершите обязательные решения")
                 source = Repository.require(
                     cur.execute(
                         """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
@@ -794,14 +803,19 @@ class ReviewRepository:
         ]
         if latest:
             # The completed graph check re-evaluates R-08 against the current version.
-            # Hide its superseded prepare-time findings so old transient LLM failures do
-            # not remain beside the fresh R-08 result in the UI.
+            # Keep unresolved prepare-time R-08 decisions: graph validation reports the
+            # semantic finding, but its contract has no document-level mutation choices.
+            decided_ids = set(choices)
             issues = [
                 item
                 for item in issues
                 if not (
                     str(item["job_id"]) == str(review["id"])
                     and str(item["rule_code"]).startswith("R-08")
+                    and (
+                        not item.get("requires_decision")
+                        or str(item["id"]) in decided_ids
+                    )
                 )
             ]
         build_errors = review["report"].get("result", {}).get("graph_build_issues", [])
