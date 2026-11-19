@@ -48,12 +48,21 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
     baseline = run_local_check([original], snapshot, job_id, config=config, ruleset=ruleset)
     assert baseline["coverage"][0]["status"] == "failed"
     assert baseline["coverage"][0]["checks"] == 1
-    job = {"id": job_id, "report": {}, "parameters": {
-        "purpose": "check", "executor": "local", "local_rules": config,
-        "implementation_revision": validation_implementation_revision(),
-        "input": {"documents": [original], "snapshot": snapshot.model_dump(mode="json"),
-                  "ruleset": ruleset},
-    }}
+    job = {
+        "id": job_id,
+        "report": {},
+        "parameters": {
+            "purpose": "check",
+            "executor": "local",
+            "local_rules": config,
+            "implementation_revision": validation_implementation_revision(),
+            "input": {
+                "documents": [original],
+                "snapshot": snapshot.model_dump(mode="json"),
+                "ruleset": ruleset,
+            },
+        },
+    }
 
     class Repository:
         def __init__(self):
@@ -77,8 +86,10 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
     assert "checks" not in activity.repo.results[0]["coverage"][0]
     assert "checks" in activity.repo.raw_results[0]["coverage"][0]
     assert activity.repo.raw_results[0]["coverage"][0]["checks"] == 1
-    assert all("evidence" not in issue and "checks" not in issue
-               for issue in activity.repo.results[0]["issues"])
+    assert all(
+        "evidence" not in issue and "checks" not in issue
+        for issue in activity.repo.results[0]["issues"]
+    )
     assert original["parsed"]["disciplines"][0]["hours_total"] == 108
     assert activity.execute({"job_id": str(job_id)}) == "completed"
     assert len(activity.repo.results) == 1
