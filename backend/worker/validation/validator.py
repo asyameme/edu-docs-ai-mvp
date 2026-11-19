@@ -128,6 +128,14 @@ def _validate_rules_config(config: Any) -> dict[str, Any]:
     for rule in config["rules"]:
         if not isinstance(rule, dict):
             raise ValidationError("Каждое правило в rules.yaml должно быть объектом")
+        if (
+            "required_for_confirmation" in rule
+            and type(rule["required_for_confirmation"]) is not bool
+        ):
+            raise ValidationError(
+                f"Rule {rule.get('id')}: "
+                "required_for_confirmation must be boolean"
+            )
         rule_status = rule.get("status")
         if not isinstance(rule_status, str) or rule_status not in RULE_STATUSES:
             raise ValidationError(
@@ -258,11 +266,18 @@ def _sum_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
             total = row.get(inputs["total_hours_field"])
             components = row.get(inputs["components_field"])
             name = row.get("name", "без названия")
-            if not isinstance(total, int) or isinstance(total, bool) or not isinstance(components, Mapping):
+            if not _valid_load(total) or not isinstance(components, Mapping) or not components:
                 findings.append(Finding("hours_data_missing", "needs_review", f"Нельзя проверить сумму часов для «{name}».", {"source_refs": [_source_ref(doc, row)]}))
                 continue
+            unknown = {key: value for key, value in components.items()
+                       if key not in inputs["include_component_keys"] and key not in inputs.get("exclude_component_keys", [])}
+            if unknown:
+                findings.append(Finding("unknown_hour_components", "needs_review",
+                    f"Для «{name}» обнаружены неизвестные компоненты нагрузки.",
+                    {"source_refs": [_source_ref(doc, row)], "unknown_components": unknown}))
+                continue
             included = {key: components[key] for key in inputs["include_component_keys"] if key in components}
-            if any(not isinstance(value, int) or isinstance(value, bool) for value in included.values()):
+            if not included or any(not _valid_load(value) for value in included.values()):
                 findings.append(Finding("invalid_hour_value", "needs_review", f"Разбивка часов для «{name}» содержит некорректное значение.", {"source_refs": [_source_ref(doc, row)]}))
                 continue
             actual = sum(included.values())
@@ -277,19 +292,7 @@ def _sum_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
 
 def _compare_fields(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     inputs = rule["inputs"]
-    left, right = inputs["left"], inputs["right"]
-    checks, findings = 0, []
-    for ldoc, rdoc in _document_pairs(docs, left["document_type"], right["document_type"]):
-        for lrow, rrow, semesters in _matched_records(ldoc, rdoc, left, right, inputs["matching"]):
-            checks += 1
-            lv, rv = lrow.get(left["value_field"]), rrow.get(right["value_field"])
-            refs = [_source_ref(ldoc, lrow), _source_ref(rdoc, rrow)]
-            name = lrow.get(left["name_field"])
-            if lv is None or rv is None:
-                findings.append(Finding("value_missing", "needs_review", f"Не хватает сопоставимого значения для «{name}».", {"source_refs": refs, "semesters": sorted(semesters)}))
-            elif lv != rv:
-                findings.append(Finding("value_mismatch", "failed", f"Для «{name}» в семестре(ах) {sorted(semesters)} значения {lv!r} и {rv!r} различаются.", {"source_refs": refs, "left_value": lv, "right_value": rv, "semesters": sorted(semesters)}))
-    return _result(rule, checks, findings)
+    return _compare_workload(rule, docs, inputs["left"]["value_field"], {"rpd"})
 
 
 def _compare_relations(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
@@ -374,6 +377,45 @@ def _references(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult
     return _result(rule, checks, findings)
 
 
+def _curriculum_relation_context(doc: Document, row: Mapping[str, Any]):
+    """Resolve a curriculum relation against its source table row, not its column."""
+    if doc.role != "curriculum" or row.get("src_entity") != "curriculum_item":
+        return None
+    ref = row.get("source_ref") or {}
+    if not isinstance(ref, Mapping):
+        return None
+    fields = ("file", "table", "row")
+    locator = tuple(ref.get(k) for k in fields)
+    if any(x is None for x in locator):
+        return None
+    hits = []
+    for item in _records(doc, "$.curriculum_items[*]"):
+        ir = item.get("source_ref") or {}
+        if (isinstance(ir, Mapping) and tuple(ir.get(k) for k in fields) == locator
+                and item.get("discipline_name") == row.get("src_key")):
+            hits.append(item)
+    if len(hits) != 1:
+        return None
+    item = hits[0]
+    semester = item.get("semester")
+    section = item["source_ref"].get("section")
+    if type(semester) is not int or semester <= 0 or not isinstance(section, str) or not section.strip():
+        return None
+    if row.get("semester") is not None and row.get("semester") != semester:
+        return None
+    return semester, section.strip().casefold()
+
+
+def _ckmv_level(row: Mapping[str, Any]):
+    ref = row.get("source_ref") or {}
+    section = ref.get("section") if isinstance(ref, Mapping) else None
+    if not isinstance(section, str):
+        return None
+    section = " ".join(section.casefold().split())
+    return {"профессиональные перекрестные компетенции базового уровня": "base",
+            "профессиональные перекрестные компетенции топ-уровня": "top"}.get(section)
+
+
 def _unique(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     checks, findings = 0, []
     for doc in docs:
@@ -382,12 +424,39 @@ def _unique(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
             groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = defaultdict(list)
             for row in _records(doc, path):
                 checks += 1
-                groups[tuple(row.get(name) for name in fields)].append(row)
+                key = tuple(row.get(name) for name in fields)
+                if any(value is None or (isinstance(value, str) and not value.strip()) for value in key):
+                    findings.append(Finding("unique_key_missing", "needs_review",
+                        f"В {path} документа {doc.label} неполный ключ.", {"source_refs": [_source_ref(doc, row)]}))
+                    continue
+                if path == "$.relations[*]":
+                    key += (row.get("semester"),)
+                groups[key].append(row)
             for key, rows in groups.items():
-                if len(rows) > 1:
-                    findings.append(Finding("duplicate_key", "failed", f"В {path} документа {doc.label} повторяется ключ {key!r}.", {
-                        "key_fields": fields, "source_refs": [_source_ref(doc, row) for row in rows],
-                    }))
+                if len(rows) < 2:
+                    continue
+                status = "failed"
+                if path == "$.relations[*]":
+                    contexts = [_curriculum_relation_context(doc, row) for row in rows]
+                    if all(ctx is not None for ctx in contexts):
+                        if len(set(contexts)) == len(contexts):
+                            continue
+                    status = "needs_review"
+                elif path == "$.competencies[*]":
+                    texts = [row.get("formulation") for row in rows]
+                    if all(isinstance(t, str) and t.strip() for t in texts):
+                        normalized = {_canonical_formulation(t) for t in texts}
+                        if len(normalized) > 1:
+                            status = "needs_review"
+                        elif doc.role == "ckmv":
+                            levels = [_ckmv_level(row) for row in rows]
+                            if len(rows) == 2 and set(levels) == {"base", "top"}:
+                                continue
+                            if None in levels:
+                                status = "needs_review"
+                findings.append(Finding("duplicate_key", status, f"В {path} документа {doc.label} повторяется ключ {key!r}.", {
+                    "key_fields": fields, "source_refs": [_source_ref(doc, row) for row in rows],
+                }))
     return _result(rule, checks, findings)
 
 
@@ -421,33 +490,90 @@ def _semantic_rpd_alignment(
 
 
 
-def _hours_against_curriculum(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-02: сравнить общую нагрузку одинаковой дисциплины в одном семестре."""
+def _valid_load(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
+                      field_name: str, roles: set[str]) -> RuleResult:
+    """Compare only unambiguous semester records of supplied disciplines."""
     checks, findings = 0, []
-    for curriculum in _role_docs(docs, "curriculum"):
-        for item in _records(curriculum, "$.curriculum_items[*]"):
-            name, semester = item.get("discipline_name"), item.get("semester")
-            for doc in docs:
-                if doc.role not in {"rpd", "rpp"} or (doc.program_id and curriculum.program_id and doc.program_id != curriculum.program_id):
+    for doc in docs:
+        if doc.role not in roles:
+            continue
+        disciplines = _records(doc, "$.disciplines[*]")
+        plans = [d for d in docs if d.role == "curriculum"
+                 and doc.program_id and d.program_id == doc.program_id]
+        if not disciplines:
+            checks += 1
+            findings.append(Finding("discipline_missing", "needs_review",
+                f"{doc.label}: не найдены дисциплины.", {"source_refs": [_source_ref(doc)]}))
+        for discipline in disciplines:
+            name = discipline.get("name")
+            semesters = _semesters(discipline, "semesters")
+            refs = [_source_ref(doc, discipline)]
+            if (not isinstance(name, str) or not name.strip() or not semesters
+                    or any(type(s) is not int or s <= 0 for s in semesters)
+                    or not plans or (doc.role == "rpd" and len(semesters) != 1)
+                    or (doc.role == "rpp" and len(disciplines) != 1)):
+                checks += 1
+                findings.append(Finding("workload_comparison_incomplete", "needs_review",
+                    f"{doc.label}: недостаточно однозначных данных для сверки «{name}».",
+                    {"source_refs": refs, "field": field_name}))
+                continue
+            for semester in sorted(semesters):
+                checks += 1
+                matches = [(plan, item) for plan in plans
+                           for item in _records(plan, "$.curriculum_items[*]")
+                           if item.get("discipline_name") == name and item.get("semester") == semester]
+                loads = ([w for w in _records(doc, "$.semester_workload[*]")
+                          if w.get("semester") == semester] if doc.role == "rpp" else [discipline])
+                evidence = {"source_refs": refs + [_source_ref(d, r) for d, r in matches]
+                            + [_source_ref(doc, w) for w in loads if w is not discipline],
+                            "semester": semester, "field": field_name}
+                if not matches:
+                    # Only propose candidates; a matching prefix does not prove identity.
+                    normalized = " ".join(name.casefold().split())
+                    candidates = []
+                    for plan in plans:
+                        for item in _records(plan, "$.curriculum_items[*]"):
+                            other = item.get("discipline_name")
+                            if not isinstance(other, str) or item.get("semester") != semester:
+                                continue
+                            full = " ".join(other.casefold().split())
+                            if full == normalized or full.startswith(normalized + " (") or full.startswith(normalized + ","):
+                                candidates.append({"name": other, "semester": semester,
+                                    "hours_total": item.get("hours_total"), "credit_units": item.get("credit_units"),
+                                    "source_ref": _source_ref(plan, item)})
+                    if candidates:
+                        findings.append(Finding("workload_match_candidate", "needs_review",
+                            f"«{name}», семестр {semester}: найдены кандидаты для ручного сопоставления.",
+                            {**evidence, "candidates": candidates, "auto_merge": False,
+                             "source_refs": evidence["source_refs"] + [c["source_ref"] for c in candidates]}))
+                        continue
+                if len(matches) != 1 or len(loads) != 1:
+                    findings.append(Finding("workload_pair_missing_or_ambiguous", "needs_review",
+                        f"«{name}», семестр {semester}: нет однозначной пары записей нагрузки.", evidence))
                     continue
-                for discipline in _records(doc, "$.disciplines[*]"):
-                    if discipline.get("name") != name or semester not in _semesters(discipline, "semesters"):
-                        continue
-                    # Общая нагрузка РПП охватывает все семестры; сравниваем только
-                    # семестровую запись, иначе получили бы ложные ошибки.
-                    workload = [w for w in _records(doc, "$.semester_workload[*]") if w.get("semester") == semester] if doc.role == "rpp" else []
-                    if doc.role == "rpp" and not workload:
-                        continue
-                    if doc.role == "rpd" and len(_semesters(discipline, "semesters")) != 1:
-                        continue
-                    actual = workload[0] if workload else discipline
-                    checks += 1
-                    lhs, rhs = item.get("hours_total"), actual.get("hours_total")
-                    if not isinstance(lhs, int) or not isinstance(rhs, int) or isinstance(lhs,bool) or isinstance(rhs,bool):
-                        findings.append(Finding("hours_data_missing", "needs_review", f"Недостаточно часов для сверки «{name}», семестр {semester}.", {"source_refs": [_source_ref(curriculum,item),_source_ref(doc,actual)]}))
-                    elif lhs != rhs:
-                        findings.append(Finding("curriculum_hours_mismatch", "failed", f"«{name}», семестр {semester}: в УП {lhs} ч, в {doc.role.upper()} {rhs} ч.", {"semester":semester,"left_value":lhs,"right_value":rhs,"source_refs": [_source_ref(curriculum,item),_source_ref(doc,actual)]}))
+                plan_doc, plan_row = matches[0]
+                load_row = loads[0]
+                evidence["source_refs"] = [
+                    _source_ref(plan_doc, plan_row),
+                    _source_ref(doc, load_row),
+                ]
+                lhs, rhs = plan_row.get(field_name), load_row.get(field_name)
+                if not _valid_load(lhs) or not _valid_load(rhs):
+                    findings.append(Finding("hours_data_missing" if field_name == "hours_total" else "value_missing",
+                        "needs_review", f"«{name}», семестр {semester}: недостаточно данных нагрузки.", evidence))
+                elif lhs != rhs:
+                    findings.append(Finding("curriculum_hours_mismatch" if field_name == "hours_total" else "value_mismatch",
+                        "failed", f"«{name}», семестр {semester}: УП {lhs}, {doc.role.upper()} {rhs} ({field_name}).",
+                        {**evidence, "left_value": lhs, "right_value": rhs}))
     return _result(rule, checks, findings)
+
+
+def _hours_against_curriculum(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
+    return _compare_workload(rule, docs, "hours_total", {"rpd", "rpp"})
 
 
 def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
@@ -479,7 +605,11 @@ def _title_credit_units(rule: Mapping[str, Any], docs: Sequence[Document]) -> Ru
         title = doc.data.get("title_credit_units")
         for discipline in _records(doc, "$.disciplines[*]"):
             table = discipline.get("credit_units")
-            if type(title) is not int or type(table) is not int:
+            if not _valid_load(title) or not _valid_load(table):
+                checks += 1
+                findings.append(Finding("title_credit_units_missing", "needs_review",
+                    f"{doc.label}: недостаточно ЗЕТ для сверки титула и нагрузки.",
+                    {"source_refs": [_source_ref(doc, discipline)]}))
                 continue
             table_ref = _source_ref(doc, discipline)
             if table_ref.get("table") is None and table_ref.get("section") == "титул":
@@ -497,33 +627,38 @@ def _title_credit_units(rule: Mapping[str, Any], docs: Sequence[Document]) -> Ru
 
 
 def _semester_workload_totals(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-03/R-05: итоги практики равны суммам по отдельным семестрам."""
     checks, findings = 0, []
-    for doc in _role_docs(docs,"rpp"):
-        workloads = _records(doc,"$.semester_workload[*]")
-        if not workloads:
+    for doc in _role_docs(docs, "rpp"):
+        workloads = _records(doc, "$.semester_workload[*]")
+        disciplines = _records(doc, "$.disciplines[*]")
+        if len(disciplines) != 1 or not workloads:
+            checks += 1
+            findings.append(Finding("ambiguous_practice_workload", "needs_review",
+                f"{doc.label}: нужна одна практика и её посеместровая нагрузка.",
+                {"source_refs": [_source_ref(doc), *[_source_ref(doc, d) for d in disciplines]]}))
             continue
-        for discipline in _records(doc,"$.disciplines[*]"):
-            if "semesters" in discipline and (
-                {row.get("semester") for row in workloads} != _semesters(discipline, "semesters")
-            ):
-                checks += 1
-                findings.append(Finding(
-                    "incomplete_semester_workload",
-                    "needs_review",
-                    f"{doc.label}: недостаточно посеместровых данных для сверки итогов.",
-                    {"source_refs": [_source_ref(doc, discipline)]},
-                ))
-                continue
-            for key in ("hours_total", "credit_units"):
-                values = [w.get(key) for w in workloads]
-                total = discipline.get(key)
-                if not isinstance(total,int) or isinstance(total,bool) or any(not isinstance(v,int) or isinstance(v,bool) for v in values):
-                    continue
-                checks += 1
-                if sum(values) != total:
-                    findings.append(Finding("semester_total_mismatch", "failed", f"{doc.label}: сумма {key} по семестрам {sum(values)}, итог {total}.", {"field":key,"calculated":sum(values),"declared":total,"source_refs": [_source_ref(doc,discipline),*[_source_ref(doc,w) for w in workloads]]}))
-    return _result(rule,checks,findings)
+        discipline = disciplines[0]
+        semesters = [w.get("semester") for w in workloads]
+        expected = _semesters(discipline, "semesters")
+        refs = [_source_ref(doc, discipline), *[_source_ref(doc, w) for w in workloads]]
+        if (not expected or any(type(s) is not int or s <= 0 for s in semesters)
+                or len(set(semesters)) != len(semesters) or set(semesters) != expected):
+            checks += 1
+            findings.append(Finding("incomplete_semester_workload", "needs_review",
+                f"{doc.label}: неполная или неоднозначная нагрузка по семестрам.", {"source_refs": refs}))
+            continue
+        for key in ("hours_total", "credit_units"):
+            checks += 1
+            values = [w.get(key) for w in workloads]
+            total = discipline.get(key)
+            if not _valid_load(total) or any(not _valid_load(v) for v in values):
+                findings.append(Finding("semester_value_missing", "needs_review",
+                    f"{doc.label}: недостаточно данных {key} для сверки итогов.", {"field": key, "source_refs": refs}))
+            elif sum(values) != total:
+                findings.append(Finding("semester_total_mismatch", "failed",
+                    f"{doc.label}: сумма {key} по семестрам {sum(values)}, итог {total}.",
+                    {"field": key, "calculated": sum(values), "declared": total, "source_refs": refs}))
+    return _result(rule, checks, findings)
 
 
 def _outcome_indicator_links(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:

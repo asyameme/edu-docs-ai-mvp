@@ -39,7 +39,13 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
     coverage = {entry["rule_code"]: entry for entry in result["coverage"]}
     all_rules = {rule["id"] for rule in config["rules"] if rule["status"] != "draft"}
     assert set(coverage) == all_rules
-    assert len(coverage) == 5
+    assert len(coverage) == 11
+    assert coverage["R-03"]["status"] == "passed"
+    assert coverage["R-03-RPP"]["status"] == "passed"
+    assert coverage["R-05"]["status"] == "passed"
+    assert coverage["R-05-title"]["status"] == "passed"
+    assert coverage["R-06"]["status"] == "passed"
+    assert coverage["R-02"]["status"] == "needs_review"
     assert all(issue["rule_code"] in all_rules for issue in result["issues"])
     assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
     assert all(entry["checks"] > 0 for entry in coverage.values() if entry["status"] == "passed")
