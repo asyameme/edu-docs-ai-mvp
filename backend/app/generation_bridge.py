@@ -13,15 +13,9 @@ class GenerationBridgeError(ValueError):
     """Сохранённую версию нельзя без потерь передать генератору."""
 
 
-def approved_changes(snapshot: SnapshotV2) -> list[FieldChange]:
-    if snapshot.review is not None and snapshot.review.confirmation is None:
-        raise GenerationBridgeError("Изменения требуют подтверждённой версии программы")
-    for decision in snapshot.review.decisions if snapshot.review else []:
-        for change in decision.changes:
-            if change.get("op") not in {"set_attribute", "set_document_value"}:
-                raise GenerationBridgeError(
-                    "Генератор DOCX пока не поддерживает структурные изменения графа"
-                )
+def snapshot_changes(snapshot: SnapshotV2) -> list[FieldChange]:
+    """Собирает отличия выбранного графа от первоначальных наблюдений."""
+
     targets = {("entity", str(item.id)): item.attributes for item in snapshot.entities} | {
         ("relation", str(item.id)): item.attributes for item in snapshot.relations
     }
@@ -64,6 +58,18 @@ def approved_changes(snapshot: SnapshotV2) -> list[FieldChange]:
             new_value=value,
         )
     return list(changes.values())
+
+
+def approved_changes(snapshot: SnapshotV2) -> list[FieldChange]:
+    if snapshot.review is not None and snapshot.review.confirmation is None:
+        raise GenerationBridgeError("Изменения требуют подтверждённой версии программы")
+    for decision in snapshot.review.decisions if snapshot.review else []:
+        for change in decision.changes:
+            if change.get("op") not in {"set_attribute", "set_document_value"}:
+                raise GenerationBridgeError(
+                    "Генератор DOCX пока не поддерживает структурные изменения графа"
+                )
+    return snapshot_changes(snapshot)
 
 
 def _source_ref(snapshot: SnapshotV2, ref_id):

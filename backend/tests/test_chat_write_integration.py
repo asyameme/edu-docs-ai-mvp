@@ -23,7 +23,16 @@ pytestmark = [
 ]
 
 
-def saved_proposal(program, session, entity, refs, old, new, unresolved_questions=None):
+def saved_proposal(
+    program,
+    session,
+    entity,
+    refs,
+    old,
+    new,
+    unresolved_questions=None,
+    field_path="hours_total",
+):
     """Сохраняет ответ агента без обращения к модели; дальше работает настоящий backend."""
     settings = get_settings()
     turn = uuid4()
@@ -34,7 +43,7 @@ def saved_proposal(program, session, entity, refs, old, new, unresolved_question
             {
                 "target_kind": "entity",
                 "target_id": entity,
-                "field_path": "hours_total",
+                "field_path": field_path,
                 "expected_old_value": old,
                 "new_value": new,
                 "reason": "Выбор пользователя",
@@ -162,6 +171,74 @@ def test_two_accepted_chat_proposals_check_confirm_and_docx(final):
             docx = next(archive.read(name) for name in archive.namelist() if name.endswith(".docx"))
         with zipfile.ZipFile(io.BytesIO(docx)) as archive:
             assert f"{final} часов" in archive.read("word/document.xml").decode()
+
+
+def test_sequential_chat_changes_to_different_fields_are_both_generated():
+    with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
+        original = make_docx(
+            "<w:p><w:r><w:t>Тестовая дисциплина: 108 часов, 3 ЗЕТ</w:t></w:r></w:p>"
+        )
+        root, _, review = prepare(http, "РПД/РПД_матанализ1.docx", content=original)
+        version, _ = choose(http, root, review)
+        session = post(http, root + "/chat/sessions", {"version_id": version["id"]}, 201)
+        program = root.split("/")[-1]
+        entity = version["snapshot"]["entities"][0]
+
+        first_turn = saved_proposal(
+            program, session["id"], entity["id"], entity["source_ref_ids"], 144, 160
+        )
+        first = post(
+            http,
+            root + f"/chat/sessions/{session['id']}/runs/{first_turn}/accept",
+            {"expected_version_id": version["id"], "signature": "Тестовый пользователь"},
+            201,
+        )
+        first_check = wait(http, root + f"/reviews/{review['id']}/checks/{first['check_job_id']}")
+        assert first_check["status"] == "completed", first_check
+        version = first["version"]
+        entity = version["snapshot"]["entities"][0]
+
+        second_turn = saved_proposal(
+            program,
+            session["id"],
+            entity["id"],
+            entity["source_ref_ids"],
+            3,
+            2,
+            field_path="credit_units",
+        )
+        second = post(
+            http,
+            root + f"/chat/sessions/{session['id']}/runs/{second_turn}/accept",
+            {"expected_version_id": version["id"], "signature": "Тестовый пользователь"},
+            201,
+        )
+        checked = wait(http, root + f"/reviews/{review['id']}/checks/{second['check_job_id']}")
+        assert checked["status"] == "completed", checked
+        version = second["version"]
+
+        confirmed = post(
+            http,
+            root + f"/reviews/{review['id']}/confirm",
+            {
+                "expected_version_id": version["id"],
+                "signature": "Тестовый пользователь",
+                "check_job_id": second["check_job_id"],
+            },
+            201,
+        )
+        generation = post(http, root + "/generation", {"version_id": confirmed["id"]}, 202)
+        generated = wait(http, root + "/generation/" + generation["id"])
+        assert generated["status"] == "completed", generated
+        package = http.get(root + "/generation/" + generation["id"] + "/download").content
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            docx = next(archive.read(name) for name in archive.namelist() if name.endswith(".docx"))
+        with zipfile.ZipFile(io.BytesIO(docx)) as archive:
+            xml = archive.read("word/document.xml").decode()
+        assert "160 часов" in xml
+        assert "2 ЗЕТ" in xml
+        assert "108 часов" not in xml
+        assert "3 ЗЕТ" not in xml
 
 
 def test_each_change_in_one_chat_proposal_gets_its_own_check():

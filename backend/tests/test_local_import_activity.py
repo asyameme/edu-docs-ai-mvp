@@ -36,12 +36,14 @@ def test_worker_activity_stores_real_parser_output_without_url(
     job = {
         "program_id": program_id,
         "attempt": 1,
-        "files": [{
-            "document_id": document_id,
-            "member_name": name,
-            "sha256": sha256(content).hexdigest(),
-            "status": "pending",
-        }],
+        "files": [
+            {
+                "document_id": document_id,
+                "member_name": name,
+                "sha256": sha256(content).hexdigest(),
+                "status": "pending",
+            }
+        ],
     }
 
     class Repo:
@@ -117,7 +119,58 @@ def test_worker_marks_unsupported_xlsx_without_url(monkeypatch):
     monkeypatch.setattr(import_activities, "Repository", Originals)
     activity = import_activities.ImportActivities(object(), SimpleNamespace(parser_url=""))
     activity.parse({"job_id": str(job_id), "document_id": str(document_id), "attempt": 1})
-    assert saved == [{
-        "code": "parser_invalid_result",
-        "message": "Документ не прочитан или ответ парсера не соответствует контракту",
-    }]
+    assert saved == [
+        {
+            "code": "parser_invalid_result",
+            "message": "Документ не прочитан или ответ парсера не соответствует контракту",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected_status"),
+    [("info", "completed"), ("warning", "partial"), ("error", "partial")],
+)
+def test_import_finish_uses_parser_issue_severity(monkeypatch, severity, expected_status):
+    job_id, program_id, document_id = uuid4(), uuid4(), uuid4()
+    job = {
+        "attempt": 1,
+        "status": "processing",
+        "program_id": program_id,
+        "files": [
+            {
+                "document_id": document_id,
+                "status": "completed",
+                "output": {
+                    "parse_issues": [
+                        {
+                            "category": "manual_review",
+                            "message": "Тестовое замечание",
+                            "severity": severity,
+                        }
+                    ]
+                },
+                "error_code": None,
+                "error_message": None,
+            }
+        ],
+    }
+    saved = []
+
+    class Repo:
+        def __init__(self, pool):
+            pass
+
+        def job(self, requested_id, include_output=False):
+            assert requested_id == job_id and include_output
+            return job
+
+        def finish(self, *args):
+            saved.append(args)
+
+    monkeypatch.setattr(import_activities, "ImportRepository", Repo)
+    activity = import_activities.ImportActivities(object(), SimpleNamespace())
+
+    activity.finish({"job_id": str(job_id), "attempt": 1})
+
+    assert saved[0][0:3] == (job_id, 1, expected_status)
