@@ -269,6 +269,10 @@ def extract_control_forms(
     return forms, issues
 
 
+def _semester_track_label(text):
+    return re.fullmatch(r"траектория\s+([1-8])\s+семестра\s+(профиль\s+.+)", text)
+
+
 def organization_variant_rows(document, file_name):
     """Связать строки раздела 2.1 с траекторией и формой обучения."""
     variants = {}
@@ -277,6 +281,8 @@ def organization_variant_rows(document, file_name):
 
     for table, table_ref in organization_tables(document, file_name):
         track, mode = None, None
+        semester_tracks = {}
+        track_periods = {}
 
         for row_number, row in enumerate(table.rows, 1):
             cells = row.cells
@@ -289,6 +295,9 @@ def organization_variant_rows(document, file_name):
                     "траектория",
                 )):
                     track, mode = text, None
+                    caption = _semester_track_label(track)
+                    if caption:
+                        semester_tracks[track] = (int(caption[1]), caption[2])
 
                 match = re.fullmatch(
                     r"(?:форма обучения\s*:\s*)?"
@@ -302,13 +311,30 @@ def organization_variant_rows(document, file_name):
 
             variant = (track, mode)
             variants[(table_ref.table, row_number)] = variant
+            period = re.fullmatch(r"семестр\s+([1-8])", normalize(cells[0].text)) if cells else None
+            if period:
+                track_periods.setdefault(track, set()).add(int(period[1]))
 
             for column, cell in enumerate(cells, 1):
                 ref = (table_ref.table, row_number, column)
                 cells_by_ref[ref] = cell._tc
-                cell_variants.setdefault(cell._tc, set()).add(
-                    variant
-                )
+        profiles = {}
+        for label, (_, profile) in semester_tracks.items():
+            profiles.setdefault(profile, []).append(label)
+        combined = {
+            label: f"траектория {profile}"
+            for profile, labels in profiles.items()
+            if len(labels) > 1
+            and len({semester_tracks[label][0] for label in labels}) == len(labels)
+            and all(track_periods.get(label) == {semester_tracks[label][0]} for label in labels)
+            for label in labels
+        }
+        for key, (label, form) in list(variants.items()):
+            if key[0] == table_ref.table and label in combined:
+                variants[key] = (combined[label], form)
+
+    for ref, cell in cells_by_ref.items():
+        cell_variants.setdefault(cell, set()).add(variants[ref[:2]])
 
     conflicts = {
         ref
@@ -353,6 +379,9 @@ def select_workload_variant(
         if workload_track is not None
         else None
     )
+    caption = _semester_track_label(wanted_track or "")
+    if caption and f"траектория {caption[2]}" in tracks:
+        wanted_track = f"траектория {caption[2]}"
     wanted_mode = (
         normalize(education_mode)
         if education_mode is not None
@@ -462,9 +491,13 @@ def build_discipline(
     title_parts,
     workload_track=None,
     education_mode=None,
+    *,
+    workload=None,
+    variants=None,
 ):
     """Собрать одну дисциплину из титула и таблиц нагрузки."""
-    values, issues = extract_workload(document, file_name)
+    values, extracted_issues = workload if workload is not None else extract_workload(document, file_name)
+    issues = list(extracted_issues)
     name = extract_discipline_name(title_parts)
 
     def problem(message, ref, category="manual_review"):
@@ -489,9 +522,8 @@ def build_discipline(
     if not name or not data:
         return None, issues
 
-    variant_rows, variant_conflicts = organization_variant_rows(
-        document,
-        file_name,
+    variant_rows, variant_conflicts = variants if variants is not None else organization_variant_rows(
+        document, file_name,
     )
 
     data, chosen_variant, variant_issues = select_workload_variant(
@@ -779,6 +811,51 @@ def build_discipline(
     )
 
     return discipline, issues
+
+
+def build_disciplines(document, file_name, title_parts, workload_track=None, education_mode=None):
+    values, issues = extract_workload(document, file_name)
+    variants, conflicts = organization_variant_rows(document, file_name)
+    groups = {}
+    for item in values:
+        if item["kind"] in {"hours", "hours_total", "credit_units"}:
+            ref = item["source_ref"]
+            variant = variants.get((ref.table, ref.row), (None, None))
+            groups.setdefault(variant, []).append(item)
+    if len(groups) <= 1 or workload_track is not None or education_mode is not None:
+        discipline, issues = build_discipline(
+            document, file_name, title_parts, workload_track, education_mode,
+            workload=(values, issues), variants=(variants, conflicts),
+        )
+        return [discipline] if discipline is not None else [], issues
+
+    disciplines = []
+    for (track, mode), records in groups.items():
+        discipline, variant_issues = build_discipline(
+            document, file_name, title_parts, track, mode,
+            workload=(records, []), variants=(variants, conflicts),
+        )
+        issues.extend(issue for issue in variant_issues if not issue.message.startswith("Выбран вариант нагрузки:"))
+        if discipline is None:
+            name = extract_discipline_name(title_parts)
+            if not name:
+                continue
+            discipline = Discipline(
+                name=name, semesters=[], credit_units=None, hours_total=None,
+                hours_by_kind={}, source_ref=records[0]["source_ref"].model_copy(update={"col": None}),
+            )
+        index = len(disciplines)
+        disciplines.append(discipline)
+        issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                f"Сохранена запись disciplines[{index}]: {track or 'траектория не указана'}, "
+                f"форма обучения: {mode or 'не указана'}. "
+                "Выбор профиля выполняется на этапе сверки; варианты нагрузки не суммируются."
+            ),
+            source_ref=discipline.source_ref,
+        ))
+    return disciplines, issues
 
 
 def align_workload_columns(header_row, data_row):
@@ -1167,6 +1244,7 @@ def extract_prerequisites(document, file_name, *, doc_type="RPD"):
         file_name,
         is_heading,
         "пререквизиты",
+        keep_numbered_items=True,
     )
 
     records = []
@@ -1418,7 +1496,7 @@ def extract_practice_workload(document, file_name):
     )
 
     if not blocks:
-        return [], issues
+        return [], issues, None
 
     records = []
     plan_ref = None
@@ -1517,12 +1595,12 @@ def extract_practice_workload(document, file_name):
             source_ref=plan_ref or blocks[0][1],
         ))
 
-    return records, issues
+    return records, issues, plan_ref
 
 
 def build_practice_discipline(document, file_name, title_parts):
     """Собрать практику и прочитанную посеместровую нагрузку."""
-    records, issues = extract_practice_workload(document, file_name)
+    records, issues, curriculum_workload_reference = extract_practice_workload(document, file_name)
 
     parts = [
         " ".join(text.split())
@@ -1557,7 +1635,7 @@ def build_practice_discipline(document, file_name, title_parts):
             message="Не удалось прочитать название практики с титула",
             source_ref=SourceRef(file=file_name, section="титул"),
         ))
-        return None, [], issues
+        return None, [], issues, curriculum_workload_reference
 
     if not records:
         cover_credits = set()
@@ -1578,7 +1656,7 @@ def build_practice_discipline(document, file_name, title_parts):
             hours_by_kind={},
             source_ref=SourceRef(file=file_name, section="титул"),
         )
-        return discipline, [], issues
+        return discipline, [], issues, curriculum_workload_reference
 
     totals = [
         item for item in records
@@ -1671,7 +1749,7 @@ def build_practice_discipline(document, file_name, title_parts):
         source_ref=total_ref,
     )
 
-    return discipline, semester_workload, issues
+    return discipline, semester_workload, issues, curriculum_workload_reference
 
 
 def extract_practice_control_forms(document, file_name):

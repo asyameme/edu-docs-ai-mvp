@@ -299,6 +299,7 @@ class RPPOutput(WorkingProgramOutput):
     meta: RPPMeta
     disciplines: list[Discipline] = Field(min_length=1)
     semester_workload: list[SemesterWorkload]
+    curriculum_workload_reference: SourceRef | None = None
     document_sections: list[DocumentSection] = Field(default_factory=list)
     practice_stages: list[PracticeStage] = Field(default_factory=list)
     competencies: list[Competency] = Field(default_factory=list)
