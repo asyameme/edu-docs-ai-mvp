@@ -158,6 +158,27 @@ def test_identical_package_members_keep_distinct_document_results():
         assert len({item["document_id"] for item in documents}) == 2
 
 
+def test_import_parses_multiple_archive_members_concurrently():
+    with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
+        reset = httpx.post("http://parser-fixture:8090/parallel-stats/reset", trust_env=False)
+        assert reset.status_code == 200
+        program = http.post("/api/v1/programs", json={"name": "Параллельный разбор"}).json()
+        path = f"/api/v1/programs/{program['id']}/imports"
+        files = {f"parallel-{index}.docx": f"parallel-{index}".encode() for index in range(4)}
+        accepted = http.post(
+            path,
+            files={"file": ("package.zip", archive(files))},
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+        assert accepted.status_code == 202, accepted.text
+        job = wait(http, path + "/" + accepted.json()["id"])
+        assert job["status"] == "completed", job
+        assert all(item["status"] == "completed" for item in job["files"])
+        stats = httpx.get("http://parser-fixture:8090/parallel-stats", trust_env=False)
+        assert stats.status_code == 200
+        assert stats.json()["max_active"] >= 3, stats.json()
+
+
 def test_sse_stream_delivers_state_and_reconnects_to_latest_result():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         program = http.post("/api/v1/programs", json={"name": "Проверка SSE"}).json()

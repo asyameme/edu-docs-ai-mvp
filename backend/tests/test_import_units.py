@@ -1,6 +1,8 @@
 """Границы пакета и сохранение наблюдений разных документов."""
 
+import hashlib
 import io
+import threading
 import zipfile
 from types import SimpleNamespace
 from uuid import uuid4
@@ -10,6 +12,7 @@ import pytest
 from app.errors import DomainError
 from app.import_archive import read_package
 from app.parser_adapter import to_snapshot
+from app.storage import OriginalStorage
 
 
 def upload(members):
@@ -35,12 +38,37 @@ def test_archive_rejects_unsafe_paths(name):
     [
         [("empty.docx", b"")],
         [("bad.txt", b"x")],
-        [("one.docx", b"same"), ("two.docx", b"same")],
     ],
 )
-def test_archive_rejects_empty_unsupported_and_duplicate_documents(members):
+def test_archive_rejects_empty_and_unsupported_documents(members):
     with pytest.raises(DomainError):
         read_package(upload(members), 1024 * 1024)
+
+
+def test_archive_preserves_same_content_under_distinct_names():
+    _, files = read_package(
+        upload([("first.docx", b"same"), ("second.docx", b"same")]), 1024 * 1024
+    )
+
+    assert [item.name for item in files] == ["first.docx", "second.docx"]
+    assert files[0].sha256 == files[1].sha256 == hashlib.sha256(b"same").hexdigest()
+
+
+def test_archive_rejects_duplicate_member_names():
+    with pytest.raises(DomainError, match="Повторяющееся имя"):
+        read_package(upload([("one.docx", b"first"), ("ONE.DOCX", b"second")]), 1024 * 1024)
+
+
+def test_storage_can_prepare_already_hashed_archive_bytes():
+    content = b"archive member"
+    digest = hashlib.sha256(content).hexdigest()
+    stored = OriginalStorage(1024).save_bytes(
+        "nested/source.docx", content, precomputed_sha256=digest
+    )
+
+    assert stored["content"] == content
+    assert stored["original_name"] == "source.docx"
+    assert stored["sha256"] == digest
 
 
 def test_package_identity_preserves_names_that_select_the_parser():
@@ -54,6 +82,23 @@ def test_package_identity_preserves_names_that_select_the_parser():
     assert first != renamed
     assert first != other_folder
     assert [f.name for f in files] == ["one.docx", "two.xlsx"]
+
+
+def test_archive_members_are_extracted_concurrently_and_keep_archive_order(monkeypatch):
+    original_read = zipfile.ZipFile.read
+    barrier = threading.Barrier(2)
+
+    def concurrent_read(archive, member, pwd=None):
+        if isinstance(member, zipfile.ZipInfo) and member.filename.endswith(".docx"):
+            barrier.wait(timeout=2)
+        return original_read(archive, member, pwd)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", concurrent_read)
+    names = ["first.docx", "second.docx", "third.docx", "fourth.docx"]
+    _, files = read_package(upload([(name, name.encode()) for name in names]), 10000)
+
+    assert [item.name for item in files] == names
+    assert [item.content for item in files] == [name.encode() for name in names]
 
 
 def test_pm_archive_preserves_matrix_without_sending_it_to_parser():
@@ -100,6 +145,11 @@ def test_archive_with_only_matrix_has_no_documents_to_parse():
             upload([("Матрица компетенций/Матрица компетенций.xlsx", b"matrix")]),
             10000,
         )
+
+
+def test_empty_archive_has_no_documents_to_parse():
+    with pytest.raises(DomainError, match="нет документов для разбора"):
+        read_package(upload([]), 10000)
 
 
 def test_archive_may_have_one_wrapper_folder():
