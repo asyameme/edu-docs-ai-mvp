@@ -58,9 +58,9 @@ class ValidationWithoutMatrixTests(unittest.TestCase):
         ck["indicators"][0]["code"]="A.1"
         self.assertEqual(run_validation([ck],rule("R-15")).results[0].status,"passed")
 
-    def test_missing_structure_and_language_fields_are_skipped(self):
-        self.assertEqual(run_validation([doc("ckmv")],rule("R-13")).results[0].status,"skipped")
-        self.assertEqual(run_validation([doc("characteristic"),doc("rpd")],rule("R-14")).results[0].status,"skipped")
+    def test_missing_structure_and_language_fields_require_review(self):
+        self.assertEqual(run_validation([doc("ckmv")],rule("R-13")).results[0].status,"needs_review")
+        self.assertEqual(run_validation([doc("characteristic"),doc("rpd")],rule("R-14")).results[0].status,"needs_review")
 
     def test_hours_sum_includes_seminars_and_lab_hours(self):
         rpd = doc("rpd", disciplines=[{
