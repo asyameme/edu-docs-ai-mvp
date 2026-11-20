@@ -59,7 +59,7 @@ class TestCurriculumParser(unittest.TestCase):
 
     def test_original_competencies_and_semesters(self):
         self.assertEqual(len(self.output.competencies), 49)
-        self.assertEqual(len(self.output.curriculum_items), 216)
+        self.assertEqual(len(self.output.curriculum_items), 226)
         self.assertEqual(
             {item.semester for item in self.output.curriculum_items},
             set(range(1, 9)),
@@ -87,13 +87,33 @@ class TestCurriculumParser(unittest.TestCase):
         self.assertIn("Профиль ТОП ИТ ПРО", rows[-1].source_ref.section)
         self.assertNotEqual(rows[-2].source_ref.row, rows[-1].source_ref.row)
 
-    def test_original_schema_limit_and_missing_codes_are_visible(self):
-        zeros = [
-            issue for issue in self.output.parse_issues
-            if issue.category == "unexpected_format" and "credit_units = '0'" in issue.message
+    def test_original_zero_credit_rows_keep_hours_sources_and_relations(self):
+        rows = [item for item in self.output.curriculum_items if item.credit_units == 0]
+        source_rows = [*range(112, 117), *range(165, 170)]
+        self.assertEqual(
+            [(item.semester, item.credit_units, item.hours_total,
+              item.source_ref.table, item.source_ref.row, item.source_ref.col) for item in rows],
+            [(semester, 0, 164, 4, row, 4)
+             for semester, numbers in ((3, range(112, 117)), (4, range(165, 170)))
+             for row in numbers],
+        )
+        self.assertTrue(all(
+            item.discipline_name.startswith("Физическая культура и спорт") for item in rows
+        ))
+        self.assertFalse(any(
+            issue.category == "unexpected_format" and "credit_units = '0'" in issue.message
+            for issue in self.output.parse_issues
+        ))
+        links = [
+            relation for relation in self.output.relations
+            if relation.source_ref.table == 4 and relation.source_ref.row in source_rows
         ]
-        self.assertEqual(len(zeros), 10)
-        self.assertTrue(all(issue.source_ref.col == 2 for issue in zeros))
+        self.assertEqual(
+            [(link.dst_key, link.source_ref.row, link.source_ref.col) for link in links],
+            [("УК-7", row, 3) for row in source_rows],
+        )
+
+    def test_original_missing_codes_and_facultative_block_are_visible(self):
         self.assertTrue(any(
             issue.category == "empty_cell" and "нет кодов компетенций" in issue.message
             for issue in self.output.parse_issues
@@ -107,7 +127,7 @@ class TestCurriculumParser(unittest.TestCase):
         output = self.output
         self.assertEqual(output.meta.doc_type, "CURRICULUM")
         self.assertEqual(output.meta.schema_version, 2)
-        self.assertEqual(output.meta.parser_config, "curriculum_docx_v3")
+        self.assertEqual(output.meta.parser_config, "curriculum_docx_v4")
         self.assertEqual(output.meta.file_hash, sha256(self.original_path.read_bytes()).hexdigest())
         self.assertEqual(CurriculumOutput.model_validate_json(output.model_dump_json()), output)
         names = {item.discipline_name for item in output.curriculum_items}
@@ -141,6 +161,45 @@ class TestCurriculumParser(unittest.TestCase):
         output = self.parse_document(document)
         item, = output.curriculum_items
         self.assertEqual((item.credit_units, item.hours_total), (3, 206))
+
+    def test_zero_credits_keep_explicit_workload(self):
+        for lecture_hours, self_study_hours, expected in ((62, 154, 216), (0, 0, 0)):
+            with self.subTest(hours_total=expected):
+                document, table, _ = curriculum_document()
+                cells = table.rows[-1].cells
+                cells[1].text = "0"
+                cells[4].text = str(lecture_hours)
+                cells[5].text = str(self_study_hours)
+                cells[6].text = str(lecture_hours)
+                output = self.parse_document(document)
+
+                self.assertFalse(output.parse_issues)
+                item, = output.curriculum_items
+                self.assertEqual((item.credit_units, item.hours_total), (0, expected))
+                self.assertEqual(
+                    (item.source_ref.table, item.source_ref.row, item.source_ref.col), (2, 3, 4),
+                )
+                self.assertEqual([relation.dst_key for relation in output.relations], ["ОПК-1"])
+                self.assertEqual(
+                    CurriculumOutput.model_validate_json(output.model_dump_json()), output,
+                )
+
+    def test_invalid_credits_are_not_replaced_with_zero(self):
+        for value in ("", "-1", "1,5", "не указано"):
+            with self.subTest(credit_units=value):
+                document, table, _ = curriculum_document()
+                table.rows[-1].cells[1].text = value
+                output = self.parse_document(document)
+
+                self.assertFalse(output.curriculum_items)
+                self.assertFalse(output.relations)
+                self.assertTrue(any(
+                    issue.category == ("empty_cell" if not value else "unexpected_format")
+                    and issue.source_ref.table == 2
+                    and issue.source_ref.row == 3
+                    and issue.source_ref.col == 2
+                    for issue in output.parse_issues
+                ))
 
     def test_unknown_competency_does_not_create_dangling_relation(self):
         document, table, _ = curriculum_document()

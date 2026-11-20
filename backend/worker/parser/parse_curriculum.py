@@ -396,7 +396,7 @@ def extract_curriculum_items(output, document):
             credit_col = columns["credits"]
             credits = _integer(
                 output, cells[credit_col].text, "credit_units",
-                row_ref.model_copy(update={"col": credit_col + 1}), minimum=1,
+                row_ref.model_copy(update={"col": credit_col + 1}), minimum=0,
             )
             hours = _hours_total(output, cells, header, row_ref)
             if credits is None or hours is None:
@@ -451,7 +451,7 @@ def parse_curriculum(file_path, *, program_id: str | None = None) -> CurriculumO
         raise ValueError("Не удалось однозначно распознать учебный план по титулу")
     output = CurriculumOutput(meta=CurriculumMeta(
         file_name=file_path.name, file_hash=sha256(raw).hexdigest(),
-        parser_config="curriculum_docx_v3", program_id=program_id,
+        parser_config="curriculum_docx_v4", program_id=program_id,
     ))
     extract_curriculum_competencies(output, document)
     extract_curriculum_items(output, document)
