@@ -116,7 +116,12 @@ def parse_rpp(file_path, *, program_id: str | None = None) -> RPPOutput:
     ):
         raise ValueError("Не удалось однозначно распознать РПП по титулу")
 
-    discipline, semester_workload, issues, curriculum_workload_reference = build_practice_discipline(
+    (
+        discipline,
+        semester_workload,
+        issues,
+        curriculum_workload_reference,
+    ) = build_practice_discipline(
         document, file_path.name, title_parts,
     )
     if discipline is None:

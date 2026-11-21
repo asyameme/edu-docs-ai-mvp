@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
     parser_url: str = ""
     analysis_url: str = ""
+    local_validation_enabled: bool = True
     analysis_original_base_url: str = "http://api:8000"
     analysis_max_request_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
     analysis_timeout_seconds: float = Field(default=300, gt=0, le=300)

@@ -10,8 +10,11 @@ def doc(kind, **fields):
 
 
 def rule(rule_id):
-    rules = load_rules()["rules"]
-    return {"rules": [copy.deepcopy(next(r for r in rules if r["id"] == rule_id))]}
+    config = load_rules()
+    selected = copy.deepcopy(next(r for r in config["rules"] if r["id"] == rule_id))
+    # Черновой обработчик включается только в изолированном тесте.
+    selected["status"] = "ready"
+    return {**config, "rules": [selected]}
 
 
 class ValidationWithoutMatrixTests(unittest.TestCase):
@@ -25,7 +28,7 @@ class ValidationWithoutMatrixTests(unittest.TestCase):
         self.assertEqual(run_validation([curriculum, rpd], rule("R-02")).results[0].status,"passed")
 
     def test_credit_hours_and_semester_totals(self):
-        practice = doc("rpp", disciplines=[{"name":"P", "hours_total": 648, "credit_units":18}],semester_workload=[{"semester":2,"hours_total":108,"credit_units":3},{"semester":3,"hours_total":540,"credit_units":15}])
+        practice = doc("rpp", disciplines=[{"name":"P", "semesters":[2,3], "hours_total": 648, "credit_units":18}],semester_workload=[{"semester":2,"hours_total":108,"credit_units":3},{"semester":3,"hours_total":540,"credit_units":15}])
         self.assertEqual(run_validation([practice],rule("R-04")).results[0].status,"passed")
         self.assertEqual(run_validation([practice],rule("R-03-RPP")).results[0].status,"passed")
         practice["semester_workload"][1]["hours_total"] = 500

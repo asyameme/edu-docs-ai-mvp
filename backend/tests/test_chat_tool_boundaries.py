@@ -14,7 +14,8 @@ from test_chat_http_contract import client_for
 import app.chat_api as api
 from app.config import Settings
 from app.domain import Entity, RelationV2, SnapshotV2
-from worker.agent.read_adapter import PostgresChatReadPort
+from app.errors import DomainError
+from worker.agent.read_adapter import PostgresChatReadPort, limit_tool_payload
 from worker.agent.read_port import ChatReadPort
 
 
@@ -22,6 +23,29 @@ def test_every_read_tool_uses_the_serialized_payload_guard():
     for name, method in ChatReadPort.__dict__.items():
         if inspect.iscoroutinefunction(method):
             assert getattr(getattr(PostgresChatReadPort, name), "__payload_limited__", False)
+
+
+def test_missing_entity_returns_correctable_tool_error_to_agent():
+    port = PostgresChatReadPort(None)
+    port.snapshot = lambda *_: SnapshotV2()
+
+    with pytest.raises(ModelRetry, match="Сущность отсутствует"):
+        asyncio.run(
+            port.read_entity(
+                program_id=uuid4(), version_id=uuid4(), entity_id=uuid4()
+            )
+        )
+
+
+def test_read_tool_does_not_hide_infrastructure_errors():
+    @limit_tool_payload
+    async def unavailable(**_kwargs):
+        raise DomainError(503, "Сервис временно недоступен")
+
+    with pytest.raises(DomainError) as error:
+        asyncio.run(unavailable())
+
+    assert error.value.status == 503
 
 
 @pytest.mark.parametrize(

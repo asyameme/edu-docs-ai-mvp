@@ -14,6 +14,7 @@ from app.activities import diagnostic_echo
 from app.chat_dispatcher import ChatActivities, dispatch_chats
 from app.chat_model import chat_agent
 from app.chat_repository import ChatRepository
+from app.chat_validation import configure_chat_validation_tools
 from app.chat_workflow import ChatWorkflow
 from app.config import get_settings
 from app.generation_activities import GenerationActivities
@@ -61,6 +62,7 @@ async def main() -> None:
     chat_activities = ChatActivities(chat_repository)
     if chat_agent:
         configure_read_port(pool)
+        configure_chat_validation_tools(pool)
     if chat_agent:
         ChatWorkflow.__pydantic_ai_agents__ = [chat_agent]
     executor = ThreadPoolExecutor(max_workers=4)

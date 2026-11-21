@@ -83,8 +83,19 @@ def test_processing_outcomes_preserve_originals_and_versions(files, expected):
             assert result.status_code == 409
         else:
             assert result.status_code == 200, result.text
-            assert result.json()["entities"]
-            assert len(result.json()["document_ids"]) == len(files)
+            assert all(
+                {"document_id", "member_name", "sha256", "parsed"} <= set(item)
+                for item in result.json()["documents"]
+            )
+            assert len(result.json()["documents"]) == sum(
+                item["status"] == "completed" for item in job["files"]
+            )
+            program = http.get(f"/api/v1/programs/{job['program_id']}").json()
+            version = http.get(
+                f"/api/v1/programs/{job['program_id']}/versions/{program['current_version_id']}"
+            ).json()
+            assert version["snapshot"]["entities"] == []
+            assert version["snapshot"]["relations"] == []
         if any(f["status"] == "failed" for f in job["files"]):
             retry = http.post(job_path + "/retry")
             assert retry.status_code == 202
@@ -120,6 +131,31 @@ def test_concurrent_duplicate_and_reused_key_are_consistent():
                 headers={"Idempotency-Key": key},
             )
             assert response.status_code == 409, response.text
+
+
+def test_identical_package_members_keep_distinct_document_results():
+    with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
+        program = http.post("/api/v1/programs", json={"name": "Одинаковые документы"}).json()
+        root = f"/api/v1/programs/{program['id']}/imports"
+        response = http.post(
+            root,
+            files={
+                "file": (
+                    "package.zip",
+                    archive({"first.docx": b"same bytes", "second.docx": b"same bytes"}),
+                )
+            },
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+        assert response.status_code == 202, response.text
+        path = root + "/" + response.json()["id"]
+        job = wait(http, path)
+        assert job["status"] == "completed"
+        result = http.get(path + "/result")
+        assert result.status_code == 200, result.text
+        documents = result.json()["documents"]
+        assert {item["member_name"] for item in documents} == {"first.docx", "second.docx"}
+        assert len({item["document_id"] for item in documents}) == 2
 
 
 def test_sse_stream_delivers_state_and_reconnects_to_latest_result():

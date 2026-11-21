@@ -44,7 +44,7 @@ async def parse(file: UploadFile, request: Request):
                 "credit_units": 3,
                 "hours_total": 108,
                 "hours_by_kind": {"лекции": 108},
-                "source_ref": {"file": file.filename, "section": "2", "row": 1},
+                "source_ref": {"file": file.filename, "section": "2", "paragraph_index": 1},
             }
         ]
     )
@@ -58,6 +58,37 @@ async def parse(file: UploadFile, request: Request):
             "program_id": "26/5003/1",
         },
         **({"disciplines": disciplines} if disciplines else {}),
+        **(
+            {
+                "competencies": [
+                    {
+                        "code": "УК-1",
+                        "formulation": "Общепрофессиональная компетенция",
+                        "source_ref": {
+                            "file": file.filename,
+                            "section": "3",
+                            "paragraph_index": 1,
+                        },
+                    }
+                ],
+                "relations": [
+                    {
+                        "src_entity": "discipline",
+                        "src_key": "Тестовая дисциплина",
+                        "dst_entity": "competency",
+                        "dst_key": "УК-404" if "unresolved" in file.filename else "УК-1",
+                        "kind": "формирует",
+                        "source_ref": {
+                            "file": file.filename,
+                            "section": "4",
+                            "paragraph_index": 1,
+                        },
+                    }
+                ],
+            }
+            if disciplines
+            else {}
+        ),
         "parse_issues": issues,
     }
 

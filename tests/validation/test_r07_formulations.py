@@ -1,7 +1,8 @@
 """R-07 regression tests: no normative baseline and no automatic resolution."""
-from worker.validation.validator import run_validation
+from worker.validation.validator import load_rules, run_validation
 
-RULE = {'rules': [{'id': 'R-07', 'name': 'Formulations', 'type': 'competency_formulations'}]}
+RULES = load_rules()
+RULE = {**RULES, 'rules': [next(r for r in RULES['rules'] if r['id'] == 'R-07')]}
 
 
 def doc(kind, name, code='УК-1', formulation='Исходная формулировка', pid='p'):

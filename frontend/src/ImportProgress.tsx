@@ -1,4 +1,5 @@
 import type { ImportJob } from "./api";
+import { groupImportIssues, importIssueSeverityLabels } from "./importIssues";
 
 const labels = {
   pending: "Ожидает обработки", processing: "Обрабатывается", completed: "Обработано",
@@ -13,6 +14,20 @@ type Props = {
 };
 
 export function ImportProgress({ programId, job, busy, onRetry }: Props) {
+  const issues = groupImportIssues(job);
+  const issueCounts = issues.reduce(
+    (counts, issue) => {
+      counts[issue.severity] += issue.count;
+      return counts;
+    },
+    { error: 0, warning: 0, info: 0 },
+  );
+  const issueSummary = [
+    issueCounts.error > 0 ? `Ошибки: ${issueCounts.error}` : "",
+    issueCounts.warning > 0 ? `Предупреждения: ${issueCounts.warning}` : "",
+    issueCounts.info > 0 ? `Информация: ${issueCounts.info}` : "",
+  ].filter(Boolean).join(" · ");
+
   return (
     <div aria-label="Состояние серверной обработки">
       <p role="status">{labels[job.status]} · Попытка {job.attempt} · {job.files.length} документов</p>
@@ -27,9 +42,21 @@ export function ImportProgress({ programId, job, busy, onRetry }: Props) {
           <span className="status-pill status-pill--muted">{labels[file.status]}</span>
         </li>
       ))}</ul>
-      {job.issues.length > 0 && <ul>{job.issues.map((issue, index) => (
-        <li key={index}>{issue.message}</li>
-      ))}</ul>}
+      {issues.length > 0 && <details className="issues-details">
+        <summary>Замечания парсера · {issueSummary}</summary>
+        <ul className="issue-list">{issues.map((issue) => (
+          <li className="issue-row" key={issue.id}>
+            <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
+            <span className="issue-copy">
+              <strong>{issue.message}{issue.count > 1 ? ` · ×${issue.count}` : ""}</strong>
+              <span>{issue.documentName ?? "Разбор ZIP-пакета"} · {issue.category}</span>
+            </span>
+            <span className={`severity-label severity-label--${issue.severity}`}>
+              {importIssueSeverityLabels[issue.severity]}
+            </span>
+          </li>
+        ))}</ul>
+      </details>}
       {["completed", "partial"].includes(job.status) && <p>
         <a href={`/api/v1/programs/${programId}/imports/${job.id}/result`} target="_blank"
           rel="noreferrer">Открыть результаты парсинга</a>

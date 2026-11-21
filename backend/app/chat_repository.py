@@ -23,11 +23,17 @@ class ChatRepository:
             if program is None:
                 raise DomainError(404, "Программа не найдена")
             version_id = version_id or program["current_version_id"]
-            if not cur.execute(
-                "SELECT 1 FROM program_versions WHERE program_id=%s AND id=%s",
+            version = cur.execute(
+                "SELECT graph_state_id,review FROM program_versions WHERE program_id=%s AND id=%s",
                 (program_id, version_id),
-            ).fetchone():
+            ).fetchone()
+            if not version:
                 raise DomainError(404, "Версия программы не найдена")
+            if (
+                version["graph_state_id"] is None
+                or (version["review"] or {}).get("graph_ready") is False
+            ):
+                raise DomainError(409, "Чат станет доступен после сборки графа")
             cur.execute(
                 "INSERT INTO chat_sessions(id,program_id,version_id) VALUES(%s,%s,%s)",
                 (session_id, program_id, version_id),
@@ -37,12 +43,18 @@ class ChatRepository:
     def session(self, program_id, session_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
-                "SELECT id,program_id,version_id,title,created_at,updated_at FROM chat_sessions "
-                "WHERE program_id=%s AND id=%s",
+                """SELECT s.id,s.program_id,s.version_id,s.title,s.created_at,s.updated_at,
+                          v.graph_state_id,v.review FROM chat_sessions s
+                   JOIN program_versions v ON v.program_id=s.program_id AND v.id=s.version_id
+                   WHERE s.program_id=%s AND s.id=%s""",
                 (program_id, session_id),
             ).fetchone()
             if row is None:
                 raise DomainError(404, "Сессия чата не найдена")
+            if row["graph_state_id"] is None or (row["review"] or {}).get("graph_ready") is False:
+                raise DomainError(409, "Чат станет доступен после сборки графа")
+            row.pop("graph_state_id")
+            row.pop("review")
             row["turns"] = cur.execute(
                 "SELECT id AS run_id,id,user_text,status,result,created_at,completed_at "
                 "FROM chat_turns "
@@ -54,8 +66,12 @@ class ChatRepository:
     def sessions(self, program_id, limit=50, offset=0):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             return cur.execute(
-                "SELECT id,program_id,version_id,title,created_at,updated_at FROM chat_sessions "
-                "WHERE program_id=%s ORDER BY updated_at DESC,id LIMIT %s OFFSET %s",
+                """SELECT s.id,s.program_id,s.version_id,s.title,s.created_at,s.updated_at
+                   FROM chat_sessions s JOIN program_versions v
+                     ON v.program_id=s.program_id AND v.id=s.version_id
+                   WHERE s.program_id=%s AND v.graph_state_id IS NOT NULL
+                     AND COALESCE(v.review->>'graph_ready','true')<>'false'
+                   ORDER BY s.updated_at DESC,s.id LIMIT %s OFFSET %s""",
                 (program_id, limit, offset),
             ).fetchall()
 
@@ -70,6 +86,17 @@ class ChatRepository:
             ).fetchone()
             if session is None:
                 raise DomainError(404, "Сессия чата не найдена")
+            ready = cur.execute(
+                """SELECT v.graph_state_id,v.review FROM chat_sessions s
+                   JOIN program_versions v ON v.program_id=s.program_id AND v.id=s.version_id
+                   WHERE s.id=%s""",
+                (session_id,),
+            ).fetchone()
+            if (
+                ready["graph_state_id"] is None
+                or (ready["review"] or {}).get("graph_ready") is False
+            ):
+                raise DomainError(409, "Чат станет доступен после сборки графа")
             existing = cur.execute(
                 "SELECT id,request_hash FROM chat_turns WHERE session_id=%s AND operation_key=%s",
                 (session_id, key),
@@ -134,13 +161,22 @@ class ChatRepository:
             ).fetchone()
             if row is None:
                 raise DomainError(404, "Ход чата не найден")
+            version = cur.execute(
+                """SELECT v.graph_state_id,v.review FROM chat_sessions s
+                   JOIN program_versions v ON v.program_id=s.program_id AND v.id=s.version_id
+                   WHERE s.id=%s""",
+                (row["session_id"],),
+            ).fetchone()
+            if (
+                version["graph_state_id"] is None
+                or (version["review"] or {}).get("graph_ready") is False
+            ):
+                raise DomainError(409, "Чат станет доступен после сборки графа")
             return row
 
     def turn_status(self, turn_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            row = cur.execute(
-                "SELECT id,status FROM chat_turns WHERE id=%s", (turn_id,)
-            ).fetchone()
+            row = cur.execute("SELECT id,status FROM chat_turns WHERE id=%s", (turn_id,)).fetchone()
             if row is None:
                 raise DomainError(404, "Ход чата не найден")
             return row

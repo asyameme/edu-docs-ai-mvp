@@ -1600,7 +1600,9 @@ def extract_practice_workload(document, file_name):
 
 def build_practice_discipline(document, file_name, title_parts):
     """Собрать практику и прочитанную посеместровую нагрузку."""
-    records, issues, curriculum_workload_reference = extract_practice_workload(document, file_name)
+    records, issues, curriculum_workload_reference = extract_practice_workload(
+        document, file_name,
+    )
 
     parts = [
         " ".join(text.split())
