@@ -4,7 +4,7 @@ from backend.worker.validation.validator import load_rules, run_validation
 def doc(role,**kw): return {'meta':{'doc_type':role,'program_id':'p'},**kw}
 def check(rule,docs,status):
  import copy
- c=copy.deepcopy(load_rules()); c['rules']=[r for r in c['rules'] if r['id']==rule]; c['rules'][0]['status']='ready'; r=run_validation(docs,c).results[0]; assert r.status==status,(rule,r); print(rule,status)
+ c=copy.deepcopy(load_rules()); c['rules']=[r for r in c['rules'] if r['id']==rule]; c['rules'][0]['status']='ready'; r=run_validation(docs,c,phase=c['rules'][0]['phases'][0]).results[0]; assert r.status==status,(rule,r); print(rule,status)
 
 class WorkloadReviewTests(unittest.TestCase):
     def test_workload_and_relation_cases(self):

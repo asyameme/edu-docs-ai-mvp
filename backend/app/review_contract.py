@@ -133,7 +133,7 @@ class Ruleset(Contract):
     id: str = Field(min_length=1)
     revision: str = Field(min_length=1)
     config: dict[str, JsonValue]
-    required_rules: list[str] = Field(min_length=1)
+    required_rules: list[str] = Field(default_factory=list)
     required_document_types: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -267,6 +267,14 @@ class DecisionCreate(Contract):
 
 class CheckCreate(Contract):
     version_id: UUID
+    rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
+
+    @field_validator("rule_codes")
+    @classmethod
+    def selected_rules_are_unique(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Ручные проверки не должны повторяться")
+        return value
 
 
 class ConfirmCreate(Contract):
@@ -357,6 +365,7 @@ class CheckRequest(Contract):
     snapshot: SnapshotV2
     ruleset: Ruleset
     documents: list[AnalysisDocument] = Field(default_factory=list)
+    rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
 
     @model_validator(mode="after")
     def documents_belong_to_program(self) -> Self:
@@ -365,4 +374,6 @@ class CheckRequest(Contract):
             raise ValueError("Документы проверки не должны повторяться")
         for document in self.documents:
             document.check_program(self.program_id)
+        if self.rule_codes is not None and len(self.rule_codes) != len(set(self.rule_codes)):
+            raise ValueError("Ручные проверки не должны повторяться")
         return self

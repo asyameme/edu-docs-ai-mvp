@@ -12,7 +12,7 @@ NEW_RULES = {
 }
 
 REQUIRED = {
-    "R-01", "R-04", "R-08-local-reference",
+    "R-01-graph", "R-04", "R-08-local-reference",
 }
 
 

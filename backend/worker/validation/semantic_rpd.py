@@ -46,7 +46,8 @@ SYSTEM_PROMPT = """Ты проверяешь внутреннюю согласо
 "course_evidence_ids":["C001"],"assessment_evidence_ids":["A001"],
 "reason":"Краткое объяснение на русском языке"}]}
 Для каждого переданного outcome верни ровно один результат. В evidence_ids используй
-только идентификаторы из входных данных; пустые списки допустимы для gap/uncertain."""
+только идентификаторы из входных данных; пустые списки допустимы для gap/uncertain.
+Поле reason заполняй одним коротким предложением не длиннее 20 слов."""
 
 
 def _source_ref(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -95,6 +96,7 @@ def evaluate_rpd_alignment(
     assessment_tools: Sequence[Mapping[str, Any]],
     relations: Sequence[Mapping[str, Any]],
     llm_config: Mapping[str, Any],
+    course_content_sections: Sequence[Mapping[str, Any]] = (),
     evaluator: SemanticEvaluator | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Check each RPD learning outcome against course and assessment evidence.
@@ -107,7 +109,25 @@ def evaluate_rpd_alignment(
         return 0, []
 
     discipline_names = [str(row.get("name", "")) for row in disciplines if row.get("name")]
-    if not course_content:
+    course_content_rows = list(course_content)
+    if not course_content_rows:
+        for section in course_content_sections:
+            section_number = str(section.get("section_number", "")).strip()
+            title = str(section.get("title", "")).casefold()
+            section_text = str(section.get("text", "")).strip()
+            if (
+                section_number.split(".", 1)[0] != "2"
+                or "содержан" not in title
+                or not section_text
+            ):
+                continue
+            row = {"topic": section_text, "activity": "Текст раздела 2"}
+            source_ref = section.get("source_ref")
+            if isinstance(source_ref, Mapping):
+                row["source_ref"] = dict(source_ref)
+            course_content_rows.append(row)
+
+    if not course_content_rows:
         return checks, [
             _finding(
                 "rpd_section_2_missing",
@@ -201,11 +221,11 @@ def evaluate_rpd_alignment(
             "topic": row.get("topic", ""),
             "activity": row.get("activity", ""),
         }
-        for index, row in enumerate(course_content, 1)
+        for index, row in enumerate(course_content_rows, 1)
     ]
     course_refs = {
         item["id"]: _source_ref(row)
-        for item, row in zip(course_items, course_content)
+        for item, row in zip(course_items, course_content_rows)
         if _source_ref(row)
     }
 
@@ -286,110 +306,146 @@ def evaluate_rpd_alignment(
     if not model_outcomes:
         return checks, findings
 
-    payload = {
-        "document": document_label,
-        "disciplines": discipline_names,
-        "learning_outcomes": model_outcomes,
-        "course_content_section_2": course_items,
-    }
-    try:
-        response = evaluate_semantic_payload(
-            payload,
-            llm_config,
-            system_prompt=SYSTEM_PROMPT,
-            evaluator=evaluator,
-        )
-    except Exception as exc:
-        error_message = str(exc) if isinstance(exc, SemanticEvaluationUnavailable) else f"ошибка {type(exc).__name__}"
-        findings.append(_finding(
-            "rpd_semantic_model_unavailable",
-            f"Невозможно выполнить семантические проверки {document_label}: "
-            f"модель недоступна или вернула ошибку ({error_message}).",
-            source_refs=[ref for outcome in model_outcomes if (ref := _source_ref(outcome_by_id[outcome["id"]]))],
-            extra={"outcome_ids": [item["id"] for item in model_outcomes]},
-        ))
-        return checks, findings
-
-    raw_results = response.get("results") if isinstance(response, Mapping) else None
-    if not isinstance(raw_results, list):
-        findings.append(_finding(
-            "rpd_semantic_response_invalid",
-            f"Семантическая проверка {document_label} вернула ответ без списка результатов.",
-            source_refs=[ref for outcome in model_outcomes if (ref := _source_ref(outcome_by_id[outcome["id"]]))],
-            extra={"outcome_ids": [item["id"] for item in model_outcomes]},
-        ))
-        return checks, findings
-
-    results_by_id: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    expected_ids = set(outcome_by_id)
-    unexpected_ids = []
-    for item in raw_results:
-        if not isinstance(item, Mapping):
-            continue
-        outcome_id = str(item.get("outcome_id", ""))
-        if outcome_id in expected_ids:
-            results_by_id[outcome_id].append(item)
-        else:
-            unexpected_ids.append(outcome_id)
-
     course_ids = {item["id"] for item in course_items}
-    for outcome_id, outcome in outcome_by_id.items():
-        items = results_by_id.get(outcome_id, [])
-        if len(items) != 1:
+    batch_size = llm_config.get("max_outcomes_per_request", 20)
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+        batch_size = 20
+
+    for batch_number, start in enumerate(range(0, len(model_outcomes), batch_size), 1):
+        batch = model_outcomes[start : start + batch_size]
+        batch_ids = [item["id"] for item in batch]
+        batch_refs = [
+            ref
+            for outcome_id in batch_ids
+            if (ref := _source_ref(outcome_by_id[outcome_id]))
+        ]
+        batch_extra = {"outcome_ids": batch_ids, "batch": batch_number}
+        payload = {
+            "document": document_label,
+            "disciplines": discipline_names,
+            "learning_outcomes": batch,
+            "course_content_section_2": course_items,
+        }
+        try:
+            response = evaluate_semantic_payload(
+                payload,
+                llm_config,
+                system_prompt=SYSTEM_PROMPT,
+                evaluator=evaluator,
+            )
+        except Exception as exc:
+            error_message = (
+                str(exc)
+                if isinstance(exc, SemanticEvaluationUnavailable)
+                else f"ошибка {type(exc).__name__}"
+            )
             findings.append(_finding(
-                "rpd_semantic_result_missing_or_duplicate",
-                f"Для результата {outcome_id} модель не вернула ровно одну оценку; нужна ручная проверка.",
-                outcome=outcome,
+                "rpd_semantic_model_unavailable",
+                f"Невозможно выполнить семантические проверки {document_label}: "
+                f"модель недоступна или вернула ошибку ({error_message}).",
+                source_refs=batch_refs,
+                extra=batch_extra,
             ))
             continue
-        item = items[0]
-        status = item.get("status")
-        reason = item.get("reason") if isinstance(item.get("reason"), str) else "Модель не дала пояснение."
-        raw_course_ids = item.get("course_evidence_ids", [])
-        raw_assessment_ids = item.get("assessment_evidence_ids", [])
-        if (
-            not isinstance(raw_course_ids, list)
-            or not isinstance(raw_assessment_ids, list)
-            or any(not isinstance(value, str) or value not in course_ids for value in raw_course_ids)
-            or any(
-                not isinstance(value, str) or value not in allowed_assessment_ids[outcome_id]
-                for value in raw_assessment_ids
-            )
-        ):
-            raw_course_ids, raw_assessment_ids = [], []
-            status = "invalid"
-        cited_course_ids = list(dict.fromkeys(raw_course_ids))
-        cited_assessment_ids = list(dict.fromkeys(raw_assessment_ids))
-        refs = [course_refs[value] for value in cited_course_ids if value in course_refs]
-        refs.extend(
-            ref
-            for evidence in assessment_by_competency.values()
-            for entry in evidence
-            if entry["id"] in cited_assessment_ids
-            for ref in entry["source_refs"]
-        )
-        extra = {
-            "classification": status,
-            "course_evidence_ids": cited_course_ids,
-            "assessment_evidence_ids": cited_assessment_ids,
-            "reason": reason[:1200],
-        }
-        if status == "supported" and cited_course_ids and cited_assessment_ids:
-            continue
-        code = "rpd_semantic_alignment_gap" if status == "gap" else "rpd_semantic_alignment_uncertain"
-        message = f"Для результата {outcome_id} нужна экспертная проверка: {reason[:800]}"
-        if status == "supported":
-            code = "rpd_semantic_evidence_missing"
-            message = f"Модель сочла результат {outcome_id} подтверждённым, но не указала доказательства из обоих разделов. Нужна экспертная проверка."
-        elif status not in {"gap", "uncertain"}:
-            code = "rpd_semantic_response_invalid"
-            message = f"Для результата {outcome_id} получена некорректная классификация; нужна экспертная проверка."
-        findings.append(_finding(code, message, outcome=outcome, source_refs=refs, extra=extra))
 
-    if unexpected_ids:
-        findings.append(_finding(
-            "rpd_semantic_unexpected_outcome_ids",
-            "Модель вернула оценки для неизвестных результатов обучения; ответ требует проверки.",
-            extra={"outcome_ids": unexpected_ids},
-        ))
+        raw_results = response.get("results") if isinstance(response, Mapping) else None
+        if not isinstance(raw_results, list):
+            findings.append(_finding(
+                "rpd_semantic_response_invalid",
+                f"Семантическая проверка {document_label} вернула ответ без списка результатов.",
+                source_refs=batch_refs,
+                extra=batch_extra,
+            ))
+            continue
+
+        results_by_id: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        expected_ids = set(batch_ids)
+        unexpected_ids = []
+        for item in raw_results:
+            if not isinstance(item, Mapping):
+                continue
+            outcome_id = str(item.get("outcome_id", ""))
+            if outcome_id in expected_ids:
+                results_by_id[outcome_id].append(item)
+            else:
+                unexpected_ids.append(outcome_id)
+
+        for outcome_id in batch_ids:
+            outcome = outcome_by_id[outcome_id]
+            items = results_by_id.get(outcome_id, [])
+            if len(items) != 1:
+                findings.append(_finding(
+                    "rpd_semantic_result_missing_or_duplicate",
+                    f"Для результата {outcome_id} модель не вернула ровно одну оценку; нужна ручная проверка.",
+                    outcome=outcome,
+                ))
+                continue
+            item = items[0]
+            status = item.get("status")
+            reason = (
+                item.get("reason")
+                if isinstance(item.get("reason"), str)
+                else "Модель не дала пояснение."
+            )
+            raw_course_ids = item.get("course_evidence_ids", [])
+            raw_assessment_ids = item.get("assessment_evidence_ids", [])
+            if (
+                not isinstance(raw_course_ids, list)
+                or not isinstance(raw_assessment_ids, list)
+                or any(
+                    not isinstance(value, str) or value not in course_ids
+                    for value in raw_course_ids
+                )
+                or any(
+                    not isinstance(value, str)
+                    or value not in allowed_assessment_ids[outcome_id]
+                    for value in raw_assessment_ids
+                )
+            ):
+                raw_course_ids, raw_assessment_ids = [], []
+                status = "invalid"
+            cited_course_ids = list(dict.fromkeys(raw_course_ids))
+            cited_assessment_ids = list(dict.fromkeys(raw_assessment_ids))
+            refs = [course_refs[value] for value in cited_course_ids if value in course_refs]
+            refs.extend(
+                ref
+                for evidence in assessment_by_competency.values()
+                for entry in evidence
+                if entry["id"] in cited_assessment_ids
+                for ref in entry["source_refs"]
+            )
+            extra = {
+                "classification": status,
+                "course_evidence_ids": cited_course_ids,
+                "assessment_evidence_ids": cited_assessment_ids,
+                "reason": reason[:1200],
+            }
+            if status == "supported" and cited_course_ids and cited_assessment_ids:
+                continue
+            code = (
+                "rpd_semantic_alignment_gap"
+                if status == "gap"
+                else "rpd_semantic_alignment_uncertain"
+            )
+            message = f"Для результата {outcome_id} нужна экспертная проверка: {reason[:800]}"
+            if status == "supported":
+                code = "rpd_semantic_evidence_missing"
+                message = (
+                    f"Модель сочла результат {outcome_id} подтверждённым, но не указала "
+                    "доказательства из обоих разделов. Нужна экспертная проверка."
+                )
+            elif status not in {"gap", "uncertain"}:
+                code = "rpd_semantic_response_invalid"
+                message = (
+                    f"Для результата {outcome_id} получена некорректная классификация; "
+                    "нужна экспертная проверка."
+                )
+            findings.append(_finding(code, message, outcome=outcome, source_refs=refs, extra=extra))
+
+        if unexpected_ids:
+            findings.append(_finding(
+                "rpd_semantic_unexpected_outcome_ids",
+                "Модель вернула оценки для неизвестных результатов обучения; ответ требует проверки.",
+                extra={"outcome_ids": unexpected_ids, "batch": batch_number},
+            ))
     return checks, findings

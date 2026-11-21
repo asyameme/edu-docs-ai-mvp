@@ -302,7 +302,7 @@ def test_real_findings_keep_distinct_sources_for_same_named_documents():
     actual = [
         issue["source_ref_ids"]
         for issue in result["issues"]
-        if issue["rule_code"] == "R-01"
+        if issue["rule_code"] == "R-01-graph"
     ]
     assert actual == [[str(ref_id)] for ref_id in ref_ids]
 
@@ -558,7 +558,8 @@ def test_llm_budget_stops_calls_at_the_global_limit(monkeypatch):
     with pytest.raises(RuntimeError, match="лимит запросов"):
         budget.evaluate(evaluate, {}, {})
     assert budget.calls == 1
-    assert seen_timeouts[0] <= validation_bridge.VALIDATION_LLM_CALL_TIMEOUT_SECONDS
+    assert validation_bridge.VALIDATION_LLM_CALL_TIMEOUT_SECONDS == 180
+    assert seen_timeouts[0] == 90
 
 
 def test_llm_budget_stops_at_the_global_deadline():
@@ -574,6 +575,33 @@ def test_llm_budget_stops_at_the_global_deadline():
     with pytest.raises(RuntimeError, match="бюджет времени"):
         budget.evaluate(evaluate, {}, {})
     assert not invoked
+
+
+def test_llm_budget_stops_repeating_calls_after_rate_limit_exhaustion(monkeypatch):
+    from worker.validation.semantic_llm import SemanticEvaluationUnavailable
+
+    monkeypatch.setattr(validation_bridge, "VALIDATION_MAX_LLM_CALLS", 10)
+    monkeypatch.setattr(validation_bridge, "_rate_limit_retry_delay", lambda *_args: 0)
+    monkeypatch.setattr(validation_bridge, "_defer_llm_requests", lambda *_args: None)
+    monkeypatch.setattr(validation_bridge.time, "sleep", lambda _seconds: None)
+    budget = _ValidationBudget()
+    calls = 0
+
+    class TooManyRequests(Exception):
+        status_code = 429
+
+    def rate_limited(_payload, _config):
+        nonlocal calls
+        calls += 1
+        raise TooManyRequests()
+
+    with pytest.raises(TooManyRequests):
+        budget.evaluate(rate_limited, {}, {"rate_limit_retries": 2})
+    assert calls == 3
+
+    with pytest.raises(SemanticEvaluationUnavailable, match="HTTP 429"):
+        budget.evaluate(rate_limited, {}, {"rate_limit_retries": 2})
+    assert calls == 3
 
 
 def test_llm_budget_preserves_semantic_prompt_and_caps_call_timeout(monkeypatch):
@@ -594,8 +622,15 @@ def test_llm_budget_preserves_semantic_prompt_and_caps_call_timeout(monkeypatch)
     assert seen["timeout"] <= validation_bridge.VALIDATION_LLM_CALL_TIMEOUT_SECONDS
 
 
-def test_exhausted_llm_budget_returns_manual_review_instead_of_a_pass(monkeypatch):
+def test_r07_keeps_manual_choice_without_using_llm_budget(monkeypatch):
     monkeypatch.setattr(validation_bridge, "VALIDATION_MAX_LLM_CALLS", 0)
+
+    def unexpected_llm_call(*args, **kwargs):
+        raise AssertionError("R-07 must not call an LLM")
+
+    monkeypatch.setattr(
+        validation_bridge._ValidationBudget, "semantic", unexpected_llm_call
+    )
     document_ids, source_refs = [uuid4(), uuid4()], [uuid4(), uuid4()]
     documents = [
         {
@@ -647,8 +682,9 @@ def test_exhausted_llm_budget_returns_manual_review_instead_of_a_pass(monkeypatc
     r07_issue = next(item for item in result["issues"] if item["rule_code"] == "R-07")
     assert r07_coverage["status"] == "needs_review"
     assert r07_issue["status"] == "needs_review"
-    assert any("лимит запросов" in item.get("reason", "")
-               for item in r07_issue["evidence"]["comparisons"])
+    assert r07_issue["evidence"]["requires_user_confirmation"] is True
+    assert len(r07_issue["evidence"]["variants"]) == 2
+    assert "comparisons" not in r07_issue["evidence"]
     assert len(r07_issue["source_ref_ids"]) == 2
 
 
@@ -861,11 +897,10 @@ def test_recheck_keeps_supported_document_choice_for_other_source_fields():
     assert projected[0]["parsed"]["competencies"][0]["formulation"] == "Выбранная"
 
 
-@pytest.mark.parametrize("module_name", ["semantic_competency", "semantic_llm"])
-def test_model_requests_disable_hidden_retries(monkeypatch, module_name):
+def test_semantic_model_requests_disable_hidden_retries(monkeypatch):
     import importlib
     import sys
-    from types import SimpleNamespace
+    from types import ModuleType, SimpleNamespace
 
     seen = {}
 
@@ -875,14 +910,30 @@ def test_model_requests_disable_hidden_retries(monkeypatch, module_name):
             message=SimpleNamespace(content='{"status":"equivalent","reason":"совпадает"}')
         )])
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    fake_litellm = ModuleType("litellm")
+    fake_litellm.completion = completion
+    fake_litellm.__path__ = []
+    fake_exceptions = ModuleType("litellm.exceptions")
+    fake_exceptions.RateLimitError = type("RateLimitError", (Exception,), {})
+    fake_litellm.exceptions = fake_exceptions
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+    monkeypatch.setitem(sys.modules, "litellm.exceptions", fake_exceptions)
     monkeypatch.setitem(sys.modules, "dotenv", SimpleNamespace(load_dotenv=lambda *a, **kw: None))
     monkeypatch.setenv("VALIDATION_LLM_MODEL", "test-model")
     monkeypatch.setenv("VALIDATION_LLM_API_KEY", "test-key")
-    module = importlib.import_module(f"worker.validation.{module_name}")
-    if module_name == "semantic_competency":
-        module._model_evaluator({}, {"timeout_seconds": 2})
-    else:
-        module.evaluate_semantic_payload({}, {"timeout_seconds": 2}, system_prompt="Проверка")
+    module = importlib.import_module("worker.validation.semantic_llm")
+    module.evaluate_semantic_payload(
+        {},
+        {
+            "timeout_seconds": 2,
+            "max_completion_tokens": 8000,
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "low",
+        },
+        system_prompt="Проверка",
+    )
     assert seen["timeout"] == 2
     assert seen.get("num_retries") == 0
+    assert seen["max_completion_tokens"] == 8000
+    assert seen["response_format"] == {"type": "json_object"}
+    assert seen["reasoning_effort"] == "low"

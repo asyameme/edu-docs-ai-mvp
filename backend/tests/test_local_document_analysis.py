@@ -126,6 +126,77 @@ def test_r01_candidate_has_explicit_choices_with_real_rule_engine():
     assert [item["parsed"]["competencies"][0]["code"] for item in documents] == ["УК-1", "УК-2"]
 
 
+def test_r01_transitive_code_candidates_form_one_decision_group():
+    records = [
+        ("УК-1", "проектирует программное обеспечение"),
+        ("УК-2", "проектирует программное обеспечение для задач"),
+        ("УК-3", "проектирует программное обеспечение для прикладных задач"),
+    ]
+    documents = []
+    for index, (code, formulation) in enumerate(records):
+        name = f"ckmv-{index}.docx"
+        parsed = payload("CKMV")
+        parsed["meta"].update(file_name=name, program_id="P")
+        parsed["competencies"] = [{
+            "code": code,
+            "formulation": formulation,
+            "source_ref": {"file": name, "row": 1},
+        }]
+        parsed["indicators"] = [{
+            "code": f"{code}.1",
+            "text": "Проверяемый результат",
+            "competency_code": code,
+            "source_ref": {"file": name, "row": 2},
+        }]
+        parsed["learning_outcomes"] = [{
+            "local_id": "LO-1",
+            "text": "Результат обучения",
+            "source_ref": {"file": name, "row": 3},
+        }]
+        parsed["indicator_outcome_links"] = [{
+            "indicator_code": f"{code}.1",
+            "learning_outcome_id": "LO-1",
+            "source_ref": {"file": name, "row": 4},
+        }]
+        parsed["role_competency_links"][0]["competency_code"] = code
+        parsed["relations"] = [{
+            "src_entity": "curriculum_item",
+            "src_key": "Дисциплина",
+            "dst_entity": "competency",
+            "dst_key": code,
+            "kind": "формирует",
+            "source_ref": {"file": name, "row": 2},
+        }]
+        documents.append({"document_id": str(uuid4()), "parsed": parsed})
+
+    config = load_rules()
+    rule = next(item for item in config["rules"] if item["id"] == "R-01")
+    rule["status"] = "ready"
+    rule["match_threshold"] = 0.83
+    config["rules"] = [rule]
+    result = analyze_documents(documents, uuid4(), config=config)
+
+    code_issues = [
+        item for item in result["issues"]
+        if item["type"] == "competency_code_match_candidate"
+    ]
+    assert len(code_issues) == 1
+    issue = code_issues[0]
+    assert issue["evidence"]["codes"] == ["УК-1", "УК-2", "УК-3"]
+    assert len(issue["variants"]) == 4  # code choices plus keeping the group separate
+    selected = next(
+        item for item in issue["variants"]
+        if item["label"] == "Выбрать значение из документов: УК-1"
+    )
+    resolved = apply_document_mutations(
+        {item["document_id"]: item["parsed"] for item in documents},
+        selected["changes"],
+    )
+    assert [item["competencies"][0]["code"] for item in resolved.values()] == [
+        "УК-1", "УК-1", "УК-1",
+    ]
+
+
 def test_ambiguous_locator_keeps_finding_without_fabricating_choices():
     documents = package()
     documents[0]["parsed"]["disciplines"].append(
@@ -177,11 +248,12 @@ def test_pregraph_analysis_runs_active_rules_without_changing_profile():
     original = deepcopy(config)
     result = analyze_documents(documents, uuid4(), config=config)
     assert {item["rule_code"] for item in result["coverage"]} == {
-        rule["id"] for rule in config["rules"] if rule["status"] != "draft"
+        rule["id"] for rule in config["rules"]
+        if rule["status"] != "draft" and "document_reconciliation" in rule["phases"]
     }
-    assert len(result["coverage"]) == 11
+    assert len(result["coverage"]) == 3
     assert config == original
-    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+    assert result["ruleset"]["required_rules"] == []
 
 
 @pytest.mark.parametrize("shared_locator", [False, True])
@@ -221,10 +293,15 @@ def test_graph_check_omits_drafts_and_keeps_active_rules():
     result = run_local_check(documents, SnapshotV2(), uuid4(), config=config)
 
     assert {item["rule_code"] for item in result["coverage"]} == {
-        rule["id"] for rule in config["rules"] if rule["status"] != "draft"
+        rule["id"] for rule in config["rules"]
+        if rule["status"] != "draft"
+        and "graph_validation" in rule["phases"]
+        and rule.get("run_mode", "automatic") == "automatic"
     }
-    assert len(result["coverage"]) == 11
-    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+    assert len(result["coverage"]) == 9
+    assert result["ruleset"]["required_rules"] == [
+        "R-01-graph", "R-08-local-reference", "R-04",
+    ]
     assert any(item["rule_code"] == "R-03" for item in result["coverage"])
 
 

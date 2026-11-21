@@ -4,6 +4,9 @@ from copy import deepcopy
 
 from app.confirmation_policy import issue_severity
 from app.review_contract import ReviewIssue
+from worker.validation.text_normalization import (
+    normalize_variant_formulation_text,
+)
 
 _ISSUE_FIELDS = {
     "id",
@@ -47,8 +50,47 @@ def _rpd_alignment_summary(issue):
     }
 
 
-def _project_issue(issue):
+def _variant_text_key(variant):
+    if not isinstance(variant, dict):
+        return None
+    changes = variant.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return None
+    values = []
+    for change in changes:
+        if not isinstance(change, dict) or change.get("op") != "set_document_value":
+            return None
+        field = str(change.get("field_path", "")).rsplit("/", 1)[-1]
+        value = change.get("value")
+        if field not in {"formulation", "text"} or not isinstance(value, str):
+            return None
+        values.append((field, normalize_variant_formulation_text(value)))
+    return values[0] if all(value == values[0] for value in values) else None
+
+
+def _distinct_text_variants(issue, selected_variant_id=None):
+    variants = issue.get("variants")
+    if not isinstance(variants, list):
+        return variants
+    result = []
+    indexes = {}
+    for variant in variants:
+        key = _variant_text_key(variant)
+        if key is None:
+            result.append(variant)
+            continue
+        if key not in indexes:
+            indexes[key] = len(result)
+            result.append(variant)
+        elif variant.get("id") == selected_variant_id:
+            result[indexes[key]] = variant
+    return result
+
+
+def _project_issue(issue, selected_variant_id=None):
     public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
+    if "variants" in issue:
+        public_issue["variants"] = _distinct_text_variants(issue, selected_variant_id)
     public_issue["rpd_alignment"] = _rpd_alignment_summary(issue)
     public_issue["severity"] = issue_severity(issue)
     return public_issue
@@ -86,6 +128,8 @@ def project_prepare_report(result):
     }
 
 
-def project_legacy_review_issue(issue):
+def project_legacy_review_issue(issue, selected_variant_id=None):
     """Возвращает сохранённое замечание в формате, совместимом с контрактом main."""
-    return ReviewIssue.model_validate(_project_issue(issue)).model_dump(mode="json")
+    return ReviewIssue.model_validate(
+        _project_issue(issue, selected_variant_id)
+    ).model_dump(mode="json")

@@ -7,7 +7,7 @@ def check(rule_id, documents):
     rule["status"] = "ready"
     config["rules"] = [rule]
     return run_validation(
-        documents, config, phase="document_reconciliation"
+        documents, config, phase=rule["phases"][0]
     ).results[0]
 
 
