@@ -7,8 +7,8 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-from backend.contracts.document_v2.models import RPDOutput
-from backend.worker.parser.assessment import extract_score_scale
+from backend.contracts.document_v2.models import Indicator, RPDOutput, SourceRef
+from backend.worker.parser.assessment import extract_assessment_tools, extract_score_scale
 from backend.worker.parser.content import extract_course_content
 from backend.worker.parser.discipline import extract_workload
 from backend.worker.parser.parse_rpd import parse_rpd
@@ -318,6 +318,65 @@ class TestRpdParser(unittest.TestCase):
                     self.assertIn(
                         relation.dst_key, keys[relation.dst_entity]
                     )
+
+
+class TestAssessmentNumberingRows(unittest.TestCase):
+    def extract(self, rows, doc_type):
+        document = Document()
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "Титульная таблица"
+        document.add_paragraph("3.1.4. Оценочные средства")
+        table = document.add_table(rows=len(rows) + 1, cols=3)
+        for cell, text in zip(table.rows[0].cells, (
+            "№",
+            "Код индикатора и индикатор достижения",
+            "Контрольно-измерительные материалы",
+        )):
+            cell.text = text
+        for row, values in zip(table.rows[1:], rows):
+            for cell, text in zip(row.cells, values):
+                cell.text = text
+        indicator = Indicator(
+            code="УК-1.1", text="Анализирует задачу", competency_code="УК-1",
+            source_ref=SourceRef(file="assessment.docx"),
+        )
+        return extract_assessment_tools(
+            document, "assessment.docx", [indicator], doc_type=doc_type,
+        )
+
+    def test_numbering_header_does_not_create_tools_or_issues(self):
+        for doc_type in ("RPD", "RPP"):
+            for numbering in (("", "1", "2"), ("1", "2", "3"), ("", "2", "3")):
+                with self.subTest(doc_type=doc_type, numbering=numbering):
+                    tools, relations, issues = self.extract((
+                        numbering,
+                        ("1", "УК-1.1 Анализирует задачу", "Отчет"),
+                    ), doc_type)
+
+                    self.assertEqual(issues, [])
+                    self.assertEqual([tool.name for tool in tools], ["Отчет"])
+                    self.assertEqual(
+                        [(t.source_ref.table, t.source_ref.row, t.source_ref.col) for t in tools],
+                        [(2, 3, 3)],
+                    )
+                    self.assertEqual(
+                        [(r.src_key, r.dst_key, r.source_ref.table, r.source_ref.row)
+                         for r in relations],
+                        [("УК-1.1", "Отчет", 2, 3)],
+                    )
+
+    def test_numeric_tool_name_with_real_indicator_is_kept(self):
+        for doc_type in ("RPD", "RPP"):
+            with self.subTest(doc_type=doc_type):
+                tools, relations, issues = self.extract((
+                    ("1", "УК-1.1 Анализирует задачу", "2"),
+                ), doc_type)
+
+                self.assertEqual(issues, [])
+                self.assertEqual([tool.name for tool in tools], ["2"])
+                self.assertEqual(
+                    [(r.src_key, r.dst_key) for r in relations], [("УК-1.1", "2")],
+                )
+                self.assertEqual(tools[0].source_ref.row, 2)
 
 
 if __name__ == "__main__":

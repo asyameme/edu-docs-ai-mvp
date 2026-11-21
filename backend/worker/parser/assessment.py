@@ -8,6 +8,7 @@ from .common import (
     normalize,
     read_section,
 )
+from .results import extract_indicators
 from backend.contracts.document_v2.models import (
     AssessmentToolV2,
     ParseIssue,
@@ -177,40 +178,140 @@ def _practice_assessment_name(text):
     return match.group(1) if match else None
 
 
+def is_assessment_heading(paragraph, doc_type):
+    title = re.sub(
+        r"^\d+(?:\.\d+)*\.?\s*",
+        "",
+        normalize(paragraph.text),
+    ).replace("\u00ad", "").replace("-", "")
+
+    if doc_type == "RPP":
+        return title.startswith("оценочные средства:") or title in {
+            "оценочные средства", "контрольноизмерительные материалы",
+        }
+
+    return (
+        title.startswith(
+            "методические материалы для проведения текущего контроля"
+        )
+        or title in {
+            "оценочные средства",
+            "контрольноизмерительные материалы",
+        }
+    )
+
+
+def extract_assessment_indicators(document, file_name, output):
+    misplaced_rows = {
+        (issue.source_ref.table, issue.source_ref.row)
+        for issue in output.parse_issues
+        if issue.source_ref is not None
+        and issue.message.startswith("В колонке индикаторов указан код компетенции ")
+    }
+    known = {item.code for item in output.indicators}
+    parents = {item.code for item in output.competencies}
+    outcome_parents = {
+        (relation.dst_key, relation.src_key)
+        for relation in output.relations
+        if relation.src_entity == "competency" and relation.dst_entity == "learning_outcome"
+        and relation.kind == "включает"
+    }
+    candidates = {}
+    for outcome in output.learning_outcomes:
+        match = re.fullmatch(
+            r"([А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+)\.?\s*[ЗУВ3]-\d+",
+            outcome.code or "",
+        )
+        if not match or (outcome.source_ref.table, outcome.source_ref.row) not in misplaced_rows:
+            continue
+        code = match[1]
+        parent = code.rsplit(".", 1)[0]
+        if code not in known and parent in parents and (outcome.local_id, parent) in outcome_parents:
+            candidates.setdefault(code, outcome.source_ref)
+    if not candidates:
+        return [], [], []
+
+    blocks, _ = read_section(
+        document, file_name, lambda p: is_assessment_heading(p, output.meta.doc_type),
+        "оценочные средства", keep_numbered_items=True,
+    )
+    found = {code: [] for code in candidates}
+    for block, table_ref in blocks:
+        if isinstance(block, Paragraph):
+            continue
+        header = next((
+            (index, columns, len(row.cells))
+            for index, row in enumerate(block.rows[:5])
+            if (columns := assessment_columns(row.cells)) is not None
+        ), None)
+        if header is None:
+            continue
+        index, columns, width = header
+        for row_number, row in enumerate(block.rows[index + 1:], index + 2):
+            cells = row.cells
+            repeated = assessment_columns(cells)
+            if repeated is not None:
+                if repeated != columns:
+                    break
+                continue
+            if len(cells) != width or row.grid_cols_before or row.grid_cols_after:
+                continue
+            seen = set()
+            for column in columns["indicators"]:
+                cell = cells[column]
+                if cell._tc in seen:
+                    continue
+                seen.add(cell._tc)
+                codes, uncertain = assessment_indicator_codes(cell.text)
+                if uncertain:
+                    continue
+                ref = table_ref.model_copy(update={"row": row_number, "col": column + 1})
+                for code in codes:
+                    if code not in candidates:
+                        continue
+                    values, _ = extract_indicators(cell.text, code.rsplit(".", 1)[0], ref)
+                    found[code].extend(item for item in values if item.code == code)
+
+    indicators, relations, issues = [], [], []
+    for code, values in found.items():
+        if not values:
+            continue
+        if len({item.text for item in values}) != 1:
+            issues.append(ParseIssue(
+                category="ambiguous",
+                message=f"В оценочных средствах найдены разные описания индикатора {code}; объект не создан",
+                source_ref=values[0].source_ref,
+            ))
+            continue
+        indicator = values[0]
+        indicators.append(indicator)
+        relations.append(Relation(
+            src_entity="competency", src_key=indicator.competency_code,
+            dst_entity="indicator", dst_key=code, kind="имеет",
+            source_ref=indicator.source_ref,
+        ))
+        source = candidates[code]
+        issues.append(ParseIssue(
+            category="manual_review", severity="info",
+            message=(
+                f"Код индикатора {code} подтвержден кодом результата обучения "
+                f"в таблице {source.table}, строке {source.row}, столбце {source.col}; "
+                "описание индикатора прочитано из оценочных средств."
+            ),
+            source_ref=indicator.source_ref,
+        ))
+    return indicators, relations, issues
+
+
 def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD"):
     """Извлечь формулировки КИМ и явные связи с индикаторами."""
     if doc_type not in {"RPD", "RPP"}:
         raise ValueError("Поддерживаются РПД и РПП")
 
-    def is_heading(paragraph):
-        title = re.sub(
-            r"^\d+(?:\.\d+)*\.?\s*",
-            "",
-            normalize(paragraph.text),
-        )
-
-        # Нормализация используется только для поиска заголовка.
-        title = title.replace("\u00ad", "").replace("-", "")
-
-        if doc_type == "RPP":
-            return title.startswith("оценочные средства:") or title in {
-                "оценочные средства", "контрольноизмерительные материалы",
-            }
-
-        return (
-            title.startswith(
-                "методические материалы для проведения текущего контроля"
-            )
-            or title in {
-                "оценочные средства",
-                "контрольноизмерительные материалы",
-            }
-        )
-
     blocks, issues = read_section(
         document,
         file_name,
-        is_heading,
+        lambda paragraph: is_assessment_heading(paragraph, doc_type),
         "оценочные средства",
         keep_numbered_items=True,
     )
@@ -300,12 +401,9 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
                         not label or label == str(index)
                         for index, label in enumerate(labels, 1)
                     )
-                    or (
-                        doc_type == "RPP"
-                        and numbered == [
-                            str(index) for index in range(1, len(numbered) + 1)
-                        ]
-                    )
+                    or numbered == [
+                        str(index) for index in range(1, len(numbered) + 1)
+                    ]
                 )
             ):
                 continue
@@ -574,30 +672,31 @@ def _headerless_ects_columns(rows):
     return {"criterion": 0, "grade_ects": 1, "grade_spbu": 2}
 
 
+def is_score_scale_heading(paragraph):
+    title = re.sub(
+        r"^\d+(?:\.\d+)*\.?\s*",
+        "",
+        normalize(paragraph.text),
+    ).replace("\u00ad", "").replace("-", "")
+
+    return (
+        title.startswith(
+            "методика проведения текущего контроля"
+        )
+        and "критерии оценивания" in title
+    ) or title.rstrip(".:") in {
+        "методика и критерии оценивания",
+        "шкала оценивания",
+        "шкалы оценивания",
+        "шкала и критерии оценивания",
+    }
+
+
 def extract_score_scale(document, file_name):
     """Прочитать таблицы оценок, ECTS, баллов и критериев."""
-    def is_heading(paragraph):
-        title = re.sub(
-            r"^\d+(?:\.\d+)*\.?\s*",
-            "",
-            normalize(paragraph.text),
-        ).replace("\u00ad", "").replace("-", "")
-
-        return (
-            title.startswith(
-                "методика проведения текущего контроля"
-            )
-            and "критерии оценивания" in title
-        ) or title.rstrip(".:") in {
-            "методика и критерии оценивания",
-            "шкала оценивания",
-            "шкалы оценивания",
-            "шкала и критерии оценивания",
-        }
-
     # Раздел может отсутствовать в шаблоне РПД.
     present = any(
-        is_heading(paragraph)
+        is_score_scale_heading(paragraph)
         and not paragraph.style.name.casefold().startswith((
             "toc",
             "оглавление",
@@ -612,7 +711,7 @@ def extract_score_scale(document, file_name):
     blocks, issues = read_section(
         document,
         file_name,
-        is_heading,
+        is_score_scale_heading,
         "шкалы и критерии оценивания",
         keep_numbered_items=True,
     )

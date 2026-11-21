@@ -21,6 +21,7 @@ from .discipline import (
 )
 from backend.contracts.document_v2.models import ParseIssue, RPPMeta, RPPOutput, SourceRef
 from .results import extract_practice_competencies, extract_results_into
+from .sections import extract_document_sections
 
 
 def _results_roots(document):
@@ -81,6 +82,10 @@ def finalize_rpp(output, document, file_name):
     scale, issues = extract_practice_score_scale(document, file_name)
     output.score_scale.extend(scale)
     output.parse_issues.extend(issues)
+
+    sections, issues = extract_document_sections(document, file_name, doc_type="RPP")
+    output.document_sections.extend(sections)
+    output.parse_issues.extend(issues)
     return finalize_output(output, document)
 
 
@@ -129,7 +134,7 @@ def parse_rpp(file_path, *, program_id: str | None = None) -> RPPOutput:
         meta=RPPMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpp_docx_v4",
+            parser_config="rpp_docx_v6",
             program_id=program_id,
         ),
         disciplines=[discipline],
@@ -145,7 +150,8 @@ def parse_rpp(file_path, *, program_id: str | None = None) -> RPPOutput:
             "Разбор РПП поддерживает общую и посеместровую нагрузку, перечни и таблицы "
             "компетенций, результаты обучения, табличное содержание, "
             "формы контроля, оценочные средства и шкалы. "
-            "Текстовые этапы требуют отдельного разбора."
+            "Доступный исходный текст содержания и оценочных материалов сохраняется "
+            "в document_sections; выделение текстовых этапов требует отдельного разбора."
         ),
         source_ref=SourceRef(file=file_path.name),
     ))

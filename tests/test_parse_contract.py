@@ -100,6 +100,21 @@ class TestParserContract(unittest.TestCase):
         with self.assertRaises(ValidationError):
             SourceRef(file="example.docx", paragraph_index=-1)
 
+    def test_curriculum_credit_units_accept_zero_and_reject_invalid_values(self):
+        fields = {
+            "discipline_name": "Физическая культура и спорт",
+            "semester": 3,
+            "hours_total": 164,
+            "block": "Блок.1.дисц",
+            "source_ref": SourceRef(file="plan.docx", table=4, row=112, col=4),
+        }
+        item = contract.CurriculumItem(credit_units=0, **fields)
+        self.assertEqual(item.credit_units, 0)
+        self.assertEqual(type(item).model_validate_json(item.model_dump_json()), item)
+        for value in (-1, None, "", 1.5):
+            with self.subTest(credit_units=value), self.assertRaises(ValidationError):
+                contract.CurriculumItem(credit_units=value, **fields)
+
     def test_read_section_counts_cell_paragraphs_and_excludes_headers(self):
         document, _ = source_document()
         blocks, issues = read_section(
