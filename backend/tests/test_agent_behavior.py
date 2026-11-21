@@ -191,6 +191,8 @@ def test_instructions_cover_key_behaviour():
         "Не придумывай",
         "Clarification",
         "ChangeProposal",
+        "unresolved_questions",
+        "Не повторяй прежнее",
         "get_validation_findings",
         "Не утверждай, что данные изменены",
     ):
