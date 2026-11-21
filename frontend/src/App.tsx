@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ImportProgress } from "./ImportProgress";
 import { GenerationScreen } from "./GenerationScreen";
-import { groupImportIssues } from "./importIssues";
+import { DiagnosticList } from "./DiagnosticList";
+import { groupDiagnostics, importDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
-import type { ImportJob, ReviewDetails, ReviewIssue, RuleCoverage } from "./api";
+import { api } from "./api";
+import type {
+  ChatOutput,
+  ChatProposedChange,
+  ChatSessionHistoryRead,
+  ChatSessionRead,
+  ChatTurnHistoryRead,
+  ImportJob,
+  OptionalRuleCode,
+  ReviewDetails,
+  ReviewIssue,
+  RuleCoverage,
+} from "./api";
 
 type ProgramDocument = {
   name: string;
@@ -26,32 +39,6 @@ type ReconciliationFinding = {
   ruleCode?: string;
 };
 
-type PlainValidationIssue = {
-  kind: "plain";
-  id: string;
-  severity: "error" | "warning" | "info";
-  title: string;
-  source: string;
-  ruleId?: string;
-  count?: number;
-};
-
-type RpdAlignmentIssue = {
-  kind: "rpd-alignment";
-  id: string;
-  severity: "error" | "warning" | "info";
-  title: string;
-  source: string;
-  ruleId: string;
-  outcomeId: string | null;
-  outcomeText: string | null;
-  reason: string | null;
-  classification: "supported" | "gap" | "uncertain" | "invalid" | null;
-  count?: number;
-};
-
-type ValidationIssue = PlainValidationIssue | RpdAlignmentIssue;
-
 function coverageStatusLabel(status: RuleCoverage["status"]): string {
   switch (status) {
     case "passed": return "Пройдена";
@@ -66,19 +53,43 @@ function coverageStatusLabel(status: RuleCoverage["status"]): string {
   }
 }
 
+const optionalRuleOptions: Array<{ code: OptionalRuleCode; title: string; description: string }> = [
+  {
+    code: "R-09",
+    title: "Покрытие компетенций учебным планом",
+    description: "Смысловая оценка покрытия компетенций по дисциплинам и результатам обучения.",
+  },
+  {
+    code: "R-11",
+    title: "Результаты обучения и содержание РПД",
+    description: "Сопоставление результатов обучения с содержанием раздела 2 и оцениванием раздела 3.",
+  },
+];
+
 type ParsedProgram = {
   documentCount: number;
   findings: ReconciliationFinding[];
-  issues: ValidationIssue[];
+  issues: Diagnostic[];
 };
 
-type ChatPlan = {
-  id: string;
-  title: string;
-  changes: string[];
-  status: "pending" | "applied" | "cancelled";
-  validation?: string[];
-};
+type ChatPlan =
+  | {
+    kind: "demo";
+    id: string;
+    title: string;
+    changes: string[];
+    status: "pending" | "applied" | "cancelled";
+    validation?: string[];
+  }
+  | {
+    kind: "proposal";
+    turnId: string;
+    expectedVersionId: string;
+    title: string;
+    changes: ChatProposedChange[];
+    unresolvedQuestions: string[];
+    status: "pending" | "applied" | "cancelled";
+  };
 
 type SourceCoordinate =
   | { kind: "paragraph"; paragraphIndex: number }
@@ -117,7 +128,162 @@ type ChatMessage = {
     sourceRef: SourceRef;
   };
   plan?: ChatPlan;
+  questions?: string[];
+  sourceLabels?: string[];
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function parseProposedChange(value: unknown): ChatProposedChange | null {
+  if (!isRecord(value)
+    || (value.target_kind !== "entity" && value.target_kind !== "relation")
+    || typeof value.target_id !== "string" || typeof value.field_path !== "string"
+    || !Object.hasOwn(value, "expected_old_value") || !Object.hasOwn(value, "new_value")
+    || typeof value.reason !== "string" || !isStringArray(value.source_ref_ids)) return null;
+  return {
+    target_kind: value.target_kind,
+    target_id: value.target_id,
+    field_path: value.field_path,
+    expected_old_value: value.expected_old_value,
+    new_value: value.new_value,
+    reason: value.reason,
+    source_ref_ids: value.source_ref_ids,
+  };
+}
+
+function parseChatOutput(value: unknown): ChatOutput | null {
+  if (!isRecord(value)) return null;
+  if (value.kind === "answer" && typeof value.message === "string" && Array.isArray(value.sources)) {
+    const sourceValues: unknown[] = value.sources;
+    const sources = sourceValues.flatMap((source) => (
+      isRecord(source) && typeof source.id === "string" ? [{ id: source.id }] : []
+    ));
+    if (sources.length !== sourceValues.length) return null;
+    return {
+      kind: "answer", message: value.message, sources,
+    };
+  }
+  if (value.kind === "clarification" && typeof value.message === "string" && isStringArray(value.questions)) {
+    return { kind: "clarification", message: value.message, questions: value.questions };
+  }
+  if (value.kind === "change_proposal" && typeof value.summary === "string"
+    && isStringArray(value.unresolved_questions) && Array.isArray(value.changes)) {
+    const rawChanges: unknown[] = value.changes;
+    const changes = rawChanges.flatMap((change) => {
+      const parsed = parseProposedChange(change);
+      return parsed ? [parsed] : [];
+    });
+    if (changes.length !== rawChanges.length) return null;
+    return {
+      kind: "change_proposal",
+      summary: value.summary,
+      unresolved_questions: value.unresolved_questions,
+      changes,
+    };
+  }
+  return null;
+}
+
+function waitForChatOutput(programId: string, runId: string): Promise<ChatOutput> {
+  return new Promise((resolve, reject) => {
+    const stream = new EventSource(`/api/v1/programs/${programId}/chat/runs/${runId}/events`);
+    let timeout = 0;
+    const finish = (error: Error | null, output?: ChatOutput) => {
+      window.clearTimeout(timeout);
+      stream.close();
+      if (error) reject(error);
+      else if (output) resolve(output);
+      else reject(new Error("Агент вернул пустой ответ."));
+    };
+    stream.addEventListener("completed", (event) => {
+      if (!(event instanceof MessageEvent)) {
+        finish(new Error("Не удалось прочитать ответ агента."));
+        return;
+      }
+      try {
+        const parsed: unknown = JSON.parse(event.data);
+        const output = parseChatOutput(parsed);
+        finish(output ? null : new Error("Формат ответа агента не распознан."), output ?? undefined);
+      } catch {
+        finish(new Error("Не удалось разобрать ответ агента."));
+      }
+    });
+    stream.addEventListener("failed", () => finish(new Error("Агент не смог выполнить запрос. Попробуйте ещё раз.")));
+    stream.addEventListener("error", () => {
+      if (stream.readyState === EventSource.CLOSED) finish(new Error("Соединение с чатом потеряно."));
+    });
+    timeout = window.setTimeout(() => finish(new Error("Агент не ответил за отведённое время.")), 5 * 60 * 1000);
+  });
+}
+
+function chatSourceLabels(ids: string[], reviewDetails: ReviewDetails | null, job: ImportJob | null) {
+  const sourceRefs = new Map((reviewDetails?.version.snapshot.source_refs ?? []).map((source) => [source.id, source]));
+  const documentNames = new Map((job?.files ?? []).map((file) => [file.document_id, file.member_name]));
+  return ids.map((id) => {
+    const source = sourceRefs.get(id);
+    if (!source) return null;
+    const fileName = documentNames.get(source.document_id) ?? "Документ пакета";
+    return `${shortDocumentName(fileName)}${source.section ? ` · ${source.section}` : ""}`;
+  }).filter((label): label is string => label !== null);
+}
+
+function chatOutputMessage(
+  turnId: string,
+  result: ChatOutput,
+  expectedVersionId: string,
+  reviewDetails: ReviewDetails | null,
+  job: ImportJob | null,
+  accepted = false,
+): ChatMessage {
+  if (result.kind === "answer") {
+    return {
+      id: `${turnId}-agent`, role: "agent", text: result.message,
+      sourceLabels: chatSourceLabels(result.sources.map((source) => source.id), reviewDetails, job),
+    };
+  }
+  if (result.kind === "clarification") {
+    return { id: `${turnId}-agent`, role: "agent", text: result.message, questions: result.questions };
+  }
+  return {
+    id: `${turnId}-agent`, role: "agent",
+    text: "Предложение подготовлено. Проверьте изменения перед применением.",
+    plan: {
+      kind: "proposal", turnId, expectedVersionId,
+      title: result.summary, changes: result.changes,
+      unresolvedQuestions: result.unresolved_questions,
+      status: accepted ? "applied" : "pending",
+    },
+  };
+}
+
+function chatHistoryMessages(
+  history: ChatSessionHistoryRead,
+  reviewDetails: ReviewDetails | null,
+  job: ImportJob | null,
+): ChatMessage[] {
+  const acceptedTurns = new Set((reviewDetails?.version.snapshot.review?.decisions ?? []).map((decision) => decision.conflict_id));
+
+  return history.turns.flatMap((turn: ChatTurnHistoryRead) => {
+    const userMessage: ChatMessage = { id: `${turn.id}-user`, role: "user", text: turn.user_text };
+    if (turn.status === "pending") {
+      return [userMessage, { id: `${turn.id}-agent`, role: "agent", text: "Обрабатываю запрос…" }];
+    }
+    if (turn.status === "failed" || !turn.result) {
+      return [userMessage, { id: `${turn.id}-agent`, role: "agent", text: "Запрос не выполнен. Можно отправить его ещё раз." }];
+    }
+    const result = turn.result;
+    const agentMessage = chatOutputMessage(
+      turn.id, result, history.version_id, reviewDetails, job, acceptedTurns.has(turn.id),
+    );
+    return [userMessage, agentMessage];
+  });
+}
 
 type AppScreen = "Программа" | "Чат" | "Генерация";
 
@@ -151,32 +317,22 @@ const demoProgram: ParsedProgram = {
       ],
     },
   ],
-  issues: [
-    {
-      kind: "plain",
-      id: "issue-1",
-      severity: "error",
-      title: "Для компетенции не найден индикатор достижения",
-      source: "РПД_Анализ_данных.docx · раздел 4",
-      ruleId: "R-04",
-    },
-    {
-      kind: "plain",
-      id: "issue-2",
-      severity: "warning",
-      title: "Формулировка результата обучения отличается от учебного плана",
-      source: "Учебный план.docx · таблица «Результаты обучения»",
-      ruleId: "R-11",
-    },
-    {
-      kind: "plain",
-      id: "issue-3",
-      severity: "warning",
-      title: "В документах различаются формулировки результатов обучения",
-      source: "Учебный план.docx · таблица «Результаты обучения»",
-      ruleId: "R-11",
-    },
-  ],
+  issues: [{
+    id: "demo-issue", origin: "validation", severity: "error", category: "indicator_missing",
+    ruleCode: "R-04", title: "Для компетенции не найден индикатор достижения",
+    message: "Для компетенции не найден индикатор достижения",
+    documents: [{ id: "demo-rpd", name: "РПД_Анализ_данных.docx" }], detail: null,
+  }, {
+    id: "issue-2", origin: "validation", severity: "warning", category: "outcome_formulation_mismatch",
+    ruleCode: "R-11", title: "Формулировка результата обучения отличается от учебного плана",
+    message: "Формулировка результата обучения отличается от учебного плана",
+    documents: [{ id: "demo-plan", name: "Учебный план.docx" }], detail: null,
+  }, {
+    id: "issue-3", origin: "validation", severity: "warning", category: "outcome_formulation_mismatch",
+    ruleCode: "R-11", title: "В документах различаются формулировки результатов обучения",
+    message: "В документах различаются формулировки результатов обучения",
+    documents: [{ id: "demo-plan", name: "Учебный план.docx" }], detail: null,
+  }],
 };
 
 const navigation = ["Программа", "Чат", "Генерация"] as const;
@@ -242,6 +398,7 @@ const demoChatMessages: ChatMessage[] = [
     role: "agent",
     text: "Предлагаю такой план правок. Проверьте изменения перед применением:",
     plan: {
+      kind: "demo",
       id: "assessment-plan",
       title: "Изменить распределение баллов",
       changes: [
@@ -304,21 +461,14 @@ function shortChoiceLabel(label: string) {
   return label.replace(/^Выбрать значение из документов:\s*/i, "").trim();
 }
 
-function formatIssueSummary(issues: ValidationIssue[]) {
-  const counts = issues.reduce(
-    (total, issue) => {
-      total[issue.severity] += issue.count ?? 1;
-      return total;
-    },
-    { error: 0, warning: 0, info: 0 },
-  );
+function formatIssueSummary(issues: Diagnostic[]) {
+  const groups = groupDiagnostics(issues);
+  const actionable = groups.filter((group) => group.severity !== "info").length;
+  const information = groups.length - actionable;
   return [
-    counts.error > 0 ? formatCountWithWords(counts.error, "ошибка", "ошибки", "ошибок") : "",
-    counts.warning > 0 ? formatCountWithWords(counts.warning, "предупреждение", "предупреждения", "предупреждений") : "",
-    counts.info > 0
-      ? formatCountWithWords(counts.info, "информационное замечание", "информационных замечания", "информационных замечаний")
-      : "",
-  ].filter(Boolean).join(" · ") || "Проверка завершена";
+    actionable ? `Групп замечаний: ${actionable}` : "Ошибок и предупреждений нет",
+    information ? `Информация: ${information}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 type FindingFilter = "all" | "R-01" | "R-07" | "R-08" | "R-11";
@@ -330,43 +480,6 @@ function findingRuleGroup(ruleCode?: string) {
 
 function issueRuleGroup(ruleId?: string) {
   return ruleId?.match(/^R-(01|07|08|11)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
-}
-
-function rpdAlignmentTitle(type: string, classification: RpdAlignmentIssue["classification"]) {
-  switch (type) {
-    case "rpd_section_2_missing": return "Не найдено содержание раздела 2";
-    case "rpd_multiple_disciplines_unsupported": return "В РПД несколько дисциплин — проверка неоднозначна";
-    case "rpd_outcome_id_ambiguous": return "Результат обучения не удалось однозначно определить";
-    case "rpd_outcome_competency_link_missing": return "Не найдена связь результата с компетенцией";
-    case "rpd_section_3_evidence_missing": return "Не найдены связанные данные раздела 3";
-    case "rpd_semantic_model_unavailable": return "Смысловую проверку не удалось выполнить";
-    case "rpd_semantic_response_invalid":
-    case "rpd_semantic_result_missing_or_duplicate":
-    case "rpd_semantic_unexpected_outcome_ids": return "Ответ смысловой проверки требует проверки";
-    case "rpd_semantic_alignment_gap": return "Возможный пробел в содержании или оценивании";
-    case "rpd_semantic_alignment_uncertain": return "Связь требует экспертной оценки";
-    case "rpd_semantic_evidence_missing": return "Не хватает подтверждений для вывода";
-    default:
-      if (classification === "gap") return "Возможный пробел в содержании или оценивании";
-      if (classification === "uncertain") return "Связь требует экспертной оценки";
-      return "Результат смысловой проверки требует экспертной оценки";
-  }
-}
-
-function rpdAlignmentExplanation(type: string, reason: string | null) {
-  if (reason) return reason;
-  switch (type) {
-    case "rpd_semantic_model_unavailable":
-      return "Проверка не завершилась. Это не вывод о содержании РПД; смысловую сверку нужно повторить.";
-    case "rpd_semantic_response_invalid":
-      return "Ответ модели нельзя использовать для вывода. Результат проверки не определён.";
-    case "rpd_semantic_result_missing_or_duplicate":
-      return "Для результата обучения не получена ровно одна оценка модели.";
-    case "rpd_semantic_unexpected_outcome_ids":
-      return "Модель вернула оценки для результатов, которых нет в этой РПД.";
-    default:
-      return null;
-  }
 }
 
 // Подсветка только визуальная: показывает отличающиеся слова, а не вывод о смысловой эквивалентности.
@@ -407,6 +520,9 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       source: names.length ? names.join(" · ") : "Источник пакета документов",
       documents: names,
       documentCount: sourceDocumentIds.length,
+      diagnosticDocuments: sourceDocumentIds.map((id) => ({
+        id, name: documentNames.get(id) ?? "Документ пакета",
+      })),
     };
   };
   const findings = details.issues.filter((issue) => issue.requires_decision)
@@ -435,41 +551,14 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
         choices,
       };
     });
-  const reviewIssues: ValidationIssue[] = details.issues.map((issue: ReviewIssue) => {
+  const diagnosticIssues = details.check_report
+    ? [...details.check_report.issues, ...details.issues.filter((issue) => issue.rule_code.startsWith("BACKEND_GRAPH_"))]
+    : details.issues;
+  const reviewIssues = diagnosticIssues.filter((issue) => !issue.requires_decision).map((issue) => {
     const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
-    if (issue.rule_code === "R-11") {
-      const alignment = issue.rpd_alignment;
-      return {
-        kind: "rpd-alignment",
-        id: issue.id,
-        severity: issue.severity === "blocking" ? "error" : "warning",
-        title: rpdAlignmentTitle(issue.type, alignment?.classification ?? null),
-        source: source.source,
-        ruleId: "R-11 · Смысловая сверка РПД",
-        outcomeId: alignment?.outcome_id ?? null,
-        outcomeText: alignment?.outcome_text ?? null,
-        reason: rpdAlignmentExplanation(issue.type, alignment?.reason ?? null),
-        classification: alignment?.classification ?? null,
-      };
-    }
-    return {
-      kind: "plain",
-      id: issue.id,
-      severity: issue.severity === "blocking" ? "error" as const : "warning" as const,
-      title: issue.message,
-      source: source.source,
-      ruleId: `${issue.rule_code} · ${issue.rule_revision}`,
-    };
+    return reviewDiagnostic(issue, source.diagnosticDocuments);
   });
-  const importIssues = (job ? groupImportIssues(job) : []).map((issue) => ({
-    kind: "plain" as const,
-    id: `import-${issue.id}`,
-    severity: issue.severity,
-    title: issue.message,
-    source: issue.documentName ?? "Разбор ZIP-пакета",
-    ruleId: issue.category,
-    count: issue.count,
-  }));
+  const importIssues = job ? importDiagnostics(job) : [];
 
   return {
     documentCount,
@@ -480,25 +569,39 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
 
 type ChatScreenProps = {
   versionNumber: number;
+  currentVersionId: string;
   isDemoMode: boolean;
   isConfirmed: boolean;
+  hasSignature: boolean;
   canUseChat: boolean;
+  isBusy: boolean;
+  statusMessage: string;
   messages: ChatMessage[];
   draft: string;
   selectedSourceRef: SourceRef | null;
   onDraftChange: (value: string) => void;
-  onSend: (message?: string) => void;
-  onApplyPlan: (messageId: string) => void;
+  onSend: (message?: string) => void | Promise<void>;
+  onApplyPlan: (messageId: string) => void | Promise<void>;
   onCancelPlan: (messageId: string) => void;
   onOpenSource: (sourceRef: SourceRef) => void;
   onCloseSource: () => void;
 };
 
+function formatChatValue(value: unknown) {
+  if (typeof value === "string") return value;
+  if (value === null) return "пусто";
+  return JSON.stringify(value) ?? "пусто";
+}
+
 function ChatScreen({
   versionNumber,
+  currentVersionId,
   isDemoMode,
   isConfirmed,
+  hasSignature,
   canUseChat,
+  isBusy,
+  statusMessage,
   messages,
   draft,
   selectedSourceRef,
@@ -526,11 +629,11 @@ function ChatScreen({
           {messages.length === 0 ? (
             <div className="chat-empty-state">
               <div className="agent-mark" aria-hidden="true">ИИ</div>
-              <h2>{canUseChat ? "Начните диалог с агентом" : "Чат с агентом пока не подключён"}</h2>
+              <h2>{canUseChat ? "Начните диалог с агентом" : "Чат пока недоступен"}</h2>
               <p>
                 {canUseChat
                   ? "Задайте вопрос по документам или опишите нужное изменение."
-                  : "После подключения агента здесь появятся ответы, проверки и планы правок по программе."}
+                  : statusMessage}
               </p>
             </div>
           ) : (
@@ -544,6 +647,12 @@ function ChatScreen({
                       <strong className="message-result-title">{message.result.title}</strong>
                     )}
                     {message.text && <p className="message-body">{message.text}</p>}
+                    {message.questions && <ul className="chat-clarification-questions">
+                      {message.questions.map((question) => <li key={question}>{question}</li>)}
+                    </ul>}
+                    {message.sourceLabels && message.sourceLabels.length > 0 && (
+                      <p className="chat-source-labels">Источники: {message.sourceLabels.join(" · ")}</p>
+                    )}
                     {message.result?.kind === "coverage" && (
                       <>
                         <span className="message-result-status">{message.result.status}</span>
@@ -594,30 +703,47 @@ function ChatScreen({
                           {message.plan.status === "pending" ? "Ожидает решения" : message.plan.status === "applied" ? "Применён" : "Отменён"}
                         </span>
                       </div>
-                      <ol>
-                        {message.plan.changes.map((change) => <li key={change}>{change}</li>)}
-                      </ol>
+                      {message.plan.kind === "demo" ? (
+                        <ol>{message.plan.changes.map((change) => <li key={change}>{change}</li>)}</ol>
+                      ) : (
+                        <>
+                          <ol>{message.plan.changes.map((change) => <li key={`${change.target_id}:${change.field_path}`}>
+                            <strong>{change.target_kind === "entity" ? "Сущность" : "Связь"} · {change.field_path.replaceAll("_", " ")}</strong>
+                            <span>{formatChatValue(change.expected_old_value)} → {formatChatValue(change.new_value)}</span>
+                            <small>{change.reason}</small>
+                          </li>)}</ol>
+                          {message.plan.unresolvedQuestions.length > 0 && (
+                            <p className="plan-lock-note">Нужно уточнить: {message.plan.unresolvedQuestions.join(" · ")}</p>
+                          )}
+                        </>
+                      )}
                       {message.plan.status === "pending" ? (
                         <>
-                          {!isConfirmed && (
+                          {message.plan.kind === "demo" && !isConfirmed && (
                             <p className="plan-lock-note">Сначала подтвердите версию в разделе «Программа».</p>
+                          )}
+                          {message.plan.kind === "proposal" && message.plan.expectedVersionId !== currentVersionId && (
+                            <p className="plan-lock-note">Предложение относится к предыдущей версии. Отправьте запрос заново.</p>
                           )}
                           <div className="plan-actions">
                             <button
                               type="button"
                               className="plan-apply-button"
-                              disabled={!isConfirmed}
-                              onClick={() => onApplyPlan(message.id)}
+                              disabled={message.plan.kind === "demo"
+                                ? !isConfirmed
+                                : !canUseChat || !hasSignature || isBusy || message.plan.expectedVersionId !== currentVersionId
+                                  || message.plan.unresolvedQuestions.length > 0}
+                              onClick={() => { void onApplyPlan(message.id); }}
                             >
                               Применить план
                             </button>
-                            <button
+                            {message.plan.kind === "demo" && <button
                               type="button"
                               className="plan-cancel-button"
                               onClick={() => onCancelPlan(message.id)}
                             >
                               Отмена
-                            </button>
+                            </button>}
                           </div>
                         </>
                       ) : message.plan.status === "cancelled" ? (
@@ -629,7 +755,9 @@ function ChatScreen({
                             <span>Завершена</span>
                           </div>
                           <ul>
-                            {(message.plan.validation ?? []).map((result) => (
+                            {(message.plan.kind === "demo" ? message.plan.validation ?? [] : [
+                              "Изменения сохранены в новой версии. Проверки по графу запущены.",
+                            ]).map((result) => (
                               <li className={result.startsWith("⚠") ? "validation-item--warning" : "validation-item--success"} key={result}>
                                 {result}
                               </li>
@@ -648,9 +776,9 @@ function ChatScreen({
       </section>
 
       <div className="chat-quick-actions" aria-label="Быстрые действия">
-        <button type="button" disabled={!canUseChat} onClick={() => onSend("Проверь часы")}>Проверить часы</button>
-        <button type="button" disabled={!canUseChat} onClick={() => onSend("Покажи проблемы")}>Показать проблемы</button>
-        <button type="button" disabled={!canUseChat} onClick={() => onSend("Найди дисциплину")}>Найти дисциплину</button>
+        <button type="button" disabled={!canUseChat || isBusy} onClick={() => { void onSend("Проверь часы"); }}>Проверить часы</button>
+        <button type="button" disabled={!canUseChat || isBusy} onClick={() => { void onSend("Покажи проблемы"); }}>Показать проблемы</button>
+        <button type="button" disabled={!canUseChat || isBusy} onClick={() => { void onSend("Найди дисциплину"); }}>Найти дисциплину</button>
       </div>
 
       <form
@@ -667,10 +795,10 @@ function ChatScreen({
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}
             placeholder={isConfirmed ? "Опишите, что нужно изменить, или задайте вопрос…" : "Задайте вопрос о программе…"}
-            disabled={!canUseChat}
+            disabled={!canUseChat || isBusy}
           />
-          <button className="chat-send-button" disabled={!canUseChat || !draft.trim()} type="submit">
-            Отправить
+          <button className="chat-send-button" disabled={!canUseChat || isBusy || !draft.trim()} type="submit">
+            {isBusy ? "Ожидайте…" : "Отправить"}
           </button>
       </form>
 
@@ -792,6 +920,7 @@ function App() {
   const hasDemoPreview = isChatPreview || isReconciliationPreview || isGenerationPreview;
   const processing = useImportJob();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const autoCheckAttemptRef = useRef<string | null>(null);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState("");
@@ -812,6 +941,12 @@ function App() {
   const [acceptedWarningIds, setAcceptedWarningIds] = useState<string[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(hasDemoPreview ? demoChatMessages : []);
   const [chatDraft, setChatDraft] = useState("");
+  const [chatAvailability, setChatAvailability] = useState<"loading" | "available" | "unavailable">("loading");
+  const [chatSession, setChatSession] = useState<ChatSessionHistoryRead | null>(null);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatStatusMessage, setChatStatusMessage] = useState("Подключаем чат с агентом…");
+  const [signatureDraft, setSignatureDraft] = useState("");
+  const [signatureEditing, setSignatureEditing] = useState(false);
   const [selectedSourceRef, setSelectedSourceRef] = useState<SourceRef | null>(null);
   const sourceReturnFocusRef = useRef<HTMLElement | null>(null);
   const parsedProgram = isDemoMode
@@ -835,9 +970,9 @@ function App() {
     return findingStatusFilter === "all" || (findingStatusFilter === "saved" ? saved : !saved);
   });
   const visibleIssues = (parsedProgram?.issues ?? []).filter((issue) =>
-    findingFilter === "all" || issueRuleGroup(issue.ruleId) === findingFilter,
+    findingFilter === "all" || issueRuleGroup(issue.ruleCode) === findingFilter,
   );
-  const visibleIssueCount = visibleIssues.reduce((count, issue) => count + (issue.count ?? 1), 0);
+  const visibleIssueCount = groupDiagnostics(visibleIssues).length;
   const hasUploadedFiles = documents.length > 0 || processing.job !== null;
   const uploadNotice = processing.notice || notice;
   const checkWarnings = processing.checkJob?.status === "completed"
@@ -852,16 +987,40 @@ function App() {
   );
   const prepareReport = processing.reviewDetails?.prepare_report ?? null;
   const graphReady = processing.reviewDetails?.version.snapshot.review?.graph_ready === true;
+  const canUseLiveChat = !isDemoMode && graphReady && chatAvailability === "available" && chatSession !== null;
+  const chatStatus = isDemoMode
+    ? ""
+    : chatAvailability === "loading"
+      ? "Проверяем подключение к модели чата…"
+      : chatAvailability === "unavailable"
+        ? "Настройки модели чата не готовы. Проверьте CHAT_ENABLED и параметры модели."
+        : !graphReady
+          ? "Чат станет доступен после построения графа программы."
+          : chatSession
+            ? ""
+            : chatStatusMessage;
   const currentCheckReport = checkMatchesCurrentVersion ? processing.checkJob?.report ?? null : null;
-  const displayedCoverage = currentCheckReport?.coverage ?? prepareReport?.coverage ?? [];
-  const displayedValidationIssueCount = currentCheckReport?.issues.length ?? prepareReport?.issues.length ?? 0;
-  const parserDiagnosticCount = processing.job?.issues.length ?? 0;
-  const savedR09Status = prepareReport?.ruleset?.config?.rules?.find((rule) => rule.id === "R-09")?.status;
-  const r09ReadyForReview = savedR09Status === "ready" || savedR09Status === "ready_with_semantic_fallback";
-  const savedR11Status = prepareReport?.ruleset?.config?.rules?.find((rule) => rule.id === "R-11")?.status;
+  const displayedCoverage = currentCheckReport?.coverage ?? (graphReady ? [] : prepareReport?.coverage ?? []);
+  const displayedValidationIssueCount = groupDiagnostics(
+    (currentCheckReport?.issues ?? (graphReady ? [] : prepareReport?.issues ?? []))
+      .filter((issue) => !issue.requires_decision).map((issue) => reviewDiagnostic(issue, [])),
+  ).length;
+  const parserDiagnosticCount = processing.job ? groupDiagnostics(importDiagnostics(processing.job)).length : 0;
+  const checkWarningDiagnostics = checkWarnings.map((issue) => {
+    const ids = new Set(issue.source_document_ids ?? []);
+    for (const ref of processing.reviewDetails?.version.snapshot.source_refs ?? []) {
+      if (issue.source_ref_ids.includes(ref.id)) ids.add(ref.document_id);
+    }
+    return reviewDiagnostic(issue, [...ids].map((id) => ({ id,
+      name: processing.job?.files.find((file) => file.document_id === id)?.member_name ?? "Документ пакета",
+    })));
+  });
   const checkIsRunning = Boolean(
     processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) &&
     processing.checkJob.input_version_id === processing.versionId,
+  );
+  const optionalCheckIsRunning = Object.values(processing.optionalRuleChecks).some(
+    (check) => check && ["pending", "processing"].includes(check.status),
   );
   const skippedRequiredChecks = checkMatchesCurrentVersion
     ? processing.checkJob?.report?.ruleset.required_rules.filter((ruleCode) => {
@@ -875,10 +1034,104 @@ function App() {
   }, [processing.checkJob?.id]);
 
   useEffect(() => {
+    setSignatureDraft(processing.signature ?? "");
+    setSignatureEditing(Boolean(!isDemoMode && processing.program && !processing.signature));
+  }, [isDemoMode, processing.program?.id, processing.signature]);
+
+  useEffect(() => {
+    if (isDemoMode) {
+      setChatAvailability("unavailable");
+      return;
+    }
+    if (!processing.programId) {
+      setChatAvailability("loading");
+      return;
+    }
+    let active = true;
+    setChatAvailability("loading");
+    void api<unknown>(`/api/v1/programs/${processing.programId}/chat/config`)
+      .then((value) => {
+        if (!active) return;
+        if (!isRecord(value) || typeof value.available !== "boolean") {
+          setChatAvailability("unavailable");
+          return;
+        }
+        setChatAvailability(value.available ? "available" : "unavailable");
+      })
+      .catch(() => { if (active) setChatAvailability("unavailable"); });
+    return () => { active = false; };
+  }, [isDemoMode, processing.programId]);
+
+  useEffect(() => {
+    if (isDemoMode) return;
+    if (!processing.programId || !graphReady || !processing.versionId || chatAvailability !== "available") {
+      setChatSession(null);
+      if (!graphReady) setChatMessages([]);
+      return;
+    }
+    let active = true;
+    setChatSession(null);
+    setChatStatusMessage("Подключаем диалог к текущей версии графа…");
+    const connect = async () => {
+      const sessions = await api<ChatSessionRead[]>(
+        `/api/v1/programs/${processing.programId}/chat/sessions?limit=100`,
+      );
+      let session = sessions.find((candidate) => candidate.version_id === processing.versionId);
+      if (!session) {
+        session = await api<ChatSessionRead>(
+          `/api/v1/programs/${processing.programId}/chat/sessions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ version_id: processing.versionId }),
+          },
+        );
+      }
+      const history = await api<ChatSessionHistoryRead>(
+        `/api/v1/programs/${processing.programId}/chat/sessions/${session.id}`,
+      );
+      if (!active) return;
+      setChatSession(history);
+      setChatMessages(chatHistoryMessages(history, processing.reviewDetails, processing.job));
+      setChatStatusMessage("");
+    };
+    void connect().catch((error: unknown) => {
+      if (!active) return;
+      setChatStatusMessage(error instanceof Error ? error.message : "Не удалось открыть чат с агентом.");
+    });
+    return () => { active = false; };
+  }, [isDemoMode, processing.programId, processing.versionId, processing.reviewDetails?.version.id,
+    processing.job?.id, graphReady, chatAvailability]);
+
+  useEffect(() => {
     if (processing.reviewJob?.status !== "completed") return;
     setFindingFilter("all");
     setFindingStatusFilter("pending");
   }, [processing.reviewJob?.id, processing.reviewJob?.status]);
+
+  useEffect(() => {
+    const details = processing.reviewDetails;
+    const versionId = details?.version.id;
+    const reviewId = details?.version.snapshot.review?.review_id;
+    if (
+      isDemoMode || !graphReady || !details || !versionId || !reviewId ||
+      processing.versionId !== versionId || processing.reviewBusy || details.confirmed ||
+      details.check_job_id || processing.checkJob?.input_version_id === versionId
+    ) return;
+
+    const attemptKey = `${reviewId}:${versionId}`;
+    if (autoCheckAttemptRef.current === attemptKey) return;
+    autoCheckAttemptRef.current = attemptKey;
+    void processing.runCheck(`auto-check:${attemptKey}`);
+  }, [
+    graphReady,
+    isDemoMode,
+    processing.checkJob?.input_version_id,
+    processing.reviewBusy,
+    processing.reviewDetails,
+    processing.runCheck,
+    processing.versionId,
+  ]);
 
   async function addFiles(files: FileList | File[]) {
     if (processing.busy) return;
@@ -936,41 +1189,93 @@ function App() {
     void processing.decide(findingId, choiceId);
   }
 
-  function sendChatMessage(message?: string) {
+  async function sendChatMessage(message?: string) {
     const text = (message ?? chatDraft).trim();
-    if (!text || !isDemoMode || !hasReconciliation) return;
+    if (!text) return;
 
-    const id = `message-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const userMessage: ChatMessage = { id: `${id}-user`, role: "user", text };
-    const agentMessage: ChatMessage = {
-      id: `${id}-agent`,
-      role: "agent",
-      text: isConfirmed
-        ? "Это демонстрационный ответ. В рабочей версии агент проанализирует запрос и подготовит план правок."
-        : "Запрос принят в демо-режиме. До подтверждения версии можно задавать вопросы, а планы правок будут доступны после подтверждения.",
-    };
+    if (isDemoMode) {
+      if (!hasReconciliation) return;
+      const id = `message-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const userMessage: ChatMessage = { id: `${id}-user`, role: "user", text };
+      const agentMessage: ChatMessage = {
+        id: `${id}-agent`,
+        role: "agent",
+        text: isConfirmed
+          ? "Это демонстрационный ответ. В рабочей версии агент проанализирует запрос и подготовит план правок."
+          : "Запрос принят в демо-режиме. До подтверждения версии можно задавать вопросы, а планы правок будут доступны после подтверждения.",
+      };
+      setChatMessages((current) => [...current, userMessage, agentMessage]);
+      if (message === undefined) setChatDraft("");
+      return;
+    }
 
-    setChatMessages((current) => [...current, userMessage, agentMessage]);
+    if (!canUseLiveChat || !chatSession || chatBusy || !processing.programId) return;
+    const optimisticId = `message-${crypto.randomUUID()}`;
+    const userMessage: ChatMessage = { id: `${optimisticId}-user`, role: "user", text };
+    const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…" };
+    setChatMessages((current) => [...current, userMessage, pendingMessage]);
+    setChatBusy(true);
     if (message === undefined) setChatDraft("");
+    try {
+      const turn = await api<{ id: string; status: "pending" | "completed" | "failed"; run_id: string }>(
+        `/api/v1/programs/${processing.programId}/chat/sessions/${chatSession.id}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({ text }),
+        },
+      );
+      const output = await waitForChatOutput(processing.programId, turn.run_id);
+      const agentMessage = chatOutputMessage(
+        turn.id, output, chatSession.version_id, processing.reviewDetails, processing.job,
+      );
+      setChatMessages((current) => current.map((item) => item.id === pendingMessage.id ? agentMessage : item));
+    } catch (error) {
+      const failedMessage: ChatMessage = {
+        id: pendingMessage.id,
+        role: "agent",
+        text: error instanceof Error ? error.message : "Не удалось выполнить запрос к агенту.",
+      };
+      setChatMessages((current) => current.map((item) => item.id === pendingMessage.id ? failedMessage : item));
+    } finally {
+      setChatBusy(false);
+    }
   }
 
-  function applyChatPlan(messageId: string) {
-    if (!isConfirmed) return;
-    setChatMessages((current) => current.map((message) => (
-      message.id === messageId && message.plan?.status === "pending"
-        ? {
-            ...message,
-            plan: {
-              ...message.plan,
-              status: "applied",
-              validation: [
-                "✓ Сумма баллов по дисциплине равна 100 (правило R-11).",
-                "⚠ Проверьте согласованность формулировки в связанных документах.",
-              ],
-            },
-          }
-        : message
-    )));
+  async function applyChatPlan(messageId: string) {
+    const message = chatMessages.find((item) => item.id === messageId);
+    const plan = message?.plan;
+    if (!plan || plan.status !== "pending") return;
+    if (plan.kind === "demo") {
+      if (!isConfirmed) return;
+      setChatMessages((current) => current.map((item) => (
+        item.id === messageId && item.plan?.kind === "demo" && item.plan.status === "pending"
+          ? {
+              ...item,
+              plan: {
+                ...item.plan,
+                status: "applied",
+                validation: [
+                  "✓ Сумма баллов по дисциплине равна 100 (правило R-11).",
+                  "⚠ Проверьте согласованность формулировки в связанных документах.",
+                ],
+              },
+            }
+          : item
+      )));
+      return;
+    }
+    if (!chatSession) return;
+    const accepted = await processing.acceptChatProposal(
+      chatSession.id, plan.turnId, plan.expectedVersionId,
+    );
+    if (accepted) {
+      setChatMessages((current) => current.map((item) => (
+        item.id === messageId && item.plan?.kind === "proposal"
+          ? { ...item, plan: { ...item.plan, status: "applied" } }
+          : item
+      )));
+    }
   }
 
   function cancelChatPlan(messageId: string) {
@@ -1025,17 +1330,39 @@ function App() {
             {!isDemoMode && processing.program && (
               <div className="program-signature" role="group" aria-label="Подпись программы">
                 <span>Подпись: <strong>{processing.signature ?? "не указана"}</strong></span>
-                <button className="secondary-button" type="button" onClick={processing.changeSignature} disabled={processing.reviewBusy}>
-                  {processing.signature ? "Сменить подпись" : "Указать подпись"}
-                </button>
+                {signatureEditing ? (
+                  <form className="program-signature-editor" onSubmit={(event) => {
+                    event.preventDefault();
+                    if (processing.saveSignature(signatureDraft)) setSignatureEditing(false);
+                  }}>
+                    <label htmlFor="program-signature-input">Имя для подписи</label>
+                    <input id="program-signature-input" type="text" maxLength={120} autoFocus
+                      value={signatureDraft} onChange={(event) => setSignatureDraft(event.target.value)}
+                      disabled={processing.reviewBusy} />
+                    <button className="secondary-button" type="submit" disabled={processing.reviewBusy}>Сохранить</button>
+                    {processing.signature && <button className="competency-cancel-button" type="button"
+                      disabled={processing.reviewBusy} onClick={() => setSignatureEditing(false)}>Отмена</button>}
+                  </form>
+                ) : (
+                  <button className="secondary-button" type="button" onClick={() => {
+                    setSignatureDraft(processing.signature ?? "");
+                    setSignatureEditing(true);
+                  }} disabled={processing.reviewBusy}>
+                    Сменить подпись
+                  </button>
+                )}
               </div>
             )}
             {activeScreen === "Чат" ? (
               <ChatScreen
                 versionNumber={versionNumber}
+                currentVersionId={processing.versionId}
                 isDemoMode={isDemoMode}
                 isConfirmed={isConfirmed}
-                canUseChat={isDemoMode && hasReconciliation}
+                hasSignature={Boolean(processing.signature)}
+                canUseChat={isDemoMode ? hasReconciliation : canUseLiveChat}
+                isBusy={chatBusy || processing.reviewBusy}
+                statusMessage={chatStatus}
                 messages={chatMessages}
                 draft={chatDraft}
                 selectedSourceRef={selectedSourceRef}
@@ -1130,7 +1457,7 @@ function App() {
                   </div>
                   {parsedProgram ? (
                     <span className={`status-pill ${unresolvedCount ? "status-pill--warning" : "status-pill--green"}`}>
-                      {formatIssueSummary(parsedProgram.issues)}
+                      {unresolvedCount > 0 ? `Решений ожидают: ${unresolvedCount} · ` : ""}{formatIssueSummary(parsedProgram.issues)}
                     </span>
                   ) : (
                     <span className="status-pill status-pill--muted">Ожидает обработки</span>
@@ -1169,7 +1496,9 @@ function App() {
                         <div className="validation-stage-heading">
                           <div>
                             <h3>
-                              {checkMatchesCurrentVersion
+                              {checkIsRunning
+                                ? "Проверки по графу выполняются"
+                                : checkMatchesCurrentVersion
                                 ? "Проверки по графу завершены"
                                 : graphReady
                                   ? "Граф сущностей и связей построен"
@@ -1177,19 +1506,19 @@ function App() {
                             </h3>
                             <p>
                               {checkMatchesCurrentVersion
-                                ? `В полной проверке ${displayedValidationIssueCount} замечаний.`
+                                ? `В полной проверке групп замечаний: ${displayedValidationIssueCount}.`
                                 : graphReady
                                   ? "Решения сохранены, граф сущностей и связей собран."
-                                  : `В предварительной сверке ${displayedValidationIssueCount} замечаний${parserDiagnosticCount ? `; диагностика парсинга — ${parserDiagnosticCount}` : ""}.`}
+                                  : `Групп замечаний проверки: ${displayedValidationIssueCount}${parserDiagnosticCount ? `; групп сообщений парсера: ${parserDiagnosticCount}` : ""}.`}
                             </p>
                           </div>
                           <span className={`status-pill ${checkMatchesCurrentVersion || graphReady ? "status-pill--green" : "status-pill--warning"}`}>
-                            {checkMatchesCurrentVersion ? "Проверки завершены" : graphReady ? "Граф готов" : "Предварительный этап"}
+                            {checkIsRunning ? "Проверка выполняется" : checkMatchesCurrentVersion ? "Проверки завершены" : graphReady ? "Граф готов" : "Предварительный этап"}
                           </span>
                         </div>
                         <div className="validation-stage-metrics">
                           <div><strong>{parsedProgram.documentCount}</strong><span>файлов обработано</span></div>
-                          <div><strong>{displayedValidationIssueCount}</strong><span>замечаний проверки</span></div>
+                          <div><strong>{displayedValidationIssueCount}</strong><span>групп замечаний проверки</span></div>
                           <div><strong>{unresolvedCount}</strong><span>решений ожидают</span></div>
                           <div><strong>{displayedCoverage.length}</strong><span>правил в отчёте</span></div>
                         </div>
@@ -1204,17 +1533,14 @@ function App() {
                                   ? `Сохраните решения для ${unresolvedCount} расхождений. После этого система построит граф сущностей и связей.`
                                   : !graphReady
                                     ? "Граф ещё не готов. Завершите обязательные решения и проверьте ошибки построения графа."
-                                    : !r09ReadyForReview
-                                      ? "В сохранённой конфигурации этой сверки R-09 ещё не включено. Перезапустите сверку, чтобы правило попало в проверки."
-                                      : "Граф построен. Запустите проверки по нему кнопкой ниже."}
+                                    : "Граф построен. Автоматические проверки запущены; R-09 и R-11 можно запускать отдельно по запросу."}
                         </p>
                         {!isDemoMode && !checkMatchesCurrentVersion && (
                           <button
                             className="confirm-button validation-run-check-button"
                             type="button"
                             disabled={
-                              unresolvedCount > 0 || !graphReady || processing.reviewBusy ||
-                              checkIsRunning || isConfirmed || !r09ReadyForReview
+                              !graphReady || processing.reviewBusy || checkIsRunning || isConfirmed
                             }
                             onClick={() => void processing.runCheck()}
                           >
@@ -1222,26 +1548,14 @@ function App() {
                               ? "Проверки выполняются…"
                               : processing.reviewBusy
                                 ? "Обрабатываем…"
-                                : !r09ReadyForReview
-                                  ? "Перезапустите сверку для R-09"
-                                  : "Запустить проверки по графу"}
+                                : "Запустить автоматические проверки"}
                           </button>
-                        )}
-                        {!checkMatchesCurrentVersion && !r09ReadyForReview && (
-                          <p className="validation-stage-message validation-stage-message--warning">
-                            R-09 отсутствует или выключено в сохранённом наборе правил. Нажмите «Перезапустить сверку для этого пакета», чтобы подготовить проверку с текущей конфигурацией.
-                          </p>
-                        )}
-                        {!checkMatchesCurrentVersion && savedR11Status === "draft" && (
-                          <p className="validation-stage-message validation-stage-message--warning">
-                            R-11 отсутствует в результатах этой сверки: в сохранённой конфигурации правило было черновым. Нажмите «Перезапустить сверку для этого пакета», чтобы получить результаты с текущей конфигурацией.
-                          </p>
                         )}
                         {displayedCoverage.length > 0 && (
                           <ul className="validation-coverage-list" aria-label="Результаты проверки правил">
                             {displayedCoverage.map((item) => (
                               <li key={item.rule_code}>
-                                <strong>{item.rule_code}</strong>
+                                <strong>{ruleDisplayLabel(item.rule_code)}</strong>
                                 <span className={`validation-coverage-status validation-coverage-status--${item.status}`}>
                                   {coverageStatusLabel(item.status)}
                                 </span>
@@ -1252,37 +1566,73 @@ function App() {
                         )}
                       </section>
                     )}
-                    {findingFilter === "R-08" && <p className="competency-toolbar-note">R-08 сравнивает смысл описаний индикаторов с одинаковым кодом в РПД, РПП и ЦКМВ. Если LLM недоступна, сравнение помечается как невыполненное в замечаниях ниже.</p>}
+                    {!isDemoMode && graphReady && (
+                      <section className="optional-rule-checks" aria-labelledby="optional-rule-checks-title">
+                        <div className="optional-rule-checks-heading">
+                          <div>
+                            <h3 id="optional-rule-checks-title">Семантические проверки по запросу</h3>
+                            <p>Запускаются только по кнопке после построения графа. Их замечания не блокируют подтверждение версии.</p>
+                          </div>
+                        </div>
+                        <div className="optional-rule-check-grid">
+                          {optionalRuleOptions.map(({ code, title, description }) => {
+                            const check = processing.optionalRuleChecks[code];
+                            const running = Boolean(check && ["pending", "processing"].includes(check.status));
+                            const coverage = check?.report?.coverage.find((item) => item.rule_code === code);
+                            const issues = check?.report?.issues.filter((issue) => issue.rule_code === code) ?? [];
+                            const diagnostics = issues.map((issue: ReviewIssue) => {
+                              const documentIds = new Set(issue.source_document_ids ?? []);
+                              for (const ref of processing.reviewDetails?.version.snapshot.source_refs ?? []) {
+                                if (issue.source_ref_ids.includes(ref.id)) documentIds.add(ref.document_id);
+                              }
+                              return reviewDiagnostic(issue, [...documentIds].map((id) => ({
+                                id,
+                                name: processing.job?.files.find((file) => file.document_id === id)?.member_name ?? "Документ пакета",
+                              })));
+                            });
+                            return (
+                              <article className="optional-rule-check-card" key={code}>
+                                <div>
+                                  <span className="optional-rule-code">{code}</span>
+                                  <h4>{title}</h4>
+                                  <p>{description}</p>
+                                </div>
+                                <button
+                                  className="secondary-button"
+                                  type="button"
+                                  disabled={isConfirmed || processing.reviewBusy || checkIsRunning || optionalCheckIsRunning}
+                                  onClick={() => void processing.runOptionalRuleCheck(code)}
+                                >
+                                  {running ? "Проверка выполняется…" : check ? "Запустить снова" : "Запустить проверку"}
+                                </button>
+                                {check?.status === "failed" || check?.status === "conflict" ? (
+                                  <p className="optional-rule-check-status optional-rule-check-status--error" role="alert">
+                                    {check.message || "Не удалось завершить проверку."}
+                                  </p>
+                                ) : coverage ? (
+                                  <p className={`optional-rule-check-status validation-coverage-status--${coverage.status}`} role="status">
+                                    {coverageStatusLabel(coverage.status)}{coverage.reason ? ` · ${coverage.reason}` : ""}
+                                  </p>
+                                ) : check?.status === "pending" || check?.status === "processing" ? (
+                                  <p className="optional-rule-check-status" role="status">Задание поставлено в очередь.</p>
+                                ) : null}
+                                {diagnostics.length > 0 && <DiagnosticList items={diagnostics} />}
+                                {coverage?.status === "passed" && diagnostics.length === 0 && (
+                                  <p className="optional-rule-check-empty" role="status">Проблем не найдено.</p>
+                                )}
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    )}
+                    {findingFilter === "R-08" && <p className="competency-toolbar-note">R-08 группирует формулировки индикаторов с одинаковым кодом в РПД, РПП и ЦКМВ. Отличия в регистре, пробелах, е/ё, краевой пунктуации и принятом сокращении «в т. ч.» не требуют выбора; остальные отличия показываются как варианты для решения пользователя.</p>}
                     {findingFilter === "R-11" && <p className="competency-toolbar-note">R-11 сопоставляет каждый результат обучения в РПД с содержанием раздела 2 и оцениванием из раздела 3. Это смысловая подсказка, а не нормативный вывод: замечания нужно оценить специалисту.</p>}
                     <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
-                      <summary>Замечания проверки · {visibleIssueCount}{findingFilter !== "all" ? ` (фильтр ${findingFilter})` : ""}</summary>
-                      <ul className="issue-list">
-                        {visibleIssues.length === 0 && <li className="competency-empty-issues">Для выбранного правила замечаний нет.</li>}
-                        {visibleIssues.map((issue) => (
-                          <li className={`issue-row${issue.kind === "rpd-alignment" ? " issue-row--rpd-alignment" : ""}`} key={issue.id}>
-                            <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
-                            <span className="issue-copy">
-                              <strong>{issue.title}</strong>
-                              {issue.kind === "rpd-alignment" ? (
-                                <span className="rpd-alignment-details">
-                                  {issue.outcomeText && <span><b>Результат обучения:</b> {issue.outcomeText}</span>}
-                                  {!issue.outcomeText && issue.outcomeId && <span><b>Результат обучения:</b> {issue.outcomeId}</span>}
-                                  {issue.reason && <span><b>Пояснение:</b> {issue.reason}</span>}
-                                  <span>{issue.source} · {issue.ruleId}</span>
-                                  <span>Смысловая подсказка: итог оценивает специалист; это не автоматическое нормативное решение.</span>
-                                </span>
-                              ) : (
-                                <span>{issue.source}{issue.ruleId ? ` · ${issue.ruleId}` : ""}{issue.count && issue.count > 1 ? ` · ×${issue.count}` : ""}</span>
-                              )}
-                            </span>
-                            <span className={`severity-label severity-label--${issue.severity}`}>
-                              {issue.severity === "error" ? "Ошибка" : issue.severity === "warning" ? "Предупреждение" : "Информация"}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
+                      <summary>Диагностика · групп: {visibleIssueCount}{findingFilter !== "all" ? ` · ${findingFilter}` : ""}</summary>
+                      <DiagnosticList items={visibleIssues} />
                     </details>
-                    <div className="finding-list">
+                    <div className="finding-list finding-accordion">
                       {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранным фильтрам нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Проверьте замечания R-08 ниже." : findingFilter === "R-11" ? "R-11 не предлагает готовый вариант: его замечания показаны ниже для экспертной оценки." : "Попробуйте другой фильтр."}</p>}
                       {visibleFindings.map((finding, index) => {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
@@ -1298,15 +1648,20 @@ function App() {
                         const customText = customValues[finding.id] ?? "";
 
                         return (
-                          <div className={`finding-group${isChoiceFinding ? " choice-finding-group" : ""}`} key={finding.id}>
-                            <article className={`finding-card${isResolved ? " is-resolved" : ""}`}>
-                            <div className="finding-topline">
-                              <span className="finding-label">{isChoiceFinding ? `${ruleGroup} · ` : ""}Расхождение {index + 1} из {visibleFindings.length}</span>
+                          <details className={`variant-accordion-item${isResolved ? " is-resolved" : ""}`} key={finding.id} name="validator-variant-findings">
+                            <summary className="variant-accordion-summary">
+                              <span className="variant-accordion-code">{ruleGroup === "other" ? finding.ruleCode : ruleGroup}</span>
+                              <span className="variant-accordion-copy">
+                                <strong>{finding.title}</strong>
+                                <span>{isChoiceFinding && finding.choices.length > 0
+                                  ? `${finding.choices.length} ${formatCountWithWords(finding.choices.length, "вариант", "варианта", "вариантов")}`
+                                  : `Расхождение ${index + 1} из ${visibleFindings.length}`}</span>
+                              </span>
                               <span className={`finding-status${isResolved ? " finding-status--resolved" : ""}`}>
                                 {isResolved ? "Решено" : "Нужно решение"}
                               </span>
-                            </div>
-                            <h3>{finding.title}</h3>
+                            </summary>
+                            <div className="variant-accordion-body">
                             {!isChoiceFinding && <p className="finding-description">{finding.description}</p>}
                             {isChoiceFinding && finding.choices.length > 0 && (
                               <p className="competency-choice-prompt">
@@ -1320,7 +1675,6 @@ function App() {
                             {finding.choices.length === 0 && (
                               <p className="finding-help">Для этого расхождения сервер пока не подготовил варианты решения.</p>
                             )}
-                          </article>
                             {(finding.choices.length > 0 || allowsCustomChoice) && (
                               <fieldset className="choice-list">
                                 <legend className="visually-hidden">Выберите верное значение</legend>
@@ -1464,7 +1818,8 @@ function App() {
                                 Введённое значение остаётся черновиком и не отправляется на сервер.
                               </p>
                             )}
-                          </div>
+                            </div>
+                          </details>
                         );
                       })}
                     </div>
@@ -1477,27 +1832,14 @@ function App() {
                     )}
 
                     {!isDemoMode && checkMatchesCurrentVersion && checkWarnings.length > 0 && (
-                      <fieldset className="choice-list" aria-label="Принятие предупреждений">
-                        <legend>Подтвердите, что предупреждения учтены</legend>
-                        {checkWarnings.map((warning) => (
-                          <label className="choice-card" key={warning.id}>
-                            <input
-                              type="checkbox"
-                              checked={acceptedWarningIds.includes(warning.id)}
-                              disabled={isConfirmed || processing.reviewBusy}
-                              onChange={(event) => setAcceptedWarningIds((current) => (
-                                event.target.checked
-                                  ? [...new Set([...current, warning.id])]
-                                  : current.filter((id) => id !== warning.id)
-                              ))}
-                            />
-                            <span className="choice-content">
-                              <span className="choice-value">{warning.message}</span>
-                              <span className="choice-source">Предупреждение проверки</span>
-                            </span>
-                          </label>
-                        ))}
-                      </fieldset>
+                      <section className="warning-acknowledgements" aria-label="Принятие предупреждений">
+                        <h3>Подтвердите, что группы предупреждений учтены</h3>
+                        <p>Подтверждение группы относится ко всем указанным в ней записям. Подробности доступны в каждой группе.</p>
+                        <DiagnosticList items={checkWarningDiagnostics} acceptance={{
+                          acceptedIds: acceptedWarningIds, disabled: isConfirmed || processing.reviewBusy,
+                          onChange: (ids, accepted) => setAcceptedWarningIds((current) => updateAcceptedWarnings(current, ids, accepted)),
+                        }} />
+                      </section>
                     )}
 
                     {!isDemoMode && checkMatchesCurrentVersion && checkBlockingCount > 0 && (
@@ -1526,7 +1868,7 @@ function App() {
                                   : !isDemoMode && skippedRequiredChecks.length > 0
                                   ? "Не все обязательные проверки выполнены, версия пока не подтверждена."
                                     : !isDemoMode && checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))
-                                    ? "Примите каждое предупреждение, чтобы подтвердить проверенную версию."
+                                    ? "Подтвердите, что все группы предупреждений учтены."
                                     : "После подтверждения эта версия станет основой для работы с программой."}
                         </span>
                       </div>

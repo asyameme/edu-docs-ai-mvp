@@ -126,8 +126,18 @@ class ChatError(BaseModel):
     detail: str
 
 
+class ChatConfigRead(BaseModel):
+    available: bool
+
+
 def repo(request):
     return ChatRepository(request.app.state.resources.postgres)
+
+
+@router.get("/config", response_model=ChatConfigRead)
+def chat_config():
+    """Возвращает фронтенду безопасный признак готовности API-модели чата."""
+    return ChatConfigRead(available=get_settings().chat_api_ready)
 
 
 def checked_run_session(program_id: UUID, run_id: UUID, request: Request) -> UUID:
