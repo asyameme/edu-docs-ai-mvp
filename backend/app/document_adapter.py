@@ -202,11 +202,15 @@ class DocumentBuilder:
         *,
         create=False,
         original_member=None,
+        shared_discipline=False,
     ):
         ref = member["source_ref"]
-        source = self.resolve(document_id, source_kind, source_key, ref, create=create)
+        if shared_discipline:
+            sources = self.local[document_id, source_kind, str(source_key)]
+        else:
+            sources = [self.resolve(document_id, source_kind, source_key, ref, create=create)]
         target = self.resolve(document_id, target_kind, target_key, ref, create=create)
-        if source is None or target is None:
+        if not sources or sources[0] is None or target is None:
             self.unresolved.append({"document_id": document_id, **deepcopy(member)})
             self.issues.append(
                 {
@@ -222,9 +226,10 @@ class DocumentBuilder:
             if original_member is not None
             else attributes
         )
-        self.relation(
-            document_id, source, target, relation_type, ref, attributes, observed_attributes
-        )
+        for source in sources:
+            self.relation(
+                document_id, source, target, relation_type, ref, attributes, observed_attributes
+            )
 
 
 def to_snapshot_v2(program_id, files, *, original_files=None):
@@ -288,6 +293,14 @@ def to_snapshot_v2(program_id, files, *, original_files=None):
 
     for document_id, output in normalized_documents.items():
         original_relations = originals[document_id].get("relations", [])
+        discipline_names = {member["name"] for member in output.get("disciplines", [])}
+        # В РПД с несколькими профилями таблица результатов общая.
+        # Нагрузка хранится отдельно для каждого профиля, а компетенции относятся к обоим.
+        multi_profile_rpd = (
+            output["meta"]["doc_type"] == "RPD"
+            and len(output["disciplines"]) > 1
+            and len(discipline_names) == 1
+        )
         if len(output.get("relations", [])) != len(original_relations):
             raise ValueError("Выбор изменил структуру списка связей")
         for member, original_member in zip(
@@ -305,6 +318,13 @@ def to_snapshot_v2(program_id, files, *, original_files=None):
                 member["kind"],
                 {k: v for k, v in member.items() if k != "source_ref"},
                 original_member=original_member,
+                shared_discipline=(
+                    multi_profile_rpd
+                    and member["src_entity"] == "discipline"
+                    and member["dst_entity"] == "competency"
+                    and member["kind"] == "формирует"
+                    and member["src_key"] in discipline_names
+                ),
             )
         matrix_cells = output.get("matrix_cells", [])
         original_matrix_cells = originals[document_id].get("matrix_cells", [])
