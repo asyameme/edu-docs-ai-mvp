@@ -2,6 +2,7 @@
 
 import io
 import json
+from concurrent.futures import Executor
 from uuid import UUID
 
 import httpx
@@ -18,9 +19,10 @@ from app.repository import Repository
 
 
 class ImportActivities:
-    def __init__(self, pool, settings):
+    def __init__(self, pool, settings, parser_executor: Executor | None = None):
         self.repo = ImportRepository(pool)
         self.settings = settings
+        self.parser_executor = parser_executor
 
     def job(self, job_id):
         return self.repo.job(UUID(job_id), include_output=True)
@@ -70,8 +72,11 @@ class ImportActivities:
                             chunks.append(chunk)
                 raw = json.loads(b"".join(chunks))
             else:
-                raw = parse_local_document(
-                    item["member_name"], document["content"], job["program_id"]
+                arguments = (item["member_name"], document["content"], job["program_id"])
+                raw = (
+                    self.parser_executor.submit(parse_local_document, *arguments).result()
+                    if self.parser_executor is not None
+                    else parse_local_document(*arguments)
                 )
                 if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > 10 * 1024 * 1024:
                     raise ValueError("Ответ парсера превышает 10 МиБ")
@@ -155,12 +160,12 @@ class ImportActivities:
                     }
                 )
         has_incomplete_files = len(successful) != len(job["files"])
-        has_parse_errors = any(issue.get("severity") == "error" for issue in issues)
+        has_parse_warnings = any(issue.get("severity") in {"warning", "error"} for issue in issues)
         status = (
             "failed"
             if not successful
             else "partial"
-            if has_incomplete_files or has_parse_errors
+            if has_incomplete_files or has_parse_warnings
             else "completed"
         )
         self.repo.finish(

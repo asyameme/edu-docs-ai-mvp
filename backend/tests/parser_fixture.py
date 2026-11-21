@@ -10,12 +10,21 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 attempts = {}
 keys = {}
+active_parallel_parses = 0
+max_parallel_parses = 0
 
 
 @app.post("/parse")
 async def parse(file: UploadFile, request: Request):
+    global active_parallel_parses, max_parallel_parses
     content = await file.read()
-    await asyncio.sleep(0.2)
+    if content.startswith(b"parallel-"):
+        active_parallel_parses += 1
+        max_parallel_parses = max(max_parallel_parses, active_parallel_parses)
+        await asyncio.sleep(1.5)
+        active_parallel_parses -= 1
+    else:
+        await asyncio.sleep(0.2)
     digest = hashlib.sha256(content).hexdigest()
     attempts[digest] = attempts.get(digest, 0) + 1
     keys.setdefault(digest, []).append(request.headers.get("Idempotency-Key"))
@@ -96,3 +105,16 @@ async def parse(file: UploadFile, request: Request):
 @app.get("/calls/{digest}")
 def calls(digest: str):
     return {"count": attempts.get(digest, 0), "keys": keys.get(digest, [])}
+
+
+@app.post("/parallel-stats/reset")
+async def reset_parallel_stats():
+    global active_parallel_parses, max_parallel_parses
+    active_parallel_parses = 0
+    max_parallel_parses = 0
+    return {"active": active_parallel_parses, "max_active": max_parallel_parses}
+
+
+@app.get("/parallel-stats")
+async def parallel_stats():
+    return {"active": active_parallel_parses, "max_active": max_parallel_parses}

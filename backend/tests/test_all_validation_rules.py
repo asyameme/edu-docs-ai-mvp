@@ -6,7 +6,10 @@ from uuid import uuid4
 
 import pytest
 
+from app.document_analysis import analyze_documents
 from app.domain import SnapshotV2
+from app.review_contract import AnalysisV2, CheckResult
+from app.review_projection import validator_result_for_contract
 from app.local_parser import parse_local_document
 from app.parser_adapter import to_snapshot
 from app.validation_bridge import project_snapshot_documents, run_local_check
@@ -34,6 +37,7 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
     original = deepcopy(inputs)
     config = load_rules()
     original_config = deepcopy(config)
+    analysis = analyze_documents(inputs, uuid4(), config=config)
     projected = project_snapshot_documents(inputs, snapshot)
     result = run_local_check(projected, snapshot, uuid4(), config=config)
     coverage = {entry["rule_code"]: entry for entry in result["coverage"]}
@@ -56,6 +60,19 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
         "R-01-graph", "R-08-local-reference", "R-04",
     ]
     assert all(entry["checks"] > 0 for entry in coverage.values() if entry["status"] == "passed")
+    selected = {"R-10", "R-13", "R-14", "R-15"}
+    assert all(rule["status"] == "ready" for rule in config["rules"]
+               if rule["id"] in selected)
+    AnalysisV2.model_validate(validator_result_for_contract(analysis))
+    CheckResult.model_validate(validator_result_for_contract(result))
+    for phase_result in (analysis, result):
+        phase_coverage = {entry["rule_code"]: entry for entry in phase_result["coverage"]}
+        assert set(phase_coverage) == all_rules
+        assert {"R-09", "R-11"}.isdisjoint(phase_coverage)
+        assert phase_result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+        for code in selected:
+            assert phase_coverage[code]["status"] == "passed", phase_coverage[code]
+            assert phase_coverage[code]["checks"] > 0
     assert inputs == original
     assert config == original_config
     print("\nРеальные документы:", {

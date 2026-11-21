@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import io
 import json
 from collections.abc import AsyncIterable
 from datetime import datetime
@@ -14,7 +13,6 @@ from fastapi import APIRouter, Depends, Request, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel
-from starlette.datastructures import UploadFile as StoredUpload
 
 from app.errors import DomainError
 from app.import_archive import read_package
@@ -72,8 +70,15 @@ def upload_package(
     try:
         fingerprint, members = read_package(file, originals.max_bytes)
         for member in members:
-            upload = StoredUpload(filename=member.name, file=io.BytesIO(member.content))
-            stored.append((member.name, originals.save(upload), member.parse))
+            stored.append(
+                (
+                    member.name,
+                    originals.save_bytes(
+                        member.name, member.content, precomputed_sha256=member.sha256
+                    ),
+                    member.parse,
+                )
+            )
         imports = ImportRepository(repo.pool)
         job_id, _ = imports.create(program_id, fingerprint, operation_key, stored)
     finally:

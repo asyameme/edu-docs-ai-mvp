@@ -713,48 +713,97 @@ def _semester_workload_totals(rule: Mapping[str, Any], docs: Sequence[Document])
 
 
 def _outcome_indicator_links(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-10: проверять только явные связи, не домысливая их по тексту."""
+    """R-10: direct CKMV links; explicit competency paths for RPD/RPP."""
     checks, findings = 0, []
     for doc in docs:
-        if doc.role not in {"rpd","rpp","ckmv"}:
+        if doc.role not in {"rpd", "rpp", "ckmv"}:
             continue
         outcomes = _records(doc, "$.learning_outcomes[*]")
-        indicators = {r.get("code") for r in _records(doc,"$.indicators[*]")}
-        relations = _records(doc,"$.relations[*]")
-        explicit = _records(doc,"$.indicator_outcome_links[*]")
-        if not outcomes:
-            continue
-        for link in explicit:
+        ids = {_code(row.get("local_id")) for row in outcomes} - {None}
+        indicators = {_code(row.get("code")) for row in _records(doc, "$.indicators[*]")} - {None}
+        competencies = {_code(row.get("code")) for row in _records(doc, "$.competencies[*]")} - {None}
+        linked = set()
+        for link in _records(doc, "$.indicator_outcome_links[*]"):
             checks += 1
-            code = link.get("indicator_code")
-            if code not in indicators:
-                findings.append(Finding("unknown_outcome_indicator", "failed", f"Индикатор {code!r} для результата обучения отсутствует в {doc.label}.", {"source_refs": [_source_ref(doc,link)]}))
-        # Само отсутствие прямого отношения не является нарушением:
-        # РПД/РПП содержат опосредованные связи через компетенцию.
-        if not explicit:
-            mapped = {(r.get("src_key"),r.get("dst_key")) for r in relations if r.get("src_entity")=="competency" and r.get("dst_entity")=="indicator"}
-            for outcome in outcomes:
-                via = [r.get("src_key") for r in relations if r.get("src_entity")=="competency" and r.get("dst_entity")=="learning_outcome" and r.get("dst_key")==outcome.get("local_id")]
-                checks += 1
-                if not via:
-                    findings.append(Finding("outcome_without_competency", "needs_review", f"Результат {outcome.get('local_id')} не связан с компетенцией.", {"source_refs": [_source_ref(doc,outcome)]}))
-                elif not any((c,ind) in mapped for c in via for ind in indicators):
-                    findings.append(Finding("outcome_without_indicator", "needs_review", f"Для результата {outcome.get('local_id')} не найден индикатор через компетенцию.", {"source_refs": [_source_ref(doc,outcome)]}))
-    return _result(rule,checks,findings)
+            ind, outcome = _code(link.get("indicator_code")), _code(link.get("learning_outcome_id"))
+            if ind not in indicators or outcome not in ids:
+                findings.append(Finding("unknown_outcome_indicator", "failed",
+                    f"{doc.label}: некорректная ссылка индикатор–результат.", {"source_refs": [_source_ref(doc, link)]}))
+            else:
+                linked.add(outcome)
+        if doc.role != "ckmv":
+            parents = defaultdict(set)
+            with_indicator = set()
+            for rel in _records(doc, "$.relations[*]"):
+                parent, target = _code(rel.get("src_key")), _code(rel.get("dst_key"))
+                if rel.get("src_entity") != "competency" or parent not in competencies:
+                    continue
+                if rel.get("dst_entity") == "indicator" and rel.get("kind") == "имеет" and target in indicators:
+                    with_indicator.add(parent)
+                if rel.get("dst_entity") == "learning_outcome" and rel.get("kind") == "включает" and target in ids:
+                    parents[target].add(parent)
+            linked.update(outcome for outcome, codes in parents.items() if codes & with_indicator)
+        for outcome in outcomes:
+            checks += 1
+            if _code(outcome.get("local_id")) not in linked:
+                findings.append(Finding("outcome_without_indicator", "needs_review",
+                    f"{doc.label}: для результата {outcome.get('local_id')} не подтверждена связь с индикатором.",
+                    {"source_refs": [_source_ref(doc, outcome)]}))
+    return _result(rule, checks, findings)
 
 
 def _indicator_hierarchy(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-15: код индикатора начинается с кода своей компетенции."""
+    """R-15: structural parent prefix and numeric suffix; gaps are allowed."""
     checks, findings = 0, []
-    for doc in _role_docs(docs,"ckmv"):
-        for indicator in _records(doc,"$.indicators[*]"):
-            code, parent = indicator.get("code"), indicator.get("competency_code")
-            if not isinstance(code,str) or not isinstance(parent,str):
-                continue
+    for doc in _role_docs(docs, "ckmv"):
+        ordered = defaultdict(list)
+        for indicator in _records(doc, "$.indicators[*]"):
             checks += 1
-            if not code.startswith(parent + "."):
-                findings.append(Finding("indicator_parent_mismatch","failed",f"Индикатор {code!r} не относится к компетенции {parent!r} по коду.",{"source_refs": [_source_ref(doc,indicator)]}))
-    return _result(rule,checks,findings)
+            code, parent = _code(indicator.get("code")), _code(indicator.get("competency_code"))
+            evidence = {"source_refs": [_source_ref(doc, indicator)]}
+            if not code or not parent:
+                findings.append(Finding("indicator_code_missing", "needs_review", "Не указан код индикатора или компетенции.", evidence))
+            elif not code.startswith(parent + "."):
+                findings.append(Finding("indicator_parent_mismatch", "failed", f"Индикатор {code!r} не относится к {parent!r} по коду.", evidence))
+            else:
+                parts = code[len(parent)+1:].split(".")
+                if any(not part.isascii() or not part.isdigit() for part in parts):
+                    findings.append(Finding("indicator_suffix_unrecognized", "needs_review", f"Нестандартный суффикс индикатора {code!r}.", evidence))
+                else:
+                    ref = evidence["source_refs"][0]
+                    section, table, row = ref.get("section"), ref.get("table"), ref.get("row")
+                    if section and type(table) is int and type(row) is int:
+                        ordered[(parent, section, table)].append((row, tuple(map(int, parts)), ref, code))
+        for entries in ordered.values():
+            by_number = defaultdict(list)
+            by_row = defaultdict(list)
+            for entry in entries:
+                by_number[entry[1]].append(entry)
+                by_row[entry[0]].append(entry)
+            for group in by_number.values():
+                if len({entry[3] for entry in group}) > 1:
+                    checks += 1
+                    findings.append(Finding("indicator_number_ambiguous", "needs_review",
+                        "Разные коды индикаторов имеют одинаковый числовой суффикс.",
+                        {"source_refs": [entry[2] for entry in group],
+                         "codes": sorted({entry[3] for entry in group})}))
+            ambiguous_rows = [group for group in by_row.values()
+                              if len({entry[1] for entry in group}) > 1]
+            if ambiguous_rows:
+                for group in ambiguous_rows:
+                    checks += 1
+                    findings.append(Finding("indicator_order_ambiguous", "needs_review",
+                        "Порядок разных индикаторов в одной строке не определён.",
+                        {"source_refs": [entry[2] for entry in group]}))
+                continue
+            entries.sort(key=lambda entry: entry[0])
+            for left, right in zip(entries, entries[1:]):
+                checks += 1
+                if left[1] > right[1]:
+                    findings.append(Finding("indicator_order_unexpected", "needs_review",
+                        "Номера индикаторов идут не по возрастанию в одном разделе.",
+                        {"source_refs": [left[2], right[2]]}))
+    return _result(rule, checks, findings)
 
 
 def _competency_coverage(
@@ -820,44 +869,48 @@ def _competency_coverage(
 
 
 def _required_sections(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-13: только если парсер сохраняет перечень разделов ЦКМВ."""
-    required = rule.get("inputs",{}).get("required_sections",[])
+    """R-13: explicit sections or positive evidence from parsed competency rows."""
+    required = rule.get("inputs", {}).get("required_sections", [])
     checks, findings = 0, []
-    for doc in _role_docs(docs,"ckmv"):
-        sections = _records(doc,"$.document_sections[*]")
-        if not sections or not required:
-            continue
+    def normalized(value):
+        return " ".join(value.casefold().replace("ё", "е").split()) if isinstance(value, str) else ""
+    for doc in _role_docs(docs, "ckmv"):
+        sections = _records(doc, "$.document_sections[*]")
+        observed = {normalized(_source_ref(doc, row).get("section")) for row in _records(doc, "$.competencies[*]")}
         for title in required:
             checks += 1
-            hits = [s for s in sections if str(s.get("title","")).strip().casefold() == str(title).strip().casefold()]
-            if not hits or not any(str(s.get("text","")).strip() for s in hits):
-                findings.append(Finding("required_section_missing","failed",f"Обязательный раздел ЦКМВ отсутствует или пуст: {title}.",{"source_refs": [_source_ref(doc)]}))
-    return _result(rule,checks,findings)
+            key = normalized(title)
+            hits = [row for row in sections if normalized(row.get("title")) == key]
+            if any(isinstance(row.get("text"), str) and row["text"].strip() for row in hits) or key in observed:
+                continue
+            # SourceRef.section is positive evidence only; absence does not prove a missing heading.
+            status = "failed" if hits and not doc.data.get("parse_issues") else "needs_review"
+            findings.append(Finding("required_section_missing", status,
+                f"Не подтверждено содержание раздела ЦКМВ: {title}.", {"source_refs": [_source_ref(doc, row) for row in hits] or [_source_ref(doc)]}))
+    return _result(rule, checks, findings)
 
 
 def _education_language(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-14: не угадываем язык по тексту, проверяем только явные поля."""
+    """R-14: compare explicit language fields within the same known program."""
     checks, findings = 0, []
-    for program in _role_docs(docs,"characteristic"):
-        info=program.data.get("program",{})
-        if not isinstance(info,Mapping):
+    def languages(value):
+        if not isinstance(value, list) or not value or any(not isinstance(x, str) or not x.strip() for x in value):
+            return None
+        return {" ".join(x.casefold().split()) for x in value}
+    for doc in docs:
+        if doc.role not in {"rpd", "rpp"}:
             continue
-        allowed=info.get("education_languages")
-        if not isinstance(allowed,list) or not allowed:
-            continue
-        known={str(lang).strip().casefold() for lang in allowed}
-        for doc in docs:
-            if doc.role not in {"rpd","rpp"} or (doc.program_id and program.program_id and doc.program_id != program.program_id):
-                continue
-            language=doc.data.get("education_languages")
-            if language is None:
-                continue
-            for lang in language if isinstance(language,list) else [language]:
-                checks += 1
-                if str(lang).strip().casefold() not in known:
-                    language_ref = _source_ref(doc, {"source_ref": doc.data.get("education_languages_source_ref")})
-                    findings.append(Finding("language_not_allowed","failed",f"Язык {lang!r} в {doc.label} не разрешён характеристикой программы.",{"source_refs": [_source_ref(program, info), language_ref]}))
-    return _result(rule,checks,findings)
+        actual = languages(doc.data.get("education_languages"))
+        language_ref = _source_ref(doc, {"source_ref": doc.data.get("education_languages_source_ref")})
+        programs = [p for p in _role_docs(docs, "characteristic") if doc.program_id and p.program_id == doc.program_id]
+        allowed = [languages(p.data.get("program", {}).get("education_languages")) if isinstance(p.data.get("program"), Mapping) else None for p in programs]
+        checks += 1
+        refs = [_source_ref(p, p.data.get("program") if isinstance(p.data.get("program"), Mapping) else None) for p in programs] + [language_ref]
+        if actual is None or not allowed or any(x is None or x != allowed[0] for x in allowed):
+            findings.append(Finding("language_data_incomplete", "needs_review", f"{doc.label}: нет однозначных данных о языках программы и документа.", {"source_refs": refs}))
+        elif actual - allowed[0]:
+            findings.append(Finding("language_not_allowed", "failed", f"{doc.label}: языки не разрешены характеристикой: {', '.join(sorted(actual - allowed[0]))}.", {"source_refs": refs}))
+    return _result(rule, checks, findings)
 
 
 def _code(value: Any) -> str | None:

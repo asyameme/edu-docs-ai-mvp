@@ -261,7 +261,7 @@ def test_reads_docx_source_after_import_and_review_from_postgres():
                     context_paragraphs=0,
                 )
             )
-            with pytest.raises(ModelRetry, match="Фрагмент источника недоступен"):
+            with pytest.raises(ModelRetry, match="Не удалось выполнить чтение"):
                 asyncio.run(
                     port.read_source_fragment(
                         program_id=uuid4(),

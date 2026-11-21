@@ -322,29 +322,37 @@ rules:
     phases: ["graph_validation"]
     name: "Связь результатов обучения с индикаторами"
     type: "outcome_indicator_links"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
     notes: "В ЦКМВ используются явные indicator_outcome_links; в РПД/РПП допускается опосредованная связь через компетенцию."
 
   - id: "R-15"
     phases: ["graph_validation"]
     name: "Принадлежность индикатора компетенции по коду"
     type: "indicator_hierarchy"
-    status: "draft"
-    notes: "Структурная часть: проверяется префикс кода; семантическая корректность и порядок уровней требуют отдельной проверки."
+    status: "ready"
+    required_for_confirmation: false
+    notes: "Проверяется префикс и числовой суффикс. Пропуски номеров и ведущие нули допустимы по образцу. Обратный порядок в одном разделе требует ручной проверки."
 
 
   - id: "R-13"
     phases: ["graph_validation"]
     name: "Обязательные разделы ЦКМВ"
     type: "required_sections"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
     inputs:
-      required_sections: []
-    notes: "До утверждения перечня разделов и появления document_sections в ЦКМВ проверка пропускается."
+      required_sections:
+        - "Профессиональные компетенции базового уровня"
+        - "Профессиональные перекрестные компетенции базового уровня"
+        - "Профессиональные перекрестные компетенции топ-уровня"
+        - "Профессиональные ключевые компетенции для программ топ-уровня"
+    notes: "Пилотный перечень по образцу ЦКМВ; не универсальная норма. Отсутствие свидетельств в source_ref.section требует ручной проверки."
 
   - id: "R-14"
     phases: ["graph_validation"]
     name: "Язык обучения дисциплины и программы"
     type: "education_language"
-    status: "draft"
+    status: "ready"
+    required_for_confirmation: false
     notes: "Проверяется при наличии явно указанных языков в РПД/РПП и характеристике."

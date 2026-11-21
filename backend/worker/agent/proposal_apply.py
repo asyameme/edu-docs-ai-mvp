@@ -248,28 +248,28 @@ def apply_change(snapshot: SnapshotV2, change: ApprovedChange) -> SnapshotV2:
 def generation_inputs(
     snapshot: SnapshotV2, changes: list[ApprovedChange]
 ) -> tuple[list[FieldChange], list[FieldEvidence], list[SourceEvidence]]:
-    """Вход ``build_generation_documents`` для утверждённых правок.
+    """Вход ``build_generation_documents`` для итогового графа и новых правок.
 
-    Свидетельства отдаются все: факт, записанный в нескольких документах,
-    заменяется во всех них сразу (правило слоя патчей). Идентификаторы
-    переводятся в строки — контракт генерации строковый.
+    Текущие изменения накладываются на копию графа; итог сравнивается с
+    первоначальными наблюдениями всех документов.
     """
 
+    from app.generation_bridge import snapshot_changes
+
+    final_snapshot = snapshot.model_copy(deep=True)
+    for change in changes:
+        final_snapshot = apply_change(final_snapshot, change)
+
     refs = {ref.id: ref for ref in snapshot.source_refs}
-    field_changes: list[FieldChange] = []
+    field_changes = snapshot_changes(final_snapshot)
     links: list[FieldEvidence] = []
     used_refs: set[UUID] = set()
-    for change in changes:
-        field_changes.append(
-            FieldChange(
-                change.target_kind,
-                str(change.target_id),
-                change.field_path,
-                change.new_value,
-            )
-        )
+    for change in field_changes:
         for link in _evidence_links(
-            snapshot, change.target_kind, change.target_id, change.field_path
+            snapshot,
+            change.target_kind,
+            UUID(change.target_id),
+            change.field_path,
         ):
             used_refs.add(link.source_ref_id)
             observed = link.observed_value
@@ -280,7 +280,7 @@ def generation_inputs(
             links.append(
                 FieldEvidence(
                     change.target_kind,
-                    str(change.target_id),
+                    change.target_id,
                     change.field_path,
                     str(link.source_ref_id),
                     observed,
