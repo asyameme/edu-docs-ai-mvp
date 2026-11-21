@@ -416,6 +416,23 @@
           },
           "title": "Documents",
           "type": "array"
+        },
+        "rule_codes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 2,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Codes"
         }
       },
       "required": [
@@ -2202,6 +2219,17 @@
           },
           "title": "Variants",
           "type": "array"
+        },
+        "rpd_alignment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpdAlignmentSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2288,6 +2316,67 @@
       "title": "RoleCompetencyLink",
       "type": "object"
     },
+    "RpdAlignmentSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "outcome_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outcome Id"
+        },
+        "outcome_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outcome Text"
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "enum": [
+                "supported",
+                "gap",
+                "uncertain",
+                "invalid"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Classification"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "title": "RpdAlignmentSummary",
+      "type": "object"
+    },
     "RuleCoverage": {
       "additionalProperties": false,
       "properties": {
@@ -2305,6 +2394,7 @@
           "enum": [
             "passed",
             "failed",
+            "needs_review",
             "skipped",
             "not_applicable"
           ],
@@ -2356,7 +2446,6 @@
           "items": {
             "type": "string"
           },
-          "minItems": 1,
           "title": "Required Rules",
           "type": "array"
         },
@@ -2373,7 +2462,6 @@
         "id",
         "revision",
         "config",
-        "required_rules",
         "required_document_types"
       ],
       "title": "Ruleset",

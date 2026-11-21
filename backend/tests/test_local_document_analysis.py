@@ -30,15 +30,38 @@ def hours_config():
     return {**config, "rules": [rule]}
 
 
+def formulation_package():
+    documents = []
+    for index, kind in enumerate(("RPD", "RPP")):
+        parsed = payload(kind)
+        name = f"document-{index}.docx"
+        parsed["meta"]["file_name"] = name
+        parsed["competencies"] = [{
+            "code": "УК-1",
+            "formulation": f"Формулировка {index}",
+            "source_ref": {"file": name, "paragraph_index": 2},
+        }]
+        documents.append({"document_id": str(uuid4()), "parsed": parsed})
+    return documents
+
+
+def formulation_config():
+    config = load_rules()
+    rule = next(r for r in config["rules"] if r["id"] == "R-07")
+    rule["status"] = "ready"
+    rule["required_for_confirmation"] = True
+    return {**config, "rules": [rule]}
+
+
 def test_real_rule_yields_document_choices_without_building_graph(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("Предграфовый анализ не должен строить граф")
 
     monkeypatch.setattr("app.document_adapter.to_snapshot_v2", forbidden)
-    documents = package()
+    documents = formulation_package()
     original = deepcopy(documents)
     job_id = uuid4()
-    config = hours_config()
+    config = formulation_config()
     result = analyze_documents(documents, job_id, config=config)
     AnalysisV2.model_validate(validator_result_for_contract(result))
     assert result == analyze_documents(documents, job_id, config=config)
@@ -52,9 +75,8 @@ def test_real_rule_yields_document_choices_without_building_graph(monkeypatch):
     original_by_id = {d["document_id"]: d["parsed"] for d in documents}
     for variant in issue["variants"]:
         resolved = apply_document_mutations(original_by_id, variant["changes"])
-        values = [d.get("disciplines", d.get("curriculum_items"))[0]["hours_total"]
-                  for d in resolved.values()]
-        assert values[0] == values[1]
+        values = [d["competencies"][0]["formulation"] for d in resolved.values()]
+        assert len(set(values)) == 1
         again = analyze_documents(
             [{"document_id": i, "parsed": d} for i, d in resolved.items()], uuid4(), config=config
         )
@@ -198,25 +220,22 @@ def test_r01_transitive_code_candidates_form_one_decision_group():
 
 
 def test_ambiguous_locator_keeps_finding_without_fabricating_choices():
-    documents = package()
-    documents[0]["parsed"]["disciplines"].append(
-        deepcopy(documents[0]["parsed"]["disciplines"][0])
+    documents = formulation_package()
+    documents[0]["parsed"]["competencies"].append(
+        deepcopy(documents[0]["parsed"]["competencies"][0])
     )
-    result = analyze_documents(documents, uuid4(), config=hours_config())
+    result = analyze_documents(documents, uuid4(), config=formulation_config())
     assert result["issues"]
     assert all(not i["variants"] and not i["requires_decision"] for i in result["issues"])
     assert all(i["evidence"]["document_mapping_limitations"] for i in result["issues"])
 
 
 def test_duplicate_filenames_are_resolved_by_document_identity():
-    documents = package()
+    documents = formulation_package()
     for item in documents:
         item["parsed"]["meta"]["file_name"] = "same.docx"
-        for rows in (item["parsed"].get("disciplines", []),
-                     item["parsed"].get("curriculum_items", [])):
-            for row in rows:
-                row["source_ref"]["file"] = "same.docx"
-    result = analyze_documents(documents, uuid4(), config=hours_config())
+        item["parsed"]["competencies"][0]["source_ref"]["file"] = "same.docx"
+    result = analyze_documents(documents, uuid4(), config=formulation_config())
     assert len(result["issues"][0]["variants"]) == 2
 
 
@@ -308,13 +327,13 @@ def test_graph_check_omits_drafts_and_keeps_active_rules():
 def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp_path):
     from app.review_activities import ReviewActivities
 
-    documents = package()
+    documents = formulation_package()
     for item in documents:
         item["sha256"] = item["parsed"]["meta"]["file_hash"]
     job = {"id": uuid4(), "program_id": uuid4(), "input_version_id": uuid4(),
            "report": {}, "parameters": {
                "purpose": "prepare", "executor": "local", "schema_version": 2,
-               "local_rules": hours_config(),
+               "local_rules": formulation_config(),
                "implementation_revision": validation_implementation_revision(),
                "input": {"documents": documents},
            }}
@@ -348,18 +367,25 @@ def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp
     assert len(published) == 1
 
 
+@pytest.mark.parametrize(("phase", "rule_id"), [("document", "R-07"), ("graph", "R-02")])
 @pytest.mark.parametrize(("rule_revision", "config_revision", "expected"), [
     ("rule-7", "profile-4", "rule-7"),
     (None, "profile-4", "profile-4"),
 ])
-def test_explicit_revision_is_preserved_on_both_phases(rule_revision, config_revision, expected):
-    documents = package()
-    config = hours_config()
+def test_explicit_revision_is_preserved_in_each_phase(
+    phase, rule_id, rule_revision, config_revision, expected
+):
+    documents = formulation_package() if phase == "document" else package()
+    config = formulation_config() if phase == "document" else hours_config()
     config["revision"] = config_revision
     if rule_revision:
-        config["rules"][0]["revision"] = rule_revision
-    analysis = analyze_documents(documents, uuid4(), config=config)
-    checked = run_local_check(documents, SnapshotV2(), uuid4(), config=config)
-    for result in (analysis, checked):
-        assert result["coverage"][0]["rule_revision"] == expected
-        assert result["issues"][0]["rule_revision"] == expected
+        next(rule for rule in config["rules"] if rule["id"] == rule_id)["revision"] = rule_revision
+    result = (
+        analyze_documents(documents, uuid4(), config=config)
+        if phase == "document"
+        else run_local_check(documents, SnapshotV2(), uuid4(), config=config)
+    )
+    item = next(entry for entry in result["coverage"] if entry["rule_code"] == rule_id)
+    issue = next(entry for entry in result["issues"] if entry["rule_code"] == rule_id)
+    assert item["rule_revision"] == expected
+    assert issue["rule_revision"] == expected

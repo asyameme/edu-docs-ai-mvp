@@ -304,7 +304,8 @@ def test_real_findings_keep_distinct_sources_for_same_named_documents():
         for issue in result["issues"]
         if issue["rule_code"] == "R-01-graph"
     ]
-    assert actual == [[str(ref_id)] for ref_id in ref_ids]
+    assert len(actual) == 1
+    assert set(actual[0]) == {str(ref_id) for ref_id in ref_ids}
 
 
 def test_local_check_does_not_guess_between_duplicate_locators_in_one_document(monkeypatch):
