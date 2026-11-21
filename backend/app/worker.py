@@ -2,8 +2,9 @@ import asyncio
 import logging
 import signal
 import socket
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
+from multiprocessing import get_context
 
 from psycopg_pool import ConnectionPool
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
@@ -28,7 +29,12 @@ from app.review_activities import ReviewActivities
 from app.review_dispatcher import dispatch_reviews
 from app.review_repository import ReviewRepository
 from app.review_workflow import ReviewWorkflow
-from app.workflows import DiagnosticWorkflow, ImportWorkflow, LegacyImportWorkflow
+from app.workflows import (
+    MAX_PARALLEL_IMPORT_FILES,
+    DiagnosticWorkflow,
+    ImportWorkflow,
+    LegacyImportWorkflow,
+)
 from worker.agent.read_adapter import configure_read_port
 
 
@@ -55,7 +61,15 @@ async def main() -> None:
         max_size=5,
         timeout=5,
     )
-    imports = ImportActivities(pool, settings)
+    parser_executor = (
+        ProcessPoolExecutor(
+            max_workers=MAX_PARALLEL_IMPORT_FILES,
+            mp_context=get_context("spawn"),
+        )
+        if not settings.parser_url
+        else None
+    )
+    imports = ImportActivities(pool, settings, parser_executor)
     reviews = ReviewActivities(pool, settings)
     generations = GenerationActivities(pool)
     chat_repository = ChatRepository(pool, settings.temporal_namespace)
@@ -65,7 +79,7 @@ async def main() -> None:
         configure_chat_validation_tools(pool)
     if chat_agent:
         ChatWorkflow.__pydantic_ai_agents__ = [chat_agent]
-    executor = ThreadPoolExecutor(max_workers=4)
+    executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_IMPORT_FILES)
     async with Worker(
         client,
         task_queue=settings.temporal_task_queue,
@@ -96,7 +110,7 @@ async def main() -> None:
             chat_activities.save_result,
         ],
         activity_executor=executor,
-        max_concurrent_activities=2,
+        max_concurrent_activities=MAX_PARALLEL_IMPORT_FILES,
         graceful_shutdown_timeout=timedelta(seconds=5),
     ):
         logging.info(
@@ -136,6 +150,8 @@ async def main() -> None:
             await generation_dispatcher
             await chat_dispatcher
     executor.shutdown(wait=True)
+    if parser_executor is not None:
+        parser_executor.shutdown(wait=True)
     pool.close()
 
 

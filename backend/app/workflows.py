@@ -1,9 +1,12 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
+
+MAX_PARALLEL_IMPORT_FILES = 4
 
 with workflow.unsafe.imports_passed_through():
     from app.activities import diagnostic_echo
@@ -88,9 +91,8 @@ class ImportWorkflow:
         )
         self.state.update(status="processing", progress=1)
         total = len(self.state["files"])
-        for item in self.state["files"]:
-            if item["status"] == "completed":
-                continue
+
+        async def parse_item(item: dict) -> None:
             item["status"] = "processing"
             file_request = {**request, "document_id": item["document_id"]}
             try:
@@ -109,6 +111,17 @@ class ImportWorkflow:
                 item["status"] = "failed"
             done = sum(f["status"] in {"completed", "failed"} for f in self.state["files"])
             self.state["progress"] = 5 + 90 * done // max(total, 1)
+
+        if workflow.patched("import-parse-files-concurrently-v1"):
+            pending = [item for item in self.state["files"] if item["status"] != "completed"]
+            for offset in range(0, len(pending), MAX_PARALLEL_IMPORT_FILES):
+                batch = pending[offset : offset + MAX_PARALLEL_IMPORT_FILES]
+                await asyncio.gather(*(parse_item(item) for item in batch))
+        else:
+            for item in self.state["files"]:
+                if item["status"] == "completed":
+                    continue
+                await parse_item(item)
         outcome = await workflow.execute_activity(
             "import_finish_v2", request, result_type=str, **database_options
         )

@@ -28,10 +28,11 @@ two effects of an edit: the next graph version and the DOCX patch inputs.
   the previous snapshot is never mutated. One change = one version created by
   the backend (`VersionCreate` with `expected_version_id`), so concurrent edits
   fail on optimistic locking and go to conflict resolution.
-- `generation_inputs(snapshot, changes)` produces the exact
-  `build_generation_documents` input: a fact recorded in several documents is
-  patched in all of them. `touched_document_ids` reports the affected documents
-  before anything is applied.
+- `generation_inputs(snapshot, changes)` applies the current proposal to a copy
+  of the latest graph and diffs its final values against the original source
+  observations. Earlier accepted edits remain in the `build_generation_documents`
+  input, and a fact recorded in several documents is patched in all of them.
+  `touched_document_ids` reports the documents affected by the current proposal.
 - Agent-facing `field_path` is the attribute name (`hours`); it is normalized
   to the JSON Pointer form (`/attributes/hours`) used by the evidence and the
   generation layer. Whole-object (`$`) and non-attribute paths are rejected:

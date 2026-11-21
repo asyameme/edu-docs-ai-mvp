@@ -6,11 +6,14 @@ import lzma
 import stat
 import zipfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from unicodedata import normalize
 
 from app.errors import DomainError
+
+MAX_ARCHIVE_READ_WORKERS = 4
 
 
 @dataclass
@@ -21,19 +24,30 @@ class PackageFile:
     parse: bool = True
 
 
+def _read_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo, parse: bool) -> PackageFile:
+    content = archive.read(member)
+    return PackageFile(
+        member.filename,
+        content,
+        hashlib.sha256(content).hexdigest(),
+        parse=parse,
+    )
+
+
 def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
     if not (upload.filename or "").lower().endswith(".zip"):
         raise DomainError(415, "Загрузите ZIP-архив с DOCX/XLSX")
     data = upload.file.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise DomainError(413, "Архив превышает допустимый размер")
-    files, names, hashes = [], set(), set()
+    files, names = [], set()
     parsed_count = 0
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             members = archive.infolist()
             if len(members) > 200 or sum(m.file_size for m in members) > 500 * 1024 * 1024:
                 raise DomainError(413, "Слишком большой распакованный пакет")
+            candidates = []
             for member in members:
                 name = member.filename
                 path = PurePosixPath(name)
@@ -70,14 +84,19 @@ def read_package(upload, max_bytes: int) -> tuple[str, list[PackageFile]]:
                     raise DomainError(413, "Превышен размер файла или число документов (100)")
                 if name.casefold() in names:
                     raise DomainError(422, "Повторяющееся имя в архиве")
-                content = archive.read(member)
-                digest = hashlib.sha256(content).hexdigest()
-                if digest in hashes:
-                    raise DomainError(422, "Один документ включён в пакет несколько раз")
                 names.add(name.casefold())
-                hashes.add(digest)
-                files.append(PackageFile(name, content, digest, parse=parse))
+                candidates.append((member, parse))
                 parsed_count += parse
+
+            with ThreadPoolExecutor(
+                max_workers=max(1, min(MAX_ARCHIVE_READ_WORKERS, len(candidates)))
+            ) as executor:
+                extracted = executor.map(
+                    lambda candidate: _read_member(archive, candidate[0], candidate[1]),
+                    candidates,
+                )
+                for file in extracted:
+                    files.append(file)
     except (
         zipfile.BadZipFile,
         RuntimeError,
