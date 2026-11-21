@@ -40,7 +40,7 @@
           "type": "integer"
         },
         "credit_units": {
-          "minimum": 1,
+          "minimum": 0,
           "title": "Credit Units",
           "type": "integer"
         },

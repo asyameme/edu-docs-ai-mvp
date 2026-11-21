@@ -127,7 +127,7 @@ def finalize_output(output, document):
 
 def read_section(
     document, file_name, is_heading, section_name,
-    keep_numbered_items=False,
+    keep_numbered_items=False, include_headings=False, is_boundary=None,
 ):
     """Прочитать раздел в исходном порядке вместе с координатами."""
     blocks = list(document.iter_inner_content())
@@ -144,7 +144,25 @@ def read_section(
         and is_heading(block)
     ]
 
-    if len(starts) != 1:
+    def heading_key(index):
+        return re.sub(
+            r"^(\d+(?:\.\d+)*)(?:\.\s*|\s+)(?=[^\d\s])",
+            r"\1 ",
+            normalize(blocks[index].text),
+        )
+
+    ambiguous = any(
+        heading_key(previous) != heading_key(current)
+        or any(
+            not isinstance(block, Paragraph)
+            or block.text.strip()
+            or block._p.xpath(".//w:drawing | .//w:pict | .//w:object | .//w:sym | .//m:oMath")
+            for block in blocks[previous + 1:current]
+        )
+        for previous, current in zip(starts, starts[1:])
+    )
+
+    if not starts or ambiguous:
         return [], [ParseIssue(
             category="not_found" if not starts else "ambiguous",
             message=(
@@ -176,9 +194,22 @@ def read_section(
         for block in blocks[:start]
     )
     result = []
+    has_content = False
+    if include_headings:
+        result.append((
+            blocks[start],
+            SourceRef(
+                file=file_name,
+                section=section,
+                paragraph_index=indices[blocks[start]._p],
+            ),
+        ))
 
-    for block in blocks[start + 1:]:
+    for block in blocks[starts[-1] + 1:]:
         if isinstance(block, Paragraph):
+            boundary = is_boundary(block) if is_boundary else None
+            if boundary is True:
+                break
             current_level = level(block)
             if (
                 keep_numbered_items
@@ -193,13 +224,31 @@ def read_section(
                 current_level = None
 
             if current_level is not None:
-                if current_level <= depth or not is_subsection(root_section, block.text):
+                if boundary is None and (
+                    current_level <= depth or not is_subsection(root_section, block.text)
+                ):
                     break
 
                 section = block.text.strip()
+                if include_headings:
+                    has_content = True
+                    result.append((
+                        block,
+                        SourceRef(
+                            file=file_name,
+                            section=section,
+                            paragraph_index=indices[block._p],
+                        ),
+                    ))
                 continue
 
-            if block.text.strip():
+            if block.text.strip() or (
+                include_headings
+                and block._p.xpath(
+                    ".//w:drawing | .//w:pict | .//w:object | .//w:sym | .//m:oMath"
+                )
+            ):
+                has_content = True
                 result.append((
                     block,
                     SourceRef(
@@ -211,6 +260,7 @@ def read_section(
 
         elif isinstance(block, Table):
             table_number += 1
+            has_content = True
             result.append((
                 block,
                 SourceRef(
@@ -220,7 +270,7 @@ def read_section(
                 ),
             ))
 
-    if not result:
+    if not has_content:
         return [], [ParseIssue(
             category="empty_cell",
             message=f"Раздел пуст: {section_name}",

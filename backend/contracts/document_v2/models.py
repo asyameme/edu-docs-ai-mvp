@@ -136,7 +136,7 @@ class AssessmentTool(BaseEntity):
 class CurriculumItem(BaseEntity):
     discipline_name: str
     semester: int = Field(ge=1, le=8)
-    credit_units: int = Field(ge=1)
+    credit_units: int = Field(ge=0)
     hours_total: int = Field(ge=0)
     block: str
 

@@ -3,6 +3,7 @@
 import re
 from collections import Counter
 
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -268,6 +269,10 @@ def extract_control_forms(
     return forms, issues
 
 
+def _semester_track_label(text):
+    return re.fullmatch(r"траектория\s+([1-8])\s+семестра\s+(профиль\s+.+)", text)
+
+
 def organization_variant_rows(document, file_name):
     """Связать строки раздела 2.1 с траекторией и формой обучения."""
     variants = {}
@@ -276,6 +281,8 @@ def organization_variant_rows(document, file_name):
 
     for table, table_ref in organization_tables(document, file_name):
         track, mode = None, None
+        semester_tracks = {}
+        track_periods = {}
 
         for row_number, row in enumerate(table.rows, 1):
             cells = row.cells
@@ -288,6 +295,9 @@ def organization_variant_rows(document, file_name):
                     "траектория",
                 )):
                     track, mode = text, None
+                    caption = _semester_track_label(track)
+                    if caption:
+                        semester_tracks[track] = (int(caption[1]), caption[2])
 
                 match = re.fullmatch(
                     r"(?:форма обучения\s*:\s*)?"
@@ -301,13 +311,30 @@ def organization_variant_rows(document, file_name):
 
             variant = (track, mode)
             variants[(table_ref.table, row_number)] = variant
+            period = re.fullmatch(r"семестр\s+([1-8])", normalize(cells[0].text)) if cells else None
+            if period:
+                track_periods.setdefault(track, set()).add(int(period[1]))
 
             for column, cell in enumerate(cells, 1):
                 ref = (table_ref.table, row_number, column)
                 cells_by_ref[ref] = cell._tc
-                cell_variants.setdefault(cell._tc, set()).add(
-                    variant
-                )
+        profiles = {}
+        for label, (_, profile) in semester_tracks.items():
+            profiles.setdefault(profile, []).append(label)
+        combined = {
+            label: f"траектория {profile}"
+            for profile, labels in profiles.items()
+            if len(labels) > 1
+            and len({semester_tracks[label][0] for label in labels}) == len(labels)
+            and all(track_periods.get(label) == {semester_tracks[label][0]} for label in labels)
+            for label in labels
+        }
+        for key, (label, form) in list(variants.items()):
+            if key[0] == table_ref.table and label in combined:
+                variants[key] = (combined[label], form)
+
+    for ref, cell in cells_by_ref.items():
+        cell_variants.setdefault(cell, set()).add(variants[ref[:2]])
 
     conflicts = {
         ref
@@ -352,6 +379,9 @@ def select_workload_variant(
         if workload_track is not None
         else None
     )
+    caption = _semester_track_label(wanted_track or "")
+    if caption and f"траектория {caption[2]}" in tracks:
+        wanted_track = f"траектория {caption[2]}"
     wanted_mode = (
         normalize(education_mode)
         if education_mode is not None
@@ -461,9 +491,13 @@ def build_discipline(
     title_parts,
     workload_track=None,
     education_mode=None,
+    *,
+    workload=None,
+    variants=None,
 ):
     """Собрать одну дисциплину из титула и таблиц нагрузки."""
-    values, issues = extract_workload(document, file_name)
+    values, extracted_issues = workload if workload is not None else extract_workload(document, file_name)
+    issues = list(extracted_issues)
     name = extract_discipline_name(title_parts)
 
     def problem(message, ref, category="manual_review"):
@@ -488,9 +522,8 @@ def build_discipline(
     if not name or not data:
         return None, issues
 
-    variant_rows, variant_conflicts = organization_variant_rows(
-        document,
-        file_name,
+    variant_rows, variant_conflicts = variants if variants is not None else organization_variant_rows(
+        document, file_name,
     )
 
     data, chosen_variant, variant_issues = select_workload_variant(
@@ -780,6 +813,75 @@ def build_discipline(
     return discipline, issues
 
 
+def build_disciplines(document, file_name, title_parts, workload_track=None, education_mode=None):
+    values, issues = extract_workload(document, file_name)
+    variants, conflicts = organization_variant_rows(document, file_name)
+    groups = {}
+    for item in values:
+        if item["kind"] in {"hours", "hours_total", "credit_units"}:
+            ref = item["source_ref"]
+            variant = variants.get((ref.table, ref.row), (None, None))
+            groups.setdefault(variant, []).append(item)
+    if len(groups) <= 1 or workload_track is not None or education_mode is not None:
+        discipline, issues = build_discipline(
+            document, file_name, title_parts, workload_track, education_mode,
+            workload=(values, issues), variants=(variants, conflicts),
+        )
+        return [discipline] if discipline is not None else [], issues
+
+    disciplines = []
+    for (track, mode), records in groups.items():
+        discipline, variant_issues = build_discipline(
+            document, file_name, title_parts, track, mode,
+            workload=(records, []), variants=(variants, conflicts),
+        )
+        issues.extend(issue for issue in variant_issues if not issue.message.startswith("Выбран вариант нагрузки:"))
+        if discipline is None:
+            name = extract_discipline_name(title_parts)
+            if not name:
+                continue
+            discipline = Discipline(
+                name=name, semesters=[], credit_units=None, hours_total=None,
+                hours_by_kind={}, source_ref=records[0]["source_ref"].model_copy(update={"col": None}),
+            )
+        index = len(disciplines)
+        disciplines.append(discipline)
+        issues.append(ParseIssue(
+            category="manual_review",
+            message=(
+                f"Сохранена запись disciplines[{index}]: {track or 'траектория не указана'}, "
+                f"форма обучения: {mode or 'не указана'}. "
+                "Выбор профиля выполняется на этапе сверки; варианты нагрузки не суммируются."
+            ),
+            source_ref=discipline.source_ref,
+        ))
+    return disciplines, issues
+
+
+def align_workload_columns(header_row, data_row):
+    boundaries = []
+    for row in (header_row, data_row):
+        if row.grid_cols_before or row.grid_cols_after:
+            return None
+
+        cells = row.cells
+        starts = [
+            index for index, cell in enumerate(cells)
+            if index == 0 or cell._tc is not cells[index - 1]._tc
+        ]
+        boundaries.append(starts + [len(cells)])
+
+    header, data = boundaries
+    if len(header) != len(data):
+        return None
+
+    for index in range(len(header) - 1):
+        if header[index] >= data[index + 1] or data[index] >= header[index + 1]:
+            return None
+
+    return list(zip(data[1:-1], header[1:-1]))
+
+
 def extract_workload(document, file_name):
     """Прочитать значения нагрузки, сохранив их назначение и координаты."""
     blocks = list(document.iter_inner_content())
@@ -951,25 +1053,25 @@ def extract_workload(document, file_name):
                         cell._tc, set()
                     ).add(header_cells[col]._tc)
 
-            if any(
-                len(items) > 1
-                for items in covered_headers.values()
-            ):
-                report(
-                    "manual_review",
-                    "Разметка ячеек строки не совпадает с шапкой нагрузки",
-                    row_number,
-                )
-                continue
+            columns = [(col, col) for col in range(1, len(cells))]
+            if any(len(items) > 1 for items in covered_headers.values()):
+                columns = align_workload_columns(rows[header_index], row)
+                if columns is None:
+                    report(
+                        "manual_review",
+                        "Разметка ячеек строки не совпадает с шапкой нагрузки",
+                        row_number,
+                    )
+                    continue
 
             new_hour_values = [
-                cell.text.strip()
-                for col, cell in enumerate(cells[1:], 1)
-                if cell.text.strip()
-                and cell._tc not in cells_by_id
-                and "трудо" not in normalize(headers[col])
-                and "активн" not in normalize(headers[col])
-                and "интерактивн" not in normalize(headers[col])
+                cells[col].text.strip()
+                for col, header_col in columns
+                if cells[col].text.strip()
+                and cells[col]._tc not in cells_by_id
+                and "трудо" not in normalize(headers[header_col])
+                and "активн" not in normalize(headers[header_col])
+                and "интерактивн" not in normalize(headers[header_col])
             ]
 
             capacity_row = (
@@ -989,9 +1091,10 @@ def extract_workload(document, file_name):
 
             seen_periods.add(cells[0]._tc)
 
-            for col, cell in enumerate(cells[1:], 1):
+            for col, header_col in columns:
+                cell = cells[col]
                 raw = cell.text.strip()
-                label = headers[col]
+                label = headers[header_col]
                 key = normalize(label).replace("\u0451", "е")
 
                 kind = (
@@ -1039,7 +1142,7 @@ def extract_workload(document, file_name):
 
                 item = {
                     "periods": [period],
-                    "group": groups[col],
+                    "group": groups[header_col],
                     "label": label,
                     "kind": kind,
                     "raw": raw,
@@ -1141,6 +1244,7 @@ def extract_prerequisites(document, file_name, *, doc_type="RPD"):
         file_name,
         is_heading,
         "пререквизиты",
+        keep_numbered_items=True,
     )
 
     records = []
@@ -1685,7 +1789,18 @@ def extract_practice_control_forms(document, file_name):
             ))
             continue
 
-        text = normalize(block.text).replace("\u0451", "е")
+        parts = []
+        for element in block._p.xpath(".//w:t | .//w:tab | .//w:br | .//w:cr | .//w:sym"):
+            if element.tag == qn("w:t"):
+                parts.append(element.text or "")
+            elif element.tag == qn("w:sym"):
+                font = element.get(qn("w:font"), "").casefold()
+                code = element.get(qn("w:char"), "").upper()
+                parts.append("☑" if font == "wingdings" and code == "F0FE" else "\ufffc")
+            else:
+                parts.append(" ")
+
+        text = normalize("".join(parts)).replace("\u0451", "е")
         if re.search(r"промежуточн\w*\s+аттестац", text):
             active = True
         if not active:
@@ -1699,7 +1814,7 @@ def extract_practice_control_forms(document, file_name):
         selected = [
             match.group(2) for match in marked if match.group(1) in checked
         ]
-        if not marked and not any(char in text for char in checked + unchecked):
+        if not marked and not any(char in text for char in checked + unchecked + "\ufffc"):
             if len(candidates) == 1 and not re.search(
                 r"\bне\s+(?:предусмотрен\w*|проводится)\b", text,
             ):

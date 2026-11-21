@@ -179,7 +179,10 @@ def test_pregraph_analysis_runs_active_rules_without_changing_profile():
     assert {item["rule_code"] for item in result["coverage"]} == {
         rule["id"] for rule in config["rules"] if rule["status"] != "draft"
     }
-    assert len(result["coverage"]) == 11
+    assert len(result["coverage"]) == 15
+    assert {"R-10", "R-13", "R-14", "R-15"} <= {
+        item["rule_code"] for item in result["coverage"]
+    }
     assert config == original
     assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
 
@@ -223,7 +226,10 @@ def test_graph_check_omits_drafts_and_keeps_active_rules():
     assert {item["rule_code"] for item in result["coverage"]} == {
         rule["id"] for rule in config["rules"] if rule["status"] != "draft"
     }
-    assert len(result["coverage"]) == 11
+    assert len(result["coverage"]) == 15
+    assert {"R-10", "R-13", "R-14", "R-15"} <= {
+        item["rule_code"] for item in result["coverage"]
+    }
     assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
     assert any(item["rule_code"] == "R-03" for item in result["coverage"])
 

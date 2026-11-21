@@ -9,12 +9,9 @@ from worker.validation.validator import (
 )
 
 NEW_RULES = {
-    "R-02",
-    "R-03",
-    "R-03-RPP",
-    "R-05",
-    "R-05-title",
-    "R-06",
+    "R-02", "R-03", "R-03-RPP",
+    "R-05", "R-05-title", "R-06",
+    "R-10", "R-13", "R-14", "R-15",
 }
 
 REQUIRED = {

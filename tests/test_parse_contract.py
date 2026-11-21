@@ -100,6 +100,21 @@ class TestParserContract(unittest.TestCase):
         with self.assertRaises(ValidationError):
             SourceRef(file="example.docx", paragraph_index=-1)
 
+    def test_curriculum_credit_units_accept_zero_and_reject_invalid_values(self):
+        fields = {
+            "discipline_name": "Физическая культура и спорт",
+            "semester": 3,
+            "hours_total": 164,
+            "block": "Блок.1.дисц",
+            "source_ref": SourceRef(file="plan.docx", table=4, row=112, col=4),
+        }
+        item = contract.CurriculumItem(credit_units=0, **fields)
+        self.assertEqual(item.credit_units, 0)
+        self.assertEqual(type(item).model_validate_json(item.model_dump_json()), item)
+        for value in (-1, None, "", 1.5):
+            with self.subTest(credit_units=value), self.assertRaises(ValidationError):
+                contract.CurriculumItem(credit_units=value, **fields)
+
     def test_read_section_counts_cell_paragraphs_and_excludes_headers(self):
         document, _ = source_document()
         blocks, issues = read_section(
@@ -151,6 +166,50 @@ class TestParserContract(unittest.TestCase):
         )
         ref = next(ref for block, ref in blocks if getattr(block, "text", None) == "Второй источник")
         self.assertEqual(ref.paragraph_index, 9)
+
+    def test_read_section_skips_adjacent_copies_of_heading(self):
+        document = Document()
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "Титул"
+        heading = "3.1.4. Оценочные средства"
+        document.add_paragraph(heading, style="Heading 3")
+        document.add_paragraph()
+        document.add_paragraph("3.1.4\tОценочные средства")
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "Задания"
+        document.add_paragraph("3.1.5. Следующий раздел")
+        document.add_paragraph("Чужой текст")
+
+        blocks, issues = read_section(
+            document, "example.docx", lambda p: p.text.endswith("Оценочные средства"),
+            "оценочные средства",
+        )
+
+        self.assertEqual(issues, [])
+        (table, ref), = blocks
+        self.assertEqual(table.cell(0, 0).text, "Задания")
+        self.assertEqual(ref.table, 2)
+        self.assertEqual(ref.section, heading)
+
+    def test_read_section_reports_distinct_matching_headings_as_ambiguous(self):
+        cases = (
+            ("текст между заголовками", "3.1.4 Оценочные средства"),
+            (None, "3.1.5 Оценочные средства"),
+        )
+        for between, second_heading in cases:
+            with self.subTest(between=between, heading=second_heading):
+                document = Document()
+                document.add_paragraph("3.1.4. Оценочные средства")
+                if between is not None:
+                    document.add_paragraph(between)
+                document.add_paragraph(second_heading)
+                document.add_paragraph("Задания")
+
+                blocks, issues = read_section(
+                    document, "example.docx", lambda p: p.text.endswith("Оценочные средства"),
+                    "оценочные средства",
+                )
+
+                self.assertEqual(blocks, [])
+                self.assertEqual([issue.category for issue in issues], ["ambiguous"])
 
     def test_examples_are_accepted_by_v2_contract(self):
         examples = ROOT / "backend/worker/parser/json_examples_v2"

@@ -30,9 +30,20 @@ def _hours_proposal(data, *, field="hours_total", expected=108, new=54):
     )
 
 
-def test_baseline_snapshot_has_no_findings():
+def _assert_language_review(findings):
+    language_findings = [f for f in findings if f.rule_code == "R-14"]
+    assert len(language_findings) == 1
+    finding = language_findings[0]
+    assert finding.type == "language_data_incomplete"
+    assert finding.status == "needs_review"
+    assert finding.severity == "warning"
+
+
+def test_baseline_snapshot_only_requires_language_review():
     snapshot, _ = _mini_program_snapshot()
-    assert validate_snapshot(snapshot, include_semantic=False) == []
+    findings = validate_snapshot(snapshot, include_semantic=False)
+    assert len(findings) == 1
+    _assert_language_review(findings)
 
 
 def test_hours_change_creates_credit_hours_finding():
@@ -41,8 +52,11 @@ def test_hours_change_creates_credit_hours_finding():
     assert outcome.status == "applied"
     assert len(outcome.applied) == 1
     findings = outcome.applied[0].findings
-    assert {finding.rule_code for finding in findings} == {"R-03", "R-02", "R-04"}
-    assert len(findings) == 3
+    assert {finding.rule_code for finding in findings} == {
+        "R-03", "R-02", "R-04", "R-14"
+    }
+    assert len(findings) == 4
+    _assert_language_review(findings)
     finding = next(f for f in findings if f.rule_code == "R-04")
     assert finding.type == "credit_hours_mismatch"
     assert finding.severity == "warning"
@@ -88,17 +102,19 @@ def test_each_change_is_validated_against_its_own_snapshot():
     outcome = apply_proposal_in_memory(snapshot, proposal, include_semantic=False)
     assert outcome.status == "applied"
     assert len(outcome.applied) == 2
-    assert {f.rule_code for f in outcome.applied[0].findings} == {"R-03", "R-02", "R-04"}
-    assert {f.rule_code for f in outcome.applied[1].findings} == {
-        "R-03",
-        "R-02",
-        "R-04",
-        "R-05",
-        "R-05-title",
+    assert {f.rule_code for f in outcome.applied[0].findings} == {
+        "R-03", "R-02", "R-04", "R-14"
     }
-    assert len(outcome.applied[0].findings) == 3
-    assert len(outcome.applied[1].findings) == 5
-    entity = next(item for item in outcome.final_snapshot.entities if item.id == data["discipline"])
+    assert {f.rule_code for f in outcome.applied[1].findings} == {
+        "R-03", "R-02", "R-04", "R-05", "R-05-title", "R-14"
+    }
+    assert len(outcome.applied[0].findings) == 4
+    assert len(outcome.applied[1].findings) == 6
+    for step in outcome.applied:
+        _assert_language_review(step.findings)
+    entity = next(
+        item for item in outcome.final_snapshot.entities if item.id == data["discipline"]
+    )
     assert entity.attributes["hours_total"] == 54
     assert entity.attributes["credit_units"] == 2
 
