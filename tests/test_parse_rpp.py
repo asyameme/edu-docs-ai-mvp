@@ -4,6 +4,8 @@ from collections import Counter
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from backend.worker.parser.assessment import extract_practice_score_scale
 from backend.worker.parser.content import extract_course_content
@@ -232,6 +234,49 @@ class TestRppParser(unittest.TestCase):
         )
         self.assertEqual(forms, ["зачет"])
         self.assertEqual(issues, [])
+
+    def test_word_symbol_preserves_selected_control_form(self):
+        for prefix, suffix, expected in (
+            ("", " зачет □ экзамен", "зачет"),
+            ("□ зачет ", " экзамен", "экзамен"),
+        ):
+            with self.subTest(form=expected):
+                document = practice_document(control="Форма аттестации")
+                paragraph = next(p for p in document.paragraphs if p.text == "Форма аттестации")
+                paragraph.clear()
+                run = paragraph.add_run(prefix)
+                symbol = OxmlElement("w:sym")
+                symbol.set(qn("w:font"), "Wingdings")
+                symbol.set(qn("w:char"), "F0FE")
+                run._r.append(symbol)
+                run.add_text(suffix)
+
+                output = self.parse_document(document)
+
+                self.assertEqual(output.disciplines[0].control_forms, [expected])
+                self.assertFalse(any(
+                    "Не удалось определить отмеченную форму аттестации" in issue.message
+                    for issue in output.parse_issues
+                ))
+
+    def test_unknown_word_symbol_does_not_select_control_form(self):
+        document = practice_document(control="Форма аттестации")
+        paragraph = next(p for p in document.paragraphs if p.text == "Форма аттестации")
+        paragraph.clear()
+        symbol = OxmlElement("w:sym")
+        symbol.set(qn("w:font"), "Wingdings")
+        symbol.set(qn("w:char"), "0041")
+        run = paragraph.add_run()
+        run._r.append(symbol)
+        run.add_text(" зачет")
+
+        forms, issues = extract_practice_control_forms(document, "practice.docx")
+
+        self.assertEqual(forms, [])
+        self.assertTrue(any(
+            "Не удалось определить отмеченную форму аттестации" in issue.message
+            for issue in issues
+        ))
 
     def test_unmarked_checkbox_is_not_guessed(self):
         for control in ("зачет □ экзамен", "незачет"):

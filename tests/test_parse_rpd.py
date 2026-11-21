@@ -1,6 +1,7 @@
 import unittest
 from collections import Counter
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -9,6 +10,7 @@ from docx.oxml.ns import qn
 from backend.contracts.document_v2.models import RPDOutput
 from backend.worker.parser.assessment import extract_score_scale
 from backend.worker.parser.content import extract_course_content
+from backend.worker.parser.discipline import extract_workload
 from backend.worker.parser.parse_rpd import parse_rpd
 
 
@@ -33,7 +35,7 @@ class TestRpdParser(unittest.TestCase):
         expected = {
             "РПД_матанализ1.docx": (4, 7, 9, 12, 2, 12),
             "РПД_БД.docx": (5, 12, 31, 8, 2, 0),
-            "РПД_языки программирования.docx": (4, 13, 39, 38, 2, 6),
+            "РПД_языки программирования.docx": (4, 13, 39, 39, 2, 6),
         }
 
         for name, counts in expected.items():
@@ -84,6 +86,51 @@ class TestRpdParser(unittest.TestCase):
         self.assertEqual(sum(discipline.hours_by_kind.values()), 206)
         self.assertEqual(output.title_credit_units, 6)
         self.assertIsNotNone(output.title_credit_units_source_ref.paragraph_index)
+
+    def test_workload_with_shifted_merged_cells(self):
+        document = Document()
+        document.add_paragraph("2.1. Организация учебных занятий")
+        table = document.add_table(rows=4, cols=6)
+        header_layout = ((0, 0), (1, 2), (3, 4), (5, 5))
+        data_layout = ((0, 1), (2, 2), (3, 3), (4, 5))
+        rows = (
+            (header_layout, (
+                "Период обучения", "Контактная работа", "Активные формы", "Трудоемкость",
+            )),
+            (header_layout, (
+                "Период обучения", "лекции", "Активные формы", "Трудоемкость",
+            )),
+            (data_layout, ("Семестр 3", "26", "26", "3")),
+            (data_layout, ("ИТОГО", "26", "26", "3")),
+        )
+        for row_index, (layout, texts) in enumerate(rows):
+            for (start, end), text in zip(layout, texts, strict=True):
+                cell = table.cell(row_index, start)
+                if start != end:
+                    cell = cell.merge(table.cell(row_index, end))
+                cell.text = text
+
+        values, issues = extract_workload(document, "workload.docx")
+        self.assertEqual(issues, [])
+        expected_columns = (
+            ("лекции", "hours", 26, 3),
+            ("Активные формы", "reference", 26, 4),
+            ("Трудоемкость", "credit_units", 3, 5),
+        )
+        self.assertEqual(
+            [
+                (
+                    item["periods"], item["label"], item["kind"], item["value"],
+                    item["source_ref"].row, item["source_ref"].col,
+                )
+                for item in values
+            ],
+            [
+                ([period], label, kind, value, row, col)
+                for row, period in ((3, "Семестр 3"), (4, "ИТОГО"))
+                for label, kind, value, col in expected_columns
+            ],
+        )
 
     def test_language_from_title_is_kept_for_validation(self):
         output = parse_rpd(
@@ -169,7 +216,39 @@ class TestRpdParser(unittest.TestCase):
         self.assertIn("УК-1.3", indicators)
         self.assertNotIn("УК-1.4", indicators)
 
-    def test_missing_hours_are_reported(self):
+    def test_indicators_are_preserved_when_only_competency_code_is_given(self):
+        name = "РПД_матанализ1.docx"
+        document = Document(ROOT / "tests" / "originals" / name)
+        document.tables[0].cell(1, 0).text = "УК-1"
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / name
+            document.save(path)
+            output = parse_rpd(path, program_id=PROGRAM_ID)
+
+        expected = [
+            item for item in self.outputs[name].indicators
+            if item.competency_code == "УК-1"
+        ]
+        self.assertTrue(expected)
+        self.assertEqual(
+            [item for item in output.indicators if item.competency_code == "УК-1"],
+            expected,
+        )
+        self.assertNotIn("УК-1", {item.code for item in output.competencies})
+        self.assertFalse(any(
+            relation.src_entity == "competency" and relation.src_key == "УК-1"
+            for relation in output.relations
+        ))
+        self.assertTrue(any(
+            issue.category == "manual_review"
+            and "УК-1" in issue.message
+            and issue.source_ref is not None
+            and (issue.source_ref.table, issue.source_ref.row, issue.source_ref.col) == (1, 2, 1)
+            for issue in output.parse_issues
+        ))
+
+    def test_content_keeps_topic_when_hours_cell_is_empty(self):
         output = self.outputs["РПД_языки программирования.docx"]
 
         self.assertTrue(any(
@@ -181,11 +260,39 @@ class TestRpdParser(unittest.TestCase):
             for issue in output.parse_issues
         ))
 
-        self.assertFalse(any(
-            topic.source_ref.table == 4
-            and topic.source_ref.row == 31
-            for topic in output.course_content
-        ))
+        topic, = [
+            item for item in output.course_content
+            if item.source_ref.table == 4 and item.source_ref.row == 31
+        ]
+        self.assertEqual(topic.topic, "Основные оптимизации, применяемые компилятором")
+        self.assertEqual(topic.activity, "по методическим материалам")
+        self.assertIsNone(topic.hours)
+        self.assertEqual(topic.source_ref.col, 2)
+
+    def test_content_distinguishes_dashes_from_zero_and_invalid_hours(self):
+        document = Document()
+        document.add_paragraph("2.2. Структура и содержание учебных занятий")
+        rows = (
+            ("Тема", "Вид занятий", "Количество часов"),
+            ("Кинематика", "лекции", "-"),
+            ("Динамика", "лекции", "\u2014"),
+            ("Статика", "лекции", "0"),
+            ("Термодинамика", "лекции", "уточнить"),
+        )
+        table = document.add_table(rows=len(rows), cols=3)
+        for row, values in zip(table.rows, rows, strict=True):
+            for cell, value in zip(row.cells, values, strict=True):
+                cell.text = value
+
+        topics, issues = extract_course_content(document, "physics.docx")
+        self.assertEqual(
+            [(topic.topic, topic.hours, topic.source_ref.row) for topic in topics],
+            [("Кинематика", None, 2), ("Динамика", None, 3), ("Статика", 0, 4)],
+        )
+        self.assertEqual(
+            [(issue.category, issue.source_ref.row, issue.source_ref.col) for issue in issues],
+            [("empty_cell", 2, 3), ("empty_cell", 3, 3), ("unexpected_format", 5, 3)],
+        )
 
     def test_relations_have_existing_entities(self):
         for name, output in self.outputs.items():
