@@ -5,7 +5,11 @@ from test_graph_projections import _mini_program_snapshot
 
 from worker.agent.contracts import ChangeProposal, ProposedAttributeChange
 from worker.agent.post_edit import apply_proposal_in_memory, validate_snapshot
-from worker.generation import OriginalDocument, build_generation_documents, patch_docx_bytes
+from worker.generation import (
+    OriginalDocument,
+    build_generation_documents,
+    patch_docx_bytes,
+)
 
 
 def _hours_proposal(data, *, field="hours_total", expected=108, new=54):
@@ -44,9 +48,7 @@ def test_baseline_snapshot_only_requires_language_review():
 
 def test_hours_change_creates_credit_hours_finding():
     snapshot, data = _mini_program_snapshot()
-    outcome = apply_proposal_in_memory(
-        snapshot, _hours_proposal(data), include_semantic=False
-    )
+    outcome = apply_proposal_in_memory(snapshot, _hours_proposal(data), include_semantic=False)
     assert outcome.status == "applied"
     assert len(outcome.applied) == 1
     findings = outcome.applied[0].findings
@@ -61,13 +63,9 @@ def test_hours_change_creates_credit_hours_finding():
     assert finding.status == "open"
     assert "54" in finding.details["message"]
     assert outcome.touched_document_ids == {data["doc_rpd"]}
-    entity = next(
-        item for item in outcome.final_snapshot.entities if item.id == data["discipline"]
-    )
+    entity = next(item for item in outcome.final_snapshot.entities if item.id == data["discipline"])
     assert entity.attributes["hours_total"] == 54
-    original = next(
-        item for item in snapshot.entities if item.id == data["discipline"]
-    )
+    original = next(item for item in snapshot.entities if item.id == data["discipline"])
     assert original.attributes["hours_total"] == 108
 
 
@@ -121,11 +119,58 @@ def test_each_change_is_validated_against_its_own_snapshot():
     assert entity.attributes["credit_units"] == 2
 
 
+def test_sequential_proposals_keep_every_final_field_in_generation_input():
+    snapshot, data = _mini_program_snapshot()
+    first = apply_proposal_in_memory(
+        snapshot, _hours_proposal(data, new=54), include_semantic=False
+    )
+    second = apply_proposal_in_memory(
+        first.final_snapshot,
+        _hours_proposal(data, field="credit_units", expected=3, new=2),
+        include_semantic=False,
+    )
+
+    assert second.status == "applied"
+    changes, links, refs = second.generation
+    values = {change.field_path: change.new_value for change in changes}
+    assert values == {"/attributes/hours_total": 54, "/attributes/credit_units": 2}
+    assert {link.field_path for link in links} == set(values)
+    assert {ref.document_id for ref in refs} == {str(data["doc_rpd"])}
+    original = make_docx(_paragraph("Трудоёмкость: 108 ч, зачётные единицы: 3 ЗЕТ"))
+    generated = build_generation_documents(
+        changes,
+        links,
+        refs,
+        [OriginalDocument(str(data["doc_rpd"]), "RPD", "рпд.docx", original)],
+    )
+    patched = patch_docx_bytes(generated[0].content, generated[0].patches)
+    text = document_text(patched)
+    assert "54 ч" in text
+    assert "2 ЗЕТ" in text
+    assert "108 ч" not in text
+    assert "3 ЗЕТ" not in text
+
+
+def test_returning_a_prior_field_to_its_original_value_removes_its_patch():
+    snapshot, data = _mini_program_snapshot()
+    first = apply_proposal_in_memory(
+        snapshot, _hours_proposal(data, new=54), include_semantic=False
+    )
+    second = apply_proposal_in_memory(
+        first.final_snapshot,
+        _hours_proposal(data, expected=54, new=108),
+        include_semantic=False,
+    )
+
+    assert second.status == "applied"
+    assert second.generation[0] == []
+    assert second.generation[1] == []
+    assert second.generation[2] == []
+
+
 def test_generation_patches_render_unit_fallback():
     snapshot, data = _mini_program_snapshot()
-    outcome = apply_proposal_in_memory(
-        snapshot, _hours_proposal(data), include_semantic=False
-    )
+    outcome = apply_proposal_in_memory(snapshot, _hours_proposal(data), include_semantic=False)
     changes, links, refs = outcome.generation
     assert changes[0].new_value == 54
     original = make_docx(_paragraph("Трудоёмкость: 108 ч"))

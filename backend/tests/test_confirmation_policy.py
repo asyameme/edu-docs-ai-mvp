@@ -1,10 +1,12 @@
-﻿from worker.validation.validator import (
-    Document, load_rules, _validate_rules_config,
-    ValidationError,
-)
-from app.validation_bridge import validation_ruleset
 import pytest
 
+from app.validation_bridge import validation_ruleset
+from worker.validation.validator import (
+    Document,
+    ValidationError,
+    _validate_rules_config,
+    load_rules,
+)
 
 NEW_RULES = {
     "R-02", "R-03", "R-03-RPP",
@@ -13,14 +15,14 @@ NEW_RULES = {
 }
 
 REQUIRED = {
-    "R-01", "R-04", "R-08-local-reference",
+    "R-01",
+    "R-04",
+    "R-08-local-reference",
 }
 
 
 def make_ruleset(config):
-    documents = [
-        Document({"meta": {"doc_type": "rpd"}}, "test")
-    ]
+    documents = [Document({"meta": {"doc_type": "rpd"}}, "test")]
     return validation_ruleset(config, documents)
 
 
