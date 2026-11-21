@@ -63,6 +63,24 @@ export function useImportJob() {
     saveSession(next);
   }, []);
 
+  const applyProgramState = useCallback((latest: ProgramRead, analysisVersionId?: string | null) => {
+    if (sessionRef.current.programId !== latest.id) return;
+    setProgram(latest);
+
+    const current = sessionRef.current;
+    const patch: Partial<ImportSession> = {};
+    if (current.versionId !== latest.current_version_id) {
+      patch.versionId = latest.current_version_id;
+      patch.checkJobId = undefined;
+      patch.checkVersionId = undefined;
+      setCheckJob(null);
+    }
+    if (analysisVersionId && current.analysisVersionId !== analysisVersionId) {
+      patch.analysisVersionId = analysisVersionId;
+    }
+    if (Object.keys(patch).length > 0) updateSession(patch);
+  }, [updateSession]);
+
   const saveSignature = useCallback((value: string) => {
     const programId = sessionRef.current.programId;
     const normalized = value.trim();
@@ -186,10 +204,7 @@ export function useImportJob() {
       try {
         const next = await api<ProgramRead>(`/api/v1/programs/${session.programId}`);
         if (!active) return;
-        setProgram(next);
-        if (!sessionRef.current.versionId && !sessionRef.current.reviewId) {
-          updateSession({ versionId: next.current_version_id });
-        }
+        applyProgramState(next);
       } catch (error) {
         if (!active) return;
         if (error instanceof ApiError && error.status === 404) {
@@ -201,7 +216,74 @@ export function useImportJob() {
     };
     void openProgram();
     return () => { active = false; };
-  }, [session.programId, updateSession, loadReviewDetails]);
+  }, [session.programId, applyProgramState, loadReviewDetails]);
+
+  useEffect(() => {
+    if (!session.programId) return;
+    let active = true;
+    let refreshing = false;
+    const refreshCurrentVersion = () => {
+      if (!active || refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      void api<ProgramRead>(`/api/v1/programs/${session.programId}`)
+        .then((latest) => {
+          if (active) applyProgramState(latest);
+        })
+        .catch(() => {
+          // Keep the visible results; the next focus/visibility event retries the refresh.
+        })
+        .finally(() => { refreshing = false; });
+    };
+    window.addEventListener("focus", refreshCurrentVersion);
+    document.addEventListener("visibilitychange", refreshCurrentVersion);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refreshCurrentVersion);
+      document.removeEventListener("visibilitychange", refreshCurrentVersion);
+    };
+  }, [session.programId, applyProgramState]);
+
+  useEffect(() => {
+    let active = true;
+    let refreshing = false;
+    let refreshAgain = false;
+    const refreshProgram = () => {
+      if (refreshing) {
+        refreshAgain = true;
+        return;
+      }
+      refreshing = true;
+      void api<ProgramRead>(`/api/v1/programs/${sessionRef.current.programId}`)
+        .then((latest) => {
+          if (active) applyProgramState(latest);
+        })
+        .catch(() => {
+          // The tab keeps its current results and retries after the next update.
+        })
+        .finally(() => {
+          refreshing = false;
+          if (active && refreshAgain) {
+            refreshAgain = false;
+            refreshProgram();
+          }
+        });
+    };
+    const syncVersionFromAnotherTab = (event: StorageEvent) => {
+      if (event.key !== "education-import" || !event.newValue) return;
+      const external = loadSession();
+      const current = sessionRef.current;
+      if (
+        !external || external.programId !== current.programId || external.jobId !== current.jobId ||
+        external.reviewId !== current.reviewId || !external.versionId || external.versionId === current.versionId
+      ) return;
+      refreshProgram();
+    };
+    window.addEventListener("storage", syncVersionFromAnotherTab);
+    return () => {
+      active = false;
+      window.removeEventListener("storage", syncVersionFromAnotherTab);
+    };
+  }, [applyProgramState]);
 
   useEffect(() => {
     if (!session.programId || !session.jobId) return;
@@ -373,14 +455,15 @@ export function useImportJob() {
       if (!active) return;
       setReviewJob(next);
       if (next.status === "completed") {
-        const currentVersionId = next.current_review_version_id ?? next.analysis_version_id ?? next.output_version_id;
         const analysisVersionId = next.analysis_version_id ?? next.output_version_id ?? undefined;
-        if (currentVersionId && currentVersionId !== sessionRef.current.versionId) {
-          updateSession({ versionId: currentVersionId, analysisVersionId });
-        } else if (analysisVersionId && analysisVersionId !== sessionRef.current.analysisVersionId) {
-          updateSession({ analysisVersionId });
-        }
         setNotice("");
+        void api<ProgramRead>(`/api/v1/programs/${session.programId}`)
+          .then((latest) => {
+            if (active) applyProgramState(latest, analysisVersionId);
+          })
+          .catch((error: unknown) => {
+            if (active) setNotice(error instanceof Error ? error.message : "Не удалось обновить версию программы");
+          });
       } else if (next.status === "conflict" && next.purpose === "prepare") {
         void recoverCurrentPrepare(next);
       } else if (next.status === "failed" || next.status === "conflict") {
@@ -416,7 +499,7 @@ export function useImportJob() {
     };
     connect();
     return () => { active = false; clearTimeout(retryTimer); stream?.close(); };
-  }, [session.programId, session.reviewId, updateSession]);
+  }, [session.programId, session.reviewId, applyProgramState]);
 
   useEffect(() => {
     const versionId = session.versionId;
