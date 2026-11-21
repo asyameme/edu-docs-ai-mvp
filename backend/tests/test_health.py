@@ -15,9 +15,7 @@ def resources():
     temporal = MagicMock()
     temporal.namespace = "education"
     temporal.workflow_service.describe_namespace = AsyncMock()
-    http = MagicMock()
-    http.get = AsyncMock(return_value=MagicMock())
-    return Resources(MagicMock(), temporal, http, "http://chroma:8000")
+    return Resources(MagicMock(), temporal)
 
 
 @pytest.fixture
@@ -33,21 +31,18 @@ def test_ready_with_available_dependencies(client):
     assert response.json()["dependencies"] == {
         "postgres": "available",
         "temporal": "available",
-        "chroma": "available",
     }
 
 
-@pytest.mark.parametrize("dependency", ["postgres", "temporal", "chroma"])
+@pytest.mark.parametrize("dependency", ["postgres", "temporal"])
 def test_dependency_failure_does_not_break_liveness_or_leak_credentials(
     client, resources, dependency
 ):
     error = ConnectionError("private-password-do-not-leak")
-    if dependency == "postgres":
-        resources.postgres.connection.side_effect = error
-    elif dependency == "temporal":
+    if dependency == "temporal":
         resources.temporal.workflow_service.describe_namespace.side_effect = error
     else:
-        resources.http.get.side_effect = error
+        resources.postgres.connection.side_effect = error
     response = client.get("/health/ready")
     assert response.status_code == 503
     assert response.json()["dependencies"][dependency] == "unavailable"
@@ -60,28 +55,14 @@ def test_artificial_demo_is_not_exposed(client):
     assert "/api/v1/demo/program" not in client.get("/openapi.json").json()["paths"]
 
 
-@pytest.mark.parametrize("dependency", ["temporal", "chroma"])
-def test_hanging_dependency_has_bounded_readiness(client, resources, dependency):
+def test_hanging_temporal_dependency_has_bounded_readiness(client, resources):
     async def hang(*args, **kwargs):
         await asyncio.Event().wait()
 
-    if dependency == "temporal":
-        resources.temporal.workflow_service.describe_namespace.side_effect = hang
-    else:
-        resources.http.get.side_effect = hang
+    resources.temporal.workflow_service.describe_namespace.side_effect = hang
     started = time.monotonic()
     response = client.get("/health/ready")
     assert response.status_code == 503
-    assert response.json()["dependencies"][dependency] == "unavailable"
+    assert response.json()["dependencies"]["temporal"] == "unavailable"
     assert time.monotonic() - started < 5
     assert client.get("/health/live").status_code == 200
-
-
-def test_http_error_from_chroma_marks_dependency_unavailable(client, resources):
-    resources.http.get.return_value.raise_for_status.side_effect = ConnectionError(
-        "private-address"
-    )
-    response = client.get("/health/ready")
-    assert response.status_code == 503
-    assert response.json()["dependencies"]["chroma"] == "unavailable"
-    assert "private-address" not in response.text

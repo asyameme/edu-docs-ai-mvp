@@ -1,7 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 import psycopg
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -44,13 +43,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lazy=True,
         plugins=[PydanticAIPlugin()],
     )
-    http = httpx.AsyncClient(timeout=2, trust_env=False)
     pool.open()
-    app.state.resources = Resources(pool, temporal, http, settings.chroma_url.rstrip("/"))
+    app.state.resources = Resources(pool, temporal)
     try:
         yield
     finally:
-        await http.aclose()
         pool.close()
 
 

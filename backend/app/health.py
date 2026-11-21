@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
-import httpx
 from psycopg_pool import ConnectionPool
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
@@ -18,8 +17,6 @@ logger = logging.getLogger(__name__)
 class Resources:
     postgres: ConnectionPool
     temporal: Client
-    http: httpx.AsyncClient
-    chroma_url: str
 
 
 async def check_dependencies(resources: Resources) -> ReadyResponse:
@@ -33,10 +30,6 @@ async def check_dependencies(resources: Resources) -> ReadyResponse:
             DescribeNamespaceRequest(namespace=resources.temporal.namespace),
             timeout=timedelta(seconds=2),
         )
-
-    async def chroma_check() -> None:
-        response = await resources.http.get(f"{resources.chroma_url}/api/v2/heartbeat")
-        response.raise_for_status()
 
     async def probe(name, check) -> tuple[str, Literal["available", "unavailable"]]:
         try:
@@ -53,7 +46,6 @@ async def check_dependencies(resources: Resources) -> ReadyResponse:
         await asyncio.gather(
             probe("postgres", postgres_async),
             probe("temporal", temporal_check),
-            probe("chroma", chroma_check),
         )
     )
     return ReadyResponse(

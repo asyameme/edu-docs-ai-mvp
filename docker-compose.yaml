@@ -12,7 +12,6 @@ x-backend: &backend
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: education
     TEMPORAL_TASK_QUEUE: education-default
-    CHROMA_URL: http://chroma:8000
     MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-524288000}
     PARSER_URL: ${PARSER_URL:-}
     ANALYSIS_URL: ${ANALYSIS_URL:-}
@@ -64,8 +63,6 @@ services:
         condition: service_completed_successfully
       temporal-namespace-init:
         condition: service_completed_successfully
-      chroma:
-        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=8)"]
       interval: 15s
@@ -107,12 +104,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
-
-  chroma:
-    image: chromadb/chroma:1.5.9
-    volumes:
-      - chroma-data:/data
     restart: unless-stopped
 
   app-migrate:
@@ -201,7 +192,6 @@ services:
 
 volumes:
   postgres-data:
-  chroma-data:
   temporal-init-state:
   original-files:
   artifact-files:
