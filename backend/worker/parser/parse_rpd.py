@@ -17,6 +17,7 @@ from .assessment import (
     assessment_columns,
     assessment_indicator_codes,
     assessment_names,
+    extract_assessment_indicators,
     extract_assessment_tools,
     extract_score_scale,
     score_scale_columns,
@@ -36,6 +37,7 @@ from .content import (
 )
 from .discipline import (
     build_discipline,
+    build_disciplines,
     extract_control_forms,
     extract_discipline_name,
     extract_prerequisites,
@@ -99,6 +101,12 @@ __all__ = [
 
 def finalize_rpd(output, document, file_name):
     """Собрать независимые разделы и проверить общий результат."""
+    indicators, indicator_relations, indicator_issues = extract_assessment_indicators(
+        document, file_name, output,
+    )
+    output.indicators.extend(indicators)
+    output.relations.extend(indicator_relations)
+    output.parse_issues.extend(indicator_issues)
     tools, relations, issues = extract_assessment_tools(
         document,
         file_name,
@@ -174,36 +182,36 @@ def parse_rpd(
             "однозначно распознанную РПД"
         )
 
-    discipline, discipline_issues = build_discipline(
+    disciplines, discipline_issues = build_disciplines(
         document,
         file_path.name,
         title_parts,
         workload_track=workload_track,
         education_mode=education_mode,
     )
-    if discipline is None:
+    if not disciplines:
         name = extract_discipline_name(title_parts)
         if not name or workload_track is not None or education_mode is not None:
             details = "; ".join(issue.message for issue in discipline_issues)
             raise ValueError(f"Не удалось собрать дисциплину РПД. {details}".strip())
 
-        discipline = Discipline(
+        disciplines = [Discipline(
             name=name,
             semesters=[],
             credit_units=None,
             hours_total=None,
             hours_by_kind={},
             source_ref=SourceRef(file=file_path.name, section="титул"),
-        )
+        )]
 
     output = RPDOutput(
         meta=RPDMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_docx_v5",
+            parser_config="rpd_docx_v6",
             program_id=program_id,
         ),
-        disciplines=[discipline],
+        disciplines=disciplines,
     )
     read_title_details(document, title_blocks, output)
 
@@ -230,22 +238,23 @@ def parse_rpd(
     )
     output.parse_issues.extend(prerequisite_issues)
 
-    discipline.prerequisites = [record["name"] for record in prerequisite_records]
-    sections = [
-        part.strip()
-        for part in (discipline.source_ref.section or "").split(";")
-        if part.strip()
-    ]
-    for record in prerequisite_records:
-        section = record["source_ref"].section
-        if section and section not in sections:
-            sections.append(section)
-    discipline.source_ref.section = "; ".join(sections)
+    for discipline in disciplines:
+        discipline.prerequisites = [record["name"] for record in prerequisite_records]
+        sections = [
+            part.strip()
+            for part in (discipline.source_ref.section or "").split(";")
+            if part.strip()
+        ]
+        for record in prerequisite_records:
+            section = record["source_ref"].section
+            if section and section not in sections:
+                sections.append(section)
+        discipline.source_ref.section = "; ".join(sections)
 
     course_topics, content_issues = extract_course_content(
         document,
         file_path.name,
-        semesters=discipline.semesters or None,
+        semesters=sorted({semester for item in disciplines for semester in item.semesters}) or None,
     )
 
     output.parse_issues.extend(content_issues)

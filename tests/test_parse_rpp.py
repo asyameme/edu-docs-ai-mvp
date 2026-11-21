@@ -151,7 +151,7 @@ class TestRppParser(unittest.TestCase):
         output = self.original
         self.assertEqual(output.meta.doc_type, "RPP")
         self.assertEqual(output.meta.schema_version, 2)
-        self.assertEqual(output.meta.parser_config, "rpp_docx_v5")
+        self.assertEqual(output.meta.parser_config, "rpp_docx_v6")
         practice = output.disciplines[0]
         self.assertEqual((practice.credit_units, practice.hours_total), (18, 648))
         self.assertEqual(practice.semesters, [2, 3, 4, 5])
@@ -200,11 +200,47 @@ class TestRppParser(unittest.TestCase):
         self.assertIsNone(discipline.hours_total)
         self.assertIsNone(discipline.credit_units)
         self.assertEqual(output.semester_workload, [])
+        reference = output.curriculum_workload_reference
+        self.assertIsNotNone(reference)
+        self.assertEqual(reference.file, "practice.docx")
+        self.assertIn("2.1.", reference.section)
+        self.assertIsNotNone(reference.paragraph_index)
+        self.assertEqual(RPPOutput.model_validate_json(output.model_dump_json()), output)
         self.assertTrue(output.competencies)
         self.assertTrue(any(
             "отсылает к УП" in issue.message
             for issue in output.parse_issues
         ))
+
+    def test_curriculum_reference_does_not_replace_explicit_hours(self):
+        document = practice_document()
+        heading = next(p for p in document.paragraphs if p.text.startswith("2.2."))
+        heading.insert_paragraph_before("Дополнительные сведения приведены в учебном плане.")
+        output = self.parse_document(document)
+        self.assertEqual(output.disciplines[0].hours_total, 108)
+        self.assertIsNotNone(output.curriculum_workload_reference)
+        self.assertIsNone(self.parse_document(practice_document()).curriculum_workload_reference)
+
+    def test_numbered_prerequisites_do_not_end_the_section(self):
+        document = practice_document()
+        paragraph = next(p for p in document.paragraphs if p.text == "Пререквизиты не требуются.")
+        paragraph.text = "1. Предшествующие дисциплины: «Алгебра»."
+        heading = next(p for p in document.paragraphs if p.text.startswith("1.7."))
+        heading.insert_paragraph_before("2. Предшествующие дисциплины: «Геометрия».")
+        output = self.parse_document(document)
+        self.assertEqual(output.disciplines[0].prerequisites, ["Алгебра", "Геометрия"])
+        self.assertFalse(any("Раздел пуст: пререквизиты" in i.message for i in output.parse_issues))
+
+    def test_numbered_knowledge_requirements_are_not_invented_prerequisites(self):
+        document = practice_document()
+        paragraph = next(p for p in document.paragraphs if p.text == "Пререквизиты не требуются.")
+        paragraph.text = "1. Необходимо владение навыками работы с вычислительной техникой."
+        heading = next(p for p in document.paragraphs if p.text.startswith("1.7."))
+        heading.insert_paragraph_before("2. Требуются знания математического анализа и алгебры.")
+        output = self.parse_document(document)
+        self.assertEqual(output.disciplines[0].prerequisites, [])
+        self.assertFalse(any("Раздел пуст: пререквизиты" in i.message for i in output.parse_issues))
+        self.assertTrue(any("требования к знаниям" in i.message for i in output.parse_issues))
 
     def test_content_preserves_exact_hours_and_numeric_range_bounds(self):
         document = practice_document()
