@@ -121,7 +121,7 @@ class DocumentBuilder:
         if not candidates and not create:
             candidates = self.global_keys[kind, str(key)]
         if len(candidates) > 1 and ref.get("table") is not None and ref.get("row") is not None:
-            candidates = [
+            exact_location = [
                 identity
                 for identity in candidates
                 if any(
@@ -132,6 +132,23 @@ class DocumentBuilder:
                     for r in self.entities[identity]["source_ref_ids"]
                 )
             ]
+            if exact_location:
+                candidates = exact_location
+        if len(candidates) > 1 and ref.get("section") is not None:
+            section_location = [
+                identity
+                for identity in candidates
+                if any(
+                    all(
+                        json.loads(self.refs[r]["locator"]).get(k) == ref.get(k)
+                        for k in ("file", "table", "section")
+                        if ref.get(k) is not None
+                    )
+                    for r in self.entities[identity]["source_ref_ids"]
+                )
+            ]
+            if section_location:
+                candidates = section_location
         if len(candidates) == 1:
             return candidates[0]
         if not candidates and create:

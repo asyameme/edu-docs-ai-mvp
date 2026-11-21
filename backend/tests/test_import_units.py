@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.document_adapter import DocumentBuilder
 from app.errors import DomainError
 from app.import_archive import read_package
 from app.parser_adapter import to_snapshot
@@ -231,3 +232,52 @@ def test_adapter_retains_unresolved_relation_instead_of_guessing():
     assert snapshot["relations"] == []
     assert snapshot["metadata"]["unresolved_relations"][0]["dst_key"] == "UNKNOWN"
     assert issues[0]["category"] == "unresolved_relation"
+
+
+def test_adapter_uses_section_to_resolve_duplicate_profile_codes():
+    document_id = str(uuid4())
+    builder = DocumentBuilder(uuid4())
+    base_section = "Профессиональные перекрестные компетенции базового уровня"
+    top_section = "Профессиональные перекрестные компетенции топ-уровня"
+    base_id = builder.entity(
+        document_id,
+        "competency",
+        "ПКП-ППК-ДА2",
+        {
+            "code": "ПКП-ППК-ДА2",
+            "source_ref": {
+                "file": "цкмв.docx",
+                "table": 1,
+                "row": 105,
+                "section": base_section,
+            },
+        },
+    )
+    builder.entity(
+        document_id,
+        "competency",
+        "ПКП-ППК-ДА2",
+        {
+            "code": "ПКП-ППК-ДА2",
+            "source_ref": {
+                "file": "цкмв.docx",
+                "table": 1,
+                "row": 221,
+                "section": top_section,
+            },
+        },
+    )
+
+    resolved = builder.resolve(
+        document_id,
+        "competency",
+        "ПКП-ППК-ДА2",
+        {
+            "file": "цкмв.docx",
+            "table": 1,
+            "row": 106,
+            "section": base_section,
+        },
+    )
+
+    assert resolved == base_id

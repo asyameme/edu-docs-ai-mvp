@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import logging
 import math
+import threading
 import time
 from collections.abc import Mapping
 from copy import deepcopy
@@ -17,9 +19,127 @@ from app.review_logic import digest
 from worker.validation.validator import Document, load_rules, run_validation
 
 ADAPTER_REVISION = "local-validation-adapter-v1"
-VALIDATION_BUDGET_SECONDS = 360
-VALIDATION_MAX_LLM_CALLS = 20
-VALIDATION_LLM_CALL_TIMEOUT_SECONDS = 45
+VALIDATION_BUDGET_SECONDS = 3500
+# Leave enough headroom for every semantic rule in a full package run. The
+# shared wall-clock budget and request pacing remain the effective limits.
+VALIDATION_MAX_LLM_CALLS = 600
+VALIDATION_LLM_CALL_TIMEOUT_SECONDS = 180
+logger = logging.getLogger(__name__)
+_LLM_RATE_LIMIT_LOCK = threading.Lock()
+_LLM_REQUEST_SEMAPHORE = threading.Semaphore(1)
+_NEXT_LLM_REQUEST_AT = 0.0
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    if status_code == 429:
+        return True
+    try:
+        from litellm.exceptions import RateLimitError
+    except ImportError:
+        return False
+    return isinstance(error, RateLimitError)
+
+
+def _is_retryable_semantic_error(error: Exception) -> bool:
+    try:
+        from worker.validation.semantic_llm import SemanticEvaluationUnavailable
+    except ImportError:
+        return False
+    if not isinstance(error, SemanticEvaluationUnavailable):
+        return False
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "не удалось разобрать как json",
+            "не в текстовом формате",
+            "json не в виде объекта",
+            "завершился ошибкой (timeout",
+            "завершился ошибкой (connect",
+            "завершился ошибкой (readtimeout",
+            "завершился ошибкой (internalserver",
+            "завершился ошибкой (serviceunavailable",
+            "завершился ошибкой (apiconnection",
+        )
+    )
+
+
+def _rate_limit_retry_delay(error: Exception, config: Mapping[str, Any], retry_index: int) -> float | None:
+    base_delay = config.get("rate_limit_retry_delay_seconds", 5)
+    if (
+        not isinstance(base_delay, (int, float))
+        or isinstance(base_delay, bool)
+        or not math.isfinite(base_delay)
+        or base_delay <= 0
+    ):
+        base_delay = 5.0
+    max_delay = config.get("rate_limit_max_retry_delay_seconds", 300)
+    if (
+        not isinstance(max_delay, (int, float))
+        or isinstance(max_delay, bool)
+        or not math.isfinite(max_delay)
+        or max_delay < base_delay
+    ):
+        max_delay = 300.0
+
+    retry_after = _retry_after_seconds(error) or 0.0
+    backoff = min(float(base_delay) * (2 ** retry_index), float(max_delay))
+    return max(backoff, retry_after)
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    direct_value = getattr(error, "retry_after_seconds", None)
+    if isinstance(direct_value, (int, float)) and not isinstance(direct_value, bool):
+        if math.isfinite(direct_value) and direct_value >= 0:
+            return float(direct_value)
+    response = getattr(error, "response", None)
+    for headers in (getattr(error, "headers", None), getattr(response, "headers", None)):
+        if not isinstance(headers, Mapping):
+            continue
+        value = next(
+            (value for key, value in headers.items() if str(key).lower() == "retry-after"),
+            None,
+        )
+        if value is None:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    return None
+
+
+def _wait_for_llm_request_slot(deadline: float, config: Mapping[str, Any]) -> None:
+    global _NEXT_LLM_REQUEST_AT
+    interval = config.get("minimum_request_interval_seconds", 5)
+    if (
+        not isinstance(interval, (int, float))
+        or isinstance(interval, bool)
+        or not math.isfinite(interval)
+        or not 0 < interval <= 120
+    ):
+        interval = 5.0
+    with _LLM_RATE_LIMIT_LOCK:
+        wait = max(0.0, _NEXT_LLM_REQUEST_AT - time.monotonic())
+        if time.monotonic() + wait >= deadline:
+            raise RuntimeError("Исчерпан бюджет ожидания следующего запроса LLM")
+        if wait:
+            time.sleep(wait)
+        _NEXT_LLM_REQUEST_AT = time.monotonic() + float(interval)
+
+
+def _defer_llm_requests(seconds: float) -> None:
+    global _NEXT_LLM_REQUEST_AT
+    with _LLM_RATE_LIMIT_LOCK:
+        _NEXT_LLM_REQUEST_AT = max(
+            _NEXT_LLM_REQUEST_AT,
+            time.monotonic() + seconds,
+        )
 
 
 def validation_implementation_revision():
@@ -33,10 +153,11 @@ def validation_implementation_revision():
         root / "app" / "document_reconciliation.py",
         root / "app" / "review_projection.py",
         worker / "validator.py",
-        worker / "semantic_competency.py",
+        worker / "semantic_coverage.py",
         worker / "semantic_llm.py",
-        worker / "semantic_indicators.py",
+        worker / "indicator_formulations.py",
         worker / "semantic_rpd.py",
+        worker / "text_normalization.py",
     ]
     return digest(
         {
@@ -55,23 +176,99 @@ class _ValidationBudget:
     def __init__(self):
         self.deadline = time.monotonic() + VALIDATION_BUDGET_SECONDS
         self.calls = 0
+        self.rate_limit_exhausted = False
 
     def evaluate(self, evaluator, payload: Mapping[str, Any], config: Mapping[str, Any]):
+        if self.rate_limit_exhausted:
+            from worker.validation.semantic_llm import SemanticEvaluationUnavailable
+
+            raise SemanticEvaluationUnavailable(
+                "Провайдер модели продолжает отвечать HTTP 429; остальные вызовы "
+                "этой проверки пропущены. Запустите проверку позже."
+            )
+        retries = config.get("rate_limit_retries", 5)
+        if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 8:
+            retries = 5
+
+        rate_retry_index = 0
+        semantic_retry_index = 0
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError("Исчерпан общий бюджет времени семантических проверок")
-        if self.calls >= VALIDATION_MAX_LLM_CALLS:
-            raise RuntimeError("Исчерпан лимит запросов семантических проверок")
-        self.calls += 1
-        request_config = {
-            **config,
-            "timeout_seconds": min(
-                float(config.get("timeout_seconds", VALIDATION_LLM_CALL_TIMEOUT_SECONDS)),
-                VALIDATION_LLM_CALL_TIMEOUT_SECONDS,
-                remaining,
-            ),
-        }
-        return evaluator(payload, request_config)
+        if not _LLM_REQUEST_SEMAPHORE.acquire(timeout=remaining):
+            raise RuntimeError("Исчерпан бюджет ожидания очереди запросов LLM")
+        try:
+            while True:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("Исчерпан общий бюджет времени семантических проверок")
+                if self.calls >= VALIDATION_MAX_LLM_CALLS:
+                    raise RuntimeError("Исчерпан лимит запросов семантических проверок")
+                _wait_for_llm_request_slot(self.deadline, config)
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("Исчерпан общий бюджет времени семантических проверок")
+                self.calls += 1
+                request_config = {
+                    **config,
+                    "timeout_seconds": min(
+                        float(config.get("timeout_seconds", VALIDATION_LLM_CALL_TIMEOUT_SECONDS)),
+                        VALIDATION_LLM_CALL_TIMEOUT_SECONDS,
+                        remaining,
+                    ),
+                }
+                try:
+                    return evaluator(payload, request_config)
+                except Exception as exc:
+                    if _is_rate_limit_error(exc):
+                        if rate_retry_index >= retries:
+                            self.rate_limit_exhausted = True
+                            raise
+                        delay = _rate_limit_retry_delay(exc, config, rate_retry_index)
+                        retry_kind = "rate_limit"
+                        rate_retry_index += 1
+                        _defer_llm_requests(delay or 0.0)
+                    elif _is_retryable_semantic_error(exc):
+                        semantic_retries = config.get("semantic_retries", 1)
+                        if (
+                            not isinstance(semantic_retries, int)
+                            or isinstance(semantic_retries, bool)
+                            or not 0 <= semantic_retries <= 2
+                        ):
+                            semantic_retries = 1
+                        if semantic_retry_index >= semantic_retries:
+                            raise
+                        delay = config.get("semantic_retry_delay_seconds", 1)
+                        if (
+                            not isinstance(delay, (int, float))
+                            or isinstance(delay, bool)
+                            or not math.isfinite(delay)
+                            or delay < 0
+                        ):
+                            delay = 1.0
+                        retry_kind = "semantic_response"
+                        semantic_retry_index += 1
+                    else:
+                        raise
+                    remaining = self.deadline - time.monotonic()
+                    if (
+                        delay is None
+                        or remaining <= delay
+                        or self.calls >= VALIDATION_MAX_LLM_CALLS
+                    ):
+                        raise
+                    logger.warning(
+                        "Retrying semantic LLM request",
+                        extra={
+                            "retry_kind": retry_kind,
+                            "retry_index": rate_retry_index if retry_kind == "rate_limit" else semantic_retry_index,
+                            "retry_delay_seconds": delay,
+                            "rate_limit_type": getattr(exc, "rate_limit_type", None),
+                        },
+                    )
+                    time.sleep(delay)
+        finally:
+            _LLM_REQUEST_SEMAPHORE.release()
 
     def semantic(self, payload: Mapping[str, Any], config: Mapping[str, Any]):
         from worker.validation.semantic_llm import evaluate_semantic_payload
@@ -88,12 +285,6 @@ class _ValidationBudget:
             payload,
             options,
         )
-
-    def competency(self, payload: Mapping[str, Any], config: Mapping[str, Any]):
-        from worker.validation.semantic_competency import _model_evaluator
-
-        return self.evaluate(_model_evaluator, payload, config)
-
 
 def project_snapshot_documents(documents, snapshot):
     """Переносит изменения атрибутов по источникам в JSON для повторной сверки."""
@@ -297,16 +488,24 @@ def validation_rule_revision(config, rule):
     return str(rule.get("revision") or config.get("revision") or digest(rule))
 
 
-def validation_ruleset(config, documents):
-    available = {item.role for item in documents if item.role}
-    enabled = [
-        rule for rule in config["rules"]
+def required_validation_rules(config, phase):
+    """Return required automatic rules for one stage, in configuration order."""
+    return [
+        rule["id"]
+        for rule in config["rules"]
         if rule.get("status") in {"ready", "ready_with_semantic_fallback"}
+        and phase in rule.get("phases", [])
+        and rule.get("run_mode", "automatic") == "automatic"
         and rule.get(
             "required_for_confirmation",
-            rule.get("status") == "ready",
+            rule.get("status") == "ready" and rule.get("run_mode", "automatic") == "automatic",
         )
     ]
+
+
+def validation_ruleset(config, documents):
+    available = {item.role for item in documents if item.role}
+    required_rules = required_validation_rules(config, "graph_validation")
     required_documents = sorted(available)
     if not required_documents:
         raise ValueError("Нет документов поддерживаемых типов для проверки")
@@ -321,7 +520,7 @@ def validation_ruleset(config, documents):
             }
         ),
         "config": config,
-        "required_rules": [rule["id"] for rule in enabled],
+        "required_rules": required_rules,
         "required_document_types": required_documents,
     }
 
@@ -351,16 +550,17 @@ def validation_documents(documents):
     return inputs
 
 
-def run_document_rules(inputs, config, *, phase):
+def run_document_rules(inputs, config, *, phase, rule_codes=None):
     """Запускает общий движок с тем же профилем и бюджетом на указанной стадии."""
     budget = _ValidationBudget()
     return run_validation(
         inputs, config, phase=phase,
-        semantic_evaluator=budget.semantic, competency_evaluator=budget.competency,
+        semantic_evaluator=budget.semantic,
+        rule_codes=rule_codes,
     ).to_dict()
 
 
-def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
+def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, rule_codes=None):
     """Проверяет сохранённые документы и связывает замечания с их источниками."""
     config = config or load_rules()
     inputs = validation_documents(documents)
@@ -371,7 +571,11 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None):
             raise ValueError(
                 "Профиль или ревизия локального валидатора несовместима с сохранённым заданием"
             )
-    report = run_document_rules(inputs, config, phase="graph_validation")
+    if rule_codes is not None:
+        ruleset = {**ruleset, "required_rules": []}
+    report = run_document_rules(
+        inputs, config, phase="graph_validation", rule_codes=rule_codes
+    )
     refs = {}
     document_aliases = {}
     for document in inputs:

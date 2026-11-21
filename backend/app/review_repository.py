@@ -107,7 +107,7 @@ class ReviewRepository:
         allow_historical=False,
         connection=None,
     ):
-        request = body.model_dump(mode="json")
+        request = body.model_dump(mode="json", exclude_none=True)
         fingerprint = digest({"operation": purpose, "review_id": str(review_id), "body": request})
         with (
             nullcontext(connection) if connection is not None else self.pool.connection()
@@ -147,18 +147,27 @@ class ReviewRepository:
                     previous_review = self.require_review(
                         cur, program_id, UUID(current_review["review_id"])
                     )
-                    if not previous_review["report"].get("result", {}).get(
-                        "graph_build_issues"
-                    ):
-                        raise DomainError(409, "Сначала завершите согласование текущего пакета")
-                    required = {
-                        item["id"]
-                        for item in previous_review["report"].get("result", {}).get("issues", [])
-                        if item.get("requires_decision")
-                    }
-                    decided = {str(item["conflict_id"]) for item in current_review["decisions"]}
-                    if not required.issubset(decided):
-                        raise DomainError(409, "Сначала завершите обязательные решения")
+                    same_import_rerun = (
+                        body.rerun_same_import
+                        and str(body.import_job_id) == str(current_review.get("import_job_id"))
+                        and str(body.import_job_id)
+                        == str(previous_review["parameters"].get("import_job_id"))
+                    )
+                    if not same_import_rerun:
+                        if not previous_review["report"].get("result", {}).get(
+                            "graph_build_issues"
+                        ):
+                            raise DomainError(409, "Сначала завершите согласование текущего пакета")
+                        required = {
+                            item["id"]
+                            for item in previous_review["report"].get("result", {}).get("issues", [])
+                            if item.get("requires_decision")
+                        }
+                        decided = {
+                            str(item["conflict_id"]) for item in current_review["decisions"]
+                        }
+                        if not required.issubset(decided):
+                            raise DomainError(409, "Сначала завершите обязательные решения")
                 source = Repository.require(
                     cur.execute(
                         """SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s
@@ -219,12 +228,55 @@ class ReviewRepository:
                 snapshot = self.checked_snapshot(
                     self.version(cur, program_id, body.version_id), review_id
                 )
+                source_documents = review["parameters"]["input"]["documents"]
                 ruleset = review["report"]["result"]["ruleset"]
                 if executor == "local":
-                    parameters["implementation_revision"] = review["parameters"].get(
-                        "implementation_revision"
+                    # A pending review can outlive the image that prepared it. A new check
+                    # must use the validator code and rules currently running in the worker,
+                    # rather than inherit a revision that would make the check fail as stale.
+                    from app.validation_bridge import (
+                        validation_documents,
+                        validation_implementation_revision,
+                        validation_ruleset,
                     )
-                source_documents = review["parameters"]["input"]["documents"]
+                    from worker.validation.validator import load_rules
+
+                    local_rules = load_rules()
+                    ruleset = validation_ruleset(
+                        local_rules, validation_documents(source_documents)
+                    )
+                    parameters["implementation_revision"] = (
+                        validation_implementation_revision()
+                    )
+                    parameters["local_rules"] = local_rules
+                else:
+                    from app.validation_bridge import required_validation_rules
+
+                    ruleset = {
+                        **ruleset,
+                        "required_rules": required_validation_rules(
+                            ruleset.get("config", {}), "graph_validation"
+                        ),
+                    }
+                rule_codes = getattr(body, "rule_codes", None)
+                if rule_codes is not None:
+                    rule_definitions = ruleset.get("config", {}).get("rules", [])
+                    manual_rule_codes = {
+                        rule.get("id")
+                        for rule in rule_definitions
+                        if rule.get("status") in {"ready", "ready_with_semantic_fallback"}
+                        and rule.get("run_mode", "automatic") == "manual"
+                        and rule.get("phases") == ["graph_validation"]
+                    }
+                    invalid_codes = set(rule_codes) - manual_rule_codes
+                    if invalid_codes:
+                        raise DomainError(
+                            422,
+                            "Нельзя запустить вручную правила: "
+                            + ", ".join(sorted(invalid_codes)),
+                        )
+                    parameters["manual_rule_codes"] = list(rule_codes)
+                    ruleset = {**ruleset, "required_rules": []}
                 parameters.update(
                     content_hash=content_hash(snapshot),
                     ruleset=ruleset,
@@ -232,6 +284,7 @@ class ReviewRepository:
                     input={
                         "snapshot": snapshot.model_dump(mode="json"),
                         "ruleset": ruleset,
+                        **({"rule_codes": list(rule_codes)} if rule_codes is not None else {}),
                         # Worker повторно накладывает сохранённые решения после чтения
                         # исходных parsed-артефактов; изменённый JSON не подменяет оригинал.
                         "documents": source_documents,
@@ -240,7 +293,9 @@ class ReviewRepository:
                 version_id = body.version_id
             job_id = uuid4()
             size = len(json.dumps(parameters, ensure_ascii=False, allow_nan=False).encode())
-            if size > self.settings.analysis_max_request_bytes:
+            # Local checks are stored as packed rows and Temporal carries only the
+            # job ID. The JSON request limit applies only to the external analyzer.
+            if executor != "local" and size > self.settings.analysis_max_request_bytes:
                 raise DomainError(413, "Вход анализа превышает настроенный предел JSON")
             if purpose == "prepare":
                 parameters["review_id"] = str(job_id)
@@ -684,6 +739,7 @@ class ReviewRepository:
                 raise DomainError(404, "Проверка из другой подготовки")
             if (
                 checked["parameters"].get("purpose") != "check"
+                or checked["parameters"].get("manual_rule_codes") is not None
                 or checked["input_version_id"] != current
                 or checked["report"].get("outcome") != "completed"
                 or checked["parameters"].get("content_hash") != content_hash(snapshot)
@@ -759,6 +815,7 @@ class ReviewRepository:
                 latest = cur.execute(
                     """SELECT * FROM processing_jobs WHERE program_id=%s AND input_version_id=%s
                        AND type='validate' AND parameters->>'purpose'='check'
+                       AND parameters->>'manual_rule_codes' IS NULL
                        AND report->>'outcome'='completed'
                        ORDER BY created_at DESC,id DESC LIMIT 1""",
                     (program_id, version_id),
@@ -769,14 +826,35 @@ class ReviewRepository:
                    WHERE program_id=%s AND job_id=ANY(%s) ORDER BY created_at,id""",
                 (program_id, job_ids),
             ).fetchall()
-        issues = [
-            {
-                **project_legacy_review_issue(item["details"]),
+        issues = []
+        for item in stored:
+            details = item["details"]
+            decision = choices.get(str(details["id"]))
+            issues.append({
+                **project_legacy_review_issue(
+                    details,
+                    selected_variant_id=decision.get("variant_id") if decision else None,
+                ),
                 "source_version_id": item["version_id"],
                 "job_id": item["job_id"],
-            }
-            for item in stored
-        ]
+            })
+        if latest:
+            # The completed graph check re-evaluates R-08 against the current version.
+            # Keep unresolved prepare-time R-08 decisions; these findings do not create
+            # document mutations by themselves.
+            decided_ids = set(choices)
+            issues = [
+                item
+                for item in issues
+                if not (
+                    str(item["job_id"]) == str(review["id"])
+                    and str(item["rule_code"]).startswith("R-08")
+                    and (
+                        not item.get("requires_decision")
+                        or str(item["id"]) in decided_ids
+                    )
+                )
+            ]
         build_errors = review["report"].get("result", {}).get("graph_build_issues", [])
         if snapshot.review.graph_ready is False:
             for item in build_errors:

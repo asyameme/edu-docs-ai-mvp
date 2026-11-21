@@ -6,9 +6,8 @@
 вход генерации для точечных DOCX-замен. Создание версий, транзакции и запись в
 ``validation_issues`` — за бекендом (``write_port.ChatWritePort``).
 
-Семантические правила (R-07/R-08-semantic) зовут LLM; в тестах и сухих прогонах
-они отключаются ``include_semantic=False``, при их включении без доступной
-модели находки получаются needs_review, а не ошибкой.
+R-07 и R-08 детерминированно готовят варианты для решения пользователя.
+``include_semantic=False`` отключает только проверки, которым действительно нужна LLM.
 """
 
 from __future__ import annotations
@@ -30,14 +29,12 @@ from worker.agent.proposal_apply import (
 )
 from worker.agent.validation_adapter import findings_to_issues
 from worker.generation.patches import FieldChange, FieldEvidence, SourceEvidence
-from worker.validation.semantic_competency import CompetencyEvaluator
 from worker.validation.semantic_llm import SemanticEvaluator
 from worker.validation.validator import load_rules, run_validation
 
 _SEMANTIC_RULE_TYPES = {
     "semantic_rpd_alignment",
-    "semantic_indicator_consistency",
-    "competency_formulations",
+    "competency_coverage",
 }
 
 
@@ -82,7 +79,6 @@ def validate_snapshot(
     *,
     rules_config: dict | None = None,
     semantic_evaluator: SemanticEvaluator | None = None,
-    competency_evaluator: CompetencyEvaluator | None = None,
     include_semantic: bool = True,
 ) -> list[ValidationFinding]:
     """Прогон активных правил фазы graph_validation на проекциях версии."""
@@ -93,7 +89,6 @@ def validate_snapshot(
         config,
         phase="graph_validation",
         semantic_evaluator=semantic_evaluator,
-        competency_evaluator=competency_evaluator,
     )
     return [
         ValidationFinding(
@@ -114,7 +109,6 @@ def apply_proposal_in_memory(
     *,
     rules_config: dict | None = None,
     semantic_evaluator: SemanticEvaluator | None = None,
-    competency_evaluator: CompetencyEvaluator | None = None,
     include_semantic: bool = True,
 ) -> PostEditOutcome:
     """Применить предложение к снимку и проверить нормы после каждой правки.
@@ -139,7 +133,6 @@ def apply_proposal_in_memory(
                         current,
                         rules_config=rules_config,
                         semantic_evaluator=semantic_evaluator,
-                        competency_evaluator=competency_evaluator,
                         include_semantic=include_semantic,
                     )
                 ),

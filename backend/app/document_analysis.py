@@ -12,6 +12,9 @@ from app.validation_bridge import (
     validation_rule_revision,
     validation_ruleset,
 )
+from worker.validation.text_normalization import (
+    normalize_variant_formulation_text,
+)
 from worker.validation.validator import load_rules
 
 _FIELDS = {
@@ -21,6 +24,8 @@ _FIELDS = {
     "competency_formulation_mismatch": "formulation",
     "competency_formulation_missing": "formulation",
     "competency_code_match_candidate": "code",
+    # R-08 groups different formulations of the same indicator for user choice.
+    "indicator_formulation_review": "text",
 }
 _PROTECTED = {"meta", "source_ref", "parse_issues"}
 
@@ -84,6 +89,8 @@ def _sources(finding, documents):
                     and row["code"].strip() == code)
                 and ("formulation" not in variant
                      or row.get("formulation") == variant["formulation"])
+                and ("text" not in variant or isinstance(row.get("text"), str)
+                     and row["text"].strip() == variant["text"])
             ]
         sources.append((str(item["document_id"]), matches))
     return sources, limitations
@@ -101,7 +108,21 @@ def _variants(finding, sources, documents, issue_id):
             return [], ["Координаты не определяют единственное изменяемое поле документа"]
         path, row = matches[0]
         targets[identity, path + "/" + field] = row[field]
-    values = {digest(value): value for value in targets.values() if value is not None}
+    values = {}
+    for value in targets.values():
+        if value is None:
+            continue
+        normalized_value = (
+            normalize_variant_formulation_text(value)
+            if field in {"formulation", "text"} and isinstance(value, str)
+            else value
+        )
+        signature = (
+            digest({"text": normalized_value})
+            if field in {"formulation", "text"} and isinstance(value, str)
+            else digest(value)
+        )
+        values.setdefault(signature, value)
     if not values:
         return [], []
     # Данные разных известных программ не должны образовывать общий выбор.
@@ -127,7 +148,7 @@ def _variants(finding, sources, documents, issue_id):
         except (DomainError, ValueError):
             continue
         variants.append({"id": str(uuid5(issue_id, signature)),
-                         "label": f"Выбрать значение из документов: {str(value)[:200]}",
+                         "label": f"Выбрать значение из документов: {value}",
                          "changes": changes})
     if finding["code"] == "competency_code_match_candidate":
         keep_changes = [
@@ -192,7 +213,9 @@ def analyze_documents(documents, job_id, *, config=None):
     """Собирает сырой результат валидатора до проекции в AnalysisV2."""
     config = config if config is not None else load_rules()
     inputs = validation_documents(documents)
-    ruleset = validation_ruleset(config, inputs)
+    # This response covers only document_reconciliation; graph rules are checked
+    # later against the built graph and must not be required in this report.
+    ruleset = {**validation_ruleset(config, inputs), "required_rules": []}
     report = run_document_rules(inputs, config, phase="document_reconciliation")
     rules = {rule["id"]: rule for rule in config["rules"]}
     coverage, issues = [], []

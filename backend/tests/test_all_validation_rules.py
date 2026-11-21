@@ -41,9 +41,14 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
     projected = project_snapshot_documents(inputs, snapshot)
     result = run_local_check(projected, snapshot, uuid4(), config=config)
     coverage = {entry["rule_code"]: entry for entry in result["coverage"]}
-    all_rules = {rule["id"] for rule in config["rules"] if rule["status"] != "draft"}
+    all_rules = {
+        rule["id"] for rule in config["rules"]
+        if rule["status"] != "draft"
+        and "graph_validation" in rule["phases"]
+        and rule.get("run_mode", "automatic") == "automatic"
+    }
     assert set(coverage) == all_rules
-    assert len(coverage) == 15
+    assert len(coverage) == 9
     assert coverage["R-03"]["status"] == "passed"
     assert coverage["R-03-RPP"]["status"] == "passed"
     assert coverage["R-05"]["status"] == "passed"
@@ -51,7 +56,9 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
     assert coverage["R-06"]["status"] == "passed"
     assert coverage["R-02"]["status"] == "needs_review"
     assert all(issue["rule_code"] in all_rules for issue in result["issues"])
-    assert result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
+    assert result["ruleset"]["required_rules"] == [
+        "R-01-graph", "R-08-local-reference", "R-04",
+    ]
     assert all(entry["checks"] > 0 for entry in coverage.values() if entry["status"] == "passed")
     selected = {"R-10", "R-13", "R-14", "R-15"}
     assert all(rule["status"] == "ready" for rule in config["rules"]

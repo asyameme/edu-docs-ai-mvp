@@ -1,5 +1,6 @@
 import type { ImportJob } from "./api";
-import { groupImportIssues, importIssueSeverityLabels } from "./importIssues";
+import { DiagnosticList } from "./DiagnosticList";
+import { groupDiagnostics, importDiagnostics } from "./diagnostics";
 
 const labels = {
   pending: "Ожидает обработки", processing: "Обрабатывается", completed: "Обработано",
@@ -14,18 +15,19 @@ type Props = {
 };
 
 export function ImportProgress({ programId, job, busy, onRetry }: Props) {
-  const issues = groupImportIssues(job);
-  const issueCounts = issues.reduce(
+  const issues = importDiagnostics(job);
+  const groups = groupDiagnostics(issues);
+  const issueCounts = groups.reduce(
     (counts, issue) => {
-      counts[issue.severity] += issue.count;
+      counts[issue.severity] += 1;
       return counts;
     },
     { error: 0, warning: 0, info: 0 },
   );
   const issueSummary = [
-    issueCounts.error > 0 ? `Ошибки: ${issueCounts.error}` : "",
-    issueCounts.warning > 0 ? `Предупреждения: ${issueCounts.warning}` : "",
-    issueCounts.info > 0 ? `Информация: ${issueCounts.info}` : "",
+    issueCounts.error > 0 ? `Групп ошибок: ${issueCounts.error}` : "",
+    issueCounts.warning > 0 ? `Групп предупреждений: ${issueCounts.warning}` : "",
+    issueCounts.info > 0 ? `Информационных групп: ${issueCounts.info}` : "",
   ].filter(Boolean).join(" · ");
 
   return (
@@ -44,18 +46,7 @@ export function ImportProgress({ programId, job, busy, onRetry }: Props) {
       ))}</ul>
       {issues.length > 0 && <details className="issues-details">
         <summary>Замечания парсера · {issueSummary}</summary>
-        <ul className="issue-list">{issues.map((issue) => (
-          <li className="issue-row" key={issue.id}>
-            <span className={`severity-dot severity-dot--${issue.severity}`} aria-hidden="true" />
-            <span className="issue-copy">
-              <strong>{issue.message}{issue.count > 1 ? ` · ×${issue.count}` : ""}</strong>
-              <span>{issue.documentName ?? "Разбор ZIP-пакета"} · {issue.category}</span>
-            </span>
-            <span className={`severity-label severity-label--${issue.severity}`}>
-              {importIssueSeverityLabels[issue.severity]}
-            </span>
-          </li>
-        ))}</ul>
+        <DiagnosticList items={issues} />
       </details>}
       {["completed", "partial"].includes(job.status) && <p>
         <a href={`/api/v1/programs/${programId}/imports/${job.id}/result`} target="_blank"

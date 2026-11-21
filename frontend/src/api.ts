@@ -56,6 +56,12 @@ export type ReviewJob = {
   current_review_version_id: string | null;
 };
 
+export type PrepareReviewRequest = {
+  import_job_id: string;
+  expected_version_id: string;
+  rerun_same_import: boolean;
+};
+
 export type ReviewMutation =
   | {
     op: "set_document_value";
@@ -100,6 +106,13 @@ export type ReviewVariant = {
   changes: ReviewMutation[];
 };
 
+export type RpdAlignmentSummary = {
+  outcome_id: string | null;
+  outcome_text: string | null;
+  classification: "supported" | "gap" | "uncertain" | "invalid" | null;
+  reason: string | null;
+};
+
 export type ReviewIssue = {
   id: string;
   rule_code: string;
@@ -112,6 +125,7 @@ export type ReviewIssue = {
   source_document_ids?: string[];
   requires_decision: boolean;
   variants: ReviewVariant[];
+  rpd_alignment?: RpdAlignmentSummary | null;
   effective_status?: string;
   decision?: { variant_id: string; author: string | null } | null;
 };
@@ -132,6 +146,9 @@ export type ReviewSnapshot = {
   }>;
   review?: {
     graph_ready?: boolean;
+    review_id?: string;
+    import_job_id?: string;
+    analysis_version_id?: string;
     decisions: Array<{ conflict_id: string; variant_id: string; author: string | null }>;
     confirmation: { author: string | null } | null;
   } | null;
@@ -150,11 +167,72 @@ export type ReviewDetails = {
   confirmation: { accepted_warning_ids: string[]; author: string | null } | null;
   check_job_id: string | null;
   check_report: CheckReport | null;
+  prepare_report: PrepareReport | null;
+};
+
+export type ChatConfigRead = { available: boolean };
+
+export type ChatSessionRead = {
+  id: string;
+  program_id: string;
+  version_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatProposedChange = {
+  target_kind: "entity" | "relation";
+  target_id: string;
+  field_path: string;
+  expected_old_value: unknown;
+  new_value: unknown;
+  reason: string;
+  source_ref_ids: string[];
+};
+
+export type ChatOutput =
+  | { kind: "answer"; message: string; sources: Array<{ id: string }> }
+  | { kind: "clarification"; message: string; questions: string[] }
+  | {
+    kind: "change_proposal";
+    summary: string;
+    changes: ChatProposedChange[];
+    unresolved_questions: string[];
+  };
+
+export type ChatTurnHistoryRead = {
+  id: string;
+  run_id: string;
+  status: "pending" | "completed" | "failed";
+  user_text: string;
+  result: ChatOutput | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type ChatSessionHistoryRead = ChatSessionRead & { turns: ChatTurnHistoryRead[] };
+
+export type RuleCoverage = {
+  rule_code: string;
+  rule_revision: string;
+  status: "passed" | "failed" | "needs_review" | "skipped" | "not_applicable";
+  reason: string | null;
+};
+
+export type PrepareReport = {
+  coverage: RuleCoverage[];
+  issues: ReviewIssue[];
+  ruleset?: {
+    config?: {
+      rules?: Array<{ id: string; status: string }>;
+    };
+  };
 };
 
 export type CheckReport = {
   ruleset: { required_rules: string[] };
-  coverage: Array<{ rule_code: string; status: string; reason: string | null }>;
+  coverage: RuleCoverage[];
   issues: ReviewIssue[];
 };
 
@@ -162,6 +240,8 @@ export type CheckJob = ReviewJob & {
   content_hash: string;
   report: CheckReport | null;
 };
+
+export type OptionalRuleCode = "R-09" | "R-11";
 
 export type ImportSession = {
   programId: string;
@@ -173,6 +253,7 @@ export type ImportSession = {
   prepareKey?: string;
   checkJobId?: string;
   checkVersionId?: string;
+  optionalRuleCheckJobIds?: Partial<Record<OptionalRuleCode, string>>;
 };
 
 export class ApiError extends Error {
@@ -202,6 +283,14 @@ export function loadSession(): ImportSession | null {
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
     const value = saved as Record<string, unknown>;
     if (typeof value.programId !== "string" || typeof value.jobId !== "string") return null;
+    const optionalRuleCheckJobIds: Partial<Record<OptionalRuleCode, string>> = {};
+    if (value.optionalRuleCheckJobIds && typeof value.optionalRuleCheckJobIds === "object"
+      && !Array.isArray(value.optionalRuleCheckJobIds)) {
+      const savedChecks = value.optionalRuleCheckJobIds as Record<string, unknown>;
+      for (const code of ["R-09", "R-11"] as const) {
+        if (typeof savedChecks[code] === "string") optionalRuleCheckJobIds[code] = savedChecks[code];
+      }
+    }
     return {
       programId: value.programId,
       jobId: value.jobId,
@@ -212,6 +301,7 @@ export function loadSession(): ImportSession | null {
       ...(typeof value.prepareKey === "string" ? { prepareKey: value.prepareKey } : {}),
       ...(typeof value.checkJobId === "string" ? { checkJobId: value.checkJobId } : {}),
       ...(typeof value.checkVersionId === "string" ? { checkVersionId: value.checkVersionId } : {}),
+      ...(Object.keys(optionalRuleCheckJobIds).length > 0 ? { optionalRuleCheckJobIds } : {}),
     };
   } catch { return null; }
 }

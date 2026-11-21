@@ -115,9 +115,14 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
         report = details["check_report"]
         coverage = {entry["rule_code"]: entry for entry in report["coverage"]}
         assert set(coverage) == {
-            rule["id"] for rule in load_rules()["rules"] if rule["status"] != "draft"
+            rule["id"] for rule in load_rules()["rules"]
+            if rule["status"] != "draft"
+            and "graph_validation" in rule["phases"]
+            and rule.get("run_mode", "automatic") == "automatic"
         }
-        assert coverage["R-07"]["status"] == "passed"
+        assert len(coverage) == 9
+        assert "R-07" not in coverage
+        assert "R-01-graph" in coverage
         assert all("checks" not in entry for entry in report["coverage"])
         assert all("evidence" not in issue and "checks" not in issue for issue in report["issues"])
         assert not any(i["severity"] == "blocking" for i in report["issues"])

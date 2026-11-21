@@ -45,7 +45,7 @@ def sample_result():
     }
 
 
-def test_main_contract_does_not_accept_validator_only_fields_or_coverage_status():
+def test_main_contract_does_not_accept_validator_only_fields():
     coverage = {
         "rule_code": "R-01",
         "rule_revision": "r1",
@@ -53,8 +53,8 @@ def test_main_contract_does_not_accept_validator_only_fields_or_coverage_status(
     }
     with pytest.raises(ValidationError):
         RuleCoverage.model_validate({**coverage, "checks": 2})
-    with pytest.raises(ValidationError):
-        RuleCoverage.model_validate({**coverage, "status": "needs_review"})
+    parsed_coverage = RuleCoverage.model_validate({**coverage, "status": "needs_review"})
+    assert parsed_coverage.status == "needs_review"
     issue = {
             "id": uuid4(),
             "rule_code": "R-01",

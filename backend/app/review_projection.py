@@ -4,6 +4,9 @@ from copy import deepcopy
 
 from app.confirmation_policy import issue_severity
 from app.review_contract import ReviewIssue
+from worker.validation.text_normalization import (
+    normalize_variant_formulation_text,
+)
 
 _ISSUE_FIELDS = {
     "id",
@@ -17,8 +20,80 @@ _ISSUE_FIELDS = {
     "source_document_ids",
     "requires_decision",
     "variants",
+    "rpd_alignment",
 }
 _COVERAGE_FIELDS = {"rule_code", "rule_revision", "status", "reason"}
+
+
+def _rpd_alignment_summary(issue):
+    if issue.get("rule_code") != "R-11":
+        return None
+    source = issue.get("rpd_alignment")
+    if not isinstance(source, dict):
+        source = issue.get("evidence")
+    if not isinstance(source, dict):
+        source = {}
+    classification = source.get("classification")
+    if classification not in ("supported", "gap", "uncertain", "invalid"):
+        classification = None
+    return {
+        "outcome_id": (
+            source.get("outcome_id") if isinstance(source.get("outcome_id"), str) else None
+        ),
+        "outcome_text": (
+            source.get("outcome_text")
+            if isinstance(source.get("outcome_text"), str)
+            else None
+        ),
+        "classification": classification,
+        "reason": source.get("reason") if isinstance(source.get("reason"), str) else None,
+    }
+
+
+def _variant_text_key(variant):
+    if not isinstance(variant, dict):
+        return None
+    changes = variant.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return None
+    values = []
+    for change in changes:
+        if not isinstance(change, dict) or change.get("op") != "set_document_value":
+            return None
+        field = str(change.get("field_path", "")).rsplit("/", 1)[-1]
+        value = change.get("value")
+        if field not in {"formulation", "text"} or not isinstance(value, str):
+            return None
+        values.append((field, normalize_variant_formulation_text(value)))
+    return values[0] if all(value == values[0] for value in values) else None
+
+
+def _distinct_text_variants(issue, selected_variant_id=None):
+    variants = issue.get("variants")
+    if not isinstance(variants, list):
+        return variants
+    result = []
+    indexes = {}
+    for variant in variants:
+        key = _variant_text_key(variant)
+        if key is None:
+            result.append(variant)
+            continue
+        if key not in indexes:
+            indexes[key] = len(result)
+            result.append(variant)
+        elif variant.get("id") == selected_variant_id:
+            result[indexes[key]] = variant
+    return result
+
+
+def _project_issue(issue, selected_variant_id=None):
+    public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
+    if "variants" in issue:
+        public_issue["variants"] = _distinct_text_variants(issue, selected_variant_id)
+    public_issue["rpd_alignment"] = _rpd_alignment_summary(issue)
+    public_issue["severity"] = issue_severity(issue)
+    return public_issue
 
 
 def _project_result(result):
@@ -29,14 +104,7 @@ def _project_result(result):
         for key in tuple(item):
             if key not in _COVERAGE_FIELDS:
                 item.pop(key)
-    projected["issues"] = [
-        {
-            **{key: value for key, value in item.items() if key in _ISSUE_FIELDS},
-            # Статус failed остаётся исходом валидатора; графовые сбои задаются Backend.
-            "severity": issue_severity(item),
-        }
-        for item in projected.get("issues", [])
-    ]
+    projected["issues"] = [_project_issue(item) for item in projected.get("issues", [])]
     return projected
 
 
@@ -60,8 +128,8 @@ def project_prepare_report(result):
     }
 
 
-def project_legacy_review_issue(issue):
+def project_legacy_review_issue(issue, selected_variant_id=None):
     """Возвращает сохранённое замечание в формате, совместимом с контрактом main."""
-    public_issue = {key: value for key, value in issue.items() if key in _ISSUE_FIELDS}
-    public_issue["severity"] = issue_severity(public_issue)
-    return ReviewIssue.model_validate(public_issue).model_dump(mode="json")
+    return ReviewIssue.model_validate(
+        _project_issue(issue, selected_variant_id)
+    ).model_dump(mode="json")

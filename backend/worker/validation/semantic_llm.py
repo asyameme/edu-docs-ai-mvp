@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -18,6 +19,64 @@ logger = logging.getLogger(__name__)
 class SemanticEvaluationUnavailable(RuntimeError):
     """Семантическая модель не настроена или вернула непригодный ответ."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _provider_retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    for headers in (getattr(error, "headers", None), getattr(response, "headers", None)):
+        if not isinstance(headers, Mapping):
+            continue
+        value = next(
+            (value for key, value in headers.items() if str(key).lower() == "retry-after"),
+            None,
+        )
+        if value is None:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    return None
+
+
+def estimate_prompt_tokens(
+    payload: Mapping[str, Any],
+    system_prompt: str,
+    config: Mapping[str, Any],
+) -> int:
+    """Estimate provider tokens and add headroom for provider-specific framing."""
+    model_env = config.get("model_env", "VALIDATION_LLM_MODEL")
+    model = os.getenv(str(model_env))
+    if model:
+        try:
+            from litellm import token_counter
+
+            count = token_counter(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+            )
+            return math.ceil(count * 1.15)
+        except Exception:
+            pass
+
+    # One token per character is a conservative fallback for an unknown tokenizer.
+    return len(system_prompt + json.dumps(payload, ensure_ascii=False))
+
 
 def _strip_code_fence(text: str) -> str:
     stripped = text.strip()
@@ -29,7 +88,35 @@ def _strip_code_fence(text: str) -> str:
     return stripped
 
 
-def _trace(event: str, run_id: str, **fields: Any) -> None:
+def _first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
+def trace_semantic_llm(event: str, run_id: str, **fields: Any) -> None:
     """Пишет воспроизводимый запрос/ответ без ключей доступа провайдера."""
     record = {
         "event": event,
@@ -69,6 +156,7 @@ def evaluate_semantic_payload(
         )
     try:
         from litellm import completion
+        from litellm.exceptions import RateLimitError
     except ImportError as exc:
         raise SemanticEvaluationUnavailable(
             "Не установлен LiteLLM; установите зависимости backend."
@@ -83,18 +171,28 @@ def evaluate_semantic_payload(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0,
+        "temperature": float(config.get("temperature", 0)),
         "num_retries": 0,
         "max_tokens": int(config.get("max_tokens", 1800)),
         "timeout": float(config.get("timeout_seconds", 60)),
     }
+    max_completion_tokens = config.get("max_completion_tokens")
+    if isinstance(max_completion_tokens, int) and not isinstance(max_completion_tokens, bool):
+        request.pop("max_tokens", None)
+        request["max_completion_tokens"] = max_completion_tokens
+    response_format = config.get("response_format")
+    if isinstance(response_format, Mapping):
+        request["response_format"] = dict(response_format)
+    reasoning_effort = config.get("reasoning_effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort in {"low", "high", "max"}:
+        request["reasoning_effort"] = reasoning_effort
     if api_base:
         request["api_base"] = api_base
     if config.get("disable_thinking", True):
         # Параметр нужен Qwen3 на vLLM; для других эндпоинтов его можно отключить.
         request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
-    _trace(
+    trace_semantic_llm(
         "request",
         run_id,
         prompt_version=config.get("prompt_version", "unversioned"),
@@ -104,35 +202,82 @@ def evaluate_semantic_payload(
     )
     try:
         response = completion(**request)
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        content = choice.message.content
+        usage = getattr(response, "usage", None)
+        response_meta = {
+            "finish_reason": getattr(choice, "finish_reason", None),
+            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "completion_tokens", None),
+        }
         if not isinstance(content, str):
             raise SemanticEvaluationUnavailable("LLM вернула ответ не в текстовом формате.")
     except SemanticEvaluationUnavailable:
-        _trace("error", run_id, error_type="SemanticEvaluationUnavailable")
+        trace_semantic_llm("error", run_id, error_type="SemanticEvaluationUnavailable")
+        raise
+    except RateLimitError as exc:
+        # Пробрасываем отдельный тип в общий бюджет: он повторит только 429,
+        # учитывая каждую физическую попытку в лимите запросов проверки.
+        trace_semantic_llm(
+            "error",
+            run_id,
+            error_type=type(exc).__name__,
+            status_code=429,
+            rate_limit_type=getattr(exc, "rate_limit_type", None),
+        )
         raise
     except Exception as exc:
         # Тело ошибки провайдера не логируем: оно может содержать секреты или входные данные.
-        _trace("error", run_id, error_type=type(exc).__name__)
-        raise SemanticEvaluationUnavailable(
-            f"Вызов LLM завершился ошибкой ({type(exc).__name__})."
-        ) from exc
-
-    try:
-        parsed = json.loads(_strip_code_fence(content))
-    except json.JSONDecodeError as exc:
-        _trace(
-            "invalid_json_response",
+        # HTTP-статус безопасен и достаточен для классификации сбоя.
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            # litellm оборачивает часть ошибок провайдера в APIError без status_code.
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        retry_after = _provider_retry_after_seconds(exc)
+        trace_semantic_llm(
+            "error",
             run_id,
-            raw_output=content,
             error_type=type(exc).__name__,
+            status_code=status_code,
+            retry_after_seconds=retry_after,
         )
         raise SemanticEvaluationUnavailable(
-            "LLM вернула ответ, который не удалось разобрать как JSON."
+            f"Вызов LLM завершился ошибкой ({type(exc).__name__}).",
+            status_code=status_code,
+            retry_after_seconds=retry_after,
         ) from exc
 
+    cleaned = _strip_code_fence(content)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        extracted = _first_json_object(cleaned)
+        if extracted is not None:
+            try:
+                parsed = json.loads(extracted)
+            except json.JSONDecodeError:
+                parsed = None
+        else:
+            parsed = None
+        if parsed is not None:
+            pass
+        else:
+            trace_semantic_llm(
+                "invalid_json_response",
+                run_id,
+                raw_output=content,
+                error_type=type(exc).__name__,
+                **response_meta,
+            )
+            raise SemanticEvaluationUnavailable(
+                "LLM вернула ответ, который не удалось разобрать как JSON."
+            ) from exc
+
     if not isinstance(parsed, Mapping):
-        _trace("invalid_response", run_id, raw_output=content)
+        trace_semantic_llm("invalid_response", run_id, raw_output=content, **response_meta)
         raise SemanticEvaluationUnavailable("LLM вернула JSON не в виде объекта.")
 
-    _trace("response", run_id, raw_output=content, parsed_output=parsed)
+    trace_semantic_llm(
+        "response", run_id, raw_output=content, parsed_output=parsed, **response_meta
+    )
     return parsed

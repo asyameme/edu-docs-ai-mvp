@@ -7,5 +7,6 @@ COPY src ./src
 RUN npm run typecheck && npm run build
 
 FROM nginx:1.28-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --chmod=755 15-resolver.envsh /docker-entrypoint.d/15-resolver.envsh
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/dist /usr/share/nginx/html

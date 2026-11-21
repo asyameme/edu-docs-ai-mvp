@@ -4,7 +4,6 @@ import argparse
 import json
 import math
 import sys
-import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
@@ -12,15 +11,23 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 if __package__:
-    from .semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
+    from .indicator_formulations import IndicatorDocument, evaluate_indicator_formulations
+    from .text_normalization import (
+        normalize_formulation_text,
+        normalize_variant_formulation_text,
+    )
     from .semantic_llm import SemanticEvaluator
     from .semantic_rpd import evaluate_rpd_alignment
-    from .semantic_competency import evaluate_competency_group, CompetencyEvaluator
+    from .semantic_coverage import CoverageDocument, evaluate_competency_coverage
 else:  # Поддерживаем и прямой запуск validator.py.
-    from semantic_indicators import IndicatorDocument, evaluate_indicator_consistency
+    from indicator_formulations import IndicatorDocument, evaluate_indicator_formulations
+    from text_normalization import (
+        normalize_formulation_text,
+        normalize_variant_formulation_text,
+    )
     from semantic_llm import SemanticEvaluator
     from semantic_rpd import evaluate_rpd_alignment
-    from semantic_competency import evaluate_competency_group, CompetencyEvaluator
+    from semantic_coverage import CoverageDocument, evaluate_competency_coverage
 
 try:
     import yaml
@@ -136,6 +143,15 @@ def _validate_rules_config(config: Any) -> dict[str, Any]:
                 f"Rule {rule.get('id')}: "
                 "required_for_confirmation must be boolean"
             )
+        run_mode = rule.get("run_mode", "automatic")
+        if run_mode not in ("automatic", "manual"):
+            raise ValidationError(
+                f"Правило {rule.get('id', '<без id>')} должно иметь run_mode automatic или manual"
+            )
+        if run_mode == "manual" and rule.get("required_for_confirmation", False):
+            raise ValidationError(
+                f"Ручное правило {rule.get('id', '<без id>')} не может быть обязательным для подтверждения"
+            )
         rule_status = rule.get("status")
         if not isinstance(rule_status, str) or rule_status not in RULE_STATUSES:
             raise ValidationError(
@@ -170,6 +186,10 @@ def _validate_rules_config(config: Any) -> dict[str, Any]:
         ):
             raise ValidationError(
                 f"Правило {rule.get('id', '<без id>')} должно содержать уникальные допустимые phases"
+            )
+        if run_mode == "manual" and rule_phases != ["graph_validation"]:
+            raise ValidationError(
+                f"Ручное правило {rule.get('id', '<без id>')} должно запускаться только после сборки графа"
             )
     return config
 
@@ -362,17 +382,41 @@ def _compare_values(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleRe
 def _references(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     scope, inputs = rule.get("scope", {}), rule["inputs"]
     allowed = set(scope.get("document_types", []))
+    target_scope = inputs.get("target_scope", "document")
+    if target_scope not in {"document", "program"}:
+        raise ValidationError(
+            f"Неизвестная область поиска целевой записи: {target_scope}"
+        )
+
+    program_targets: dict[str, set[Any]] = defaultdict(set)
+    if target_scope == "program":
+        for target_doc in docs:
+            if not target_doc.program_id:
+                continue
+            program_targets[target_doc.program_id].update(
+                row.get(inputs["target_key_field"])
+                for row in _records(target_doc, inputs["target_records_path"])
+                if row.get(inputs["target_key_field"]) is not None
+            )
+
     checks, findings = 0, []
     for doc in docs:
         if doc.role not in allowed:
             continue
-        targets = {row.get(inputs["target_key_field"]) for row in _records(doc, inputs["target_records_path"])}
+        if target_scope == "program" and doc.program_id:
+            targets = program_targets[doc.program_id]
+        else:
+            targets = {
+                row.get(inputs["target_key_field"])
+                for row in _records(doc, inputs["target_records_path"])
+                if row.get(inputs["target_key_field"]) is not None
+            }
         for row in _records(doc, inputs["source_records_path"]):
             checks += 1
             value = row.get(inputs["source_value_field"])
             if value is None or value not in targets:
                 findings.append(Finding("dangling_reference", "failed", f"Ссылка {inputs['source_value_field']}={value!r} не найдена в целевом списке.", {
-                    "source_refs": [_source_ref(doc, row)], "known_target_keys": sorted((item for item in targets if item is not None), key=str),
+                    "source_refs": [_source_ref(doc, row)], "known_target_keys": sorted(targets, key=str),
                 }))
     return _result(rule, checks, findings)
 
@@ -445,7 +489,7 @@ def _unique(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
                 elif path == "$.competencies[*]":
                     texts = [row.get("formulation") for row in rows]
                     if all(isinstance(t, str) and t.strip() for t in texts):
-                        normalized = {_canonical_formulation(t) for t in texts}
+                        normalized = {normalize_formulation_text(t) for t in texts}
                         if len(normalized) > 1:
                             status = "needs_review"
                         elif doc.role == "ckmv":
@@ -476,6 +520,9 @@ def _semantic_rpd_alignment(
             disciplines=_records(doc, inputs["disciplines_path"]),
             outcomes=_records(doc, inputs["learning_outcomes_path"]),
             course_content=_records(doc, inputs["course_content_path"]),
+            course_content_sections=_records(
+                doc, inputs.get("document_sections_path", "$.document_sections[*]")
+            ),
             indicators=_records(doc, inputs["indicators_path"]),
             assessment_tools=_records(doc, inputs["assessment_tools_path"]),
             relations=_records(doc, inputs["relations_path"]),
@@ -590,6 +637,10 @@ def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResu
         for row in rows:
             hours, units = row.get("hours_total"), row.get("credit_units")
             if not isinstance(hours, int) or not isinstance(units, int) or isinstance(hours,bool) or isinstance(units,bool):
+                continue
+            if units == 0:
+                # 0 ЗЕТ = часы вне зачётных единиц (физическая культура):
+                # формула часы/ЗЕТ к таким строкам неприменима и нарушением не является.
                 continue
             checks += 1
             if hours != units * hours_per_credit_unit:
@@ -755,22 +806,64 @@ def _indicator_hierarchy(rule: Mapping[str, Any], docs: Sequence[Document]) -> R
     return _result(rule, checks, findings)
 
 
-def _competency_coverage(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
+def _competency_coverage(
+    rule: Mapping[str, Any],
+    docs: Sequence[Document],
+    semantic_evaluator: SemanticEvaluator | None = None,
+) -> RuleResult:
     """R-09: полнота покрытия проверяется только при подтверждённом полном УП."""
     curriculum = _role_docs(docs,"curriculum")
-    if not rule.get("inputs",{}).get("curriculum_is_complete",False) or not curriculum:
-        return _result(rule,0,[])
+    if not rule.get("inputs", {}).get("curriculum_is_complete", False):
+        return _result(rule, 0, [])
     checks, findings = 0, []
-    for program_doc in [*_role_docs(docs,"characteristic"),*_role_docs(docs,"ckmv")]:
-        required = _records(program_doc,"$.competencies[*]")
+    for program_doc in [*_role_docs(docs, "characteristic"), *_role_docs(docs, "ckmv")]:
+        required = _records(program_doc, "$.competencies[*]")
         for competency in required:
             code = competency.get("code")
-            related = [c for c in curriculum if not (c.program_id and program_doc.program_id and c.program_id != program_doc.program_id)]
+            related = [
+                document
+                for document in curriculum
+                if not (
+                    document.program_id
+                    and program_doc.program_id
+                    and document.program_id != program_doc.program_id
+                )
+            ]
             if not related:
                 continue
             checks += 1
-            if not any(any(r.get("dst_entity")=="competency" and r.get("dst_key")==code and r.get("src_entity")=="curriculum_item" for r in _records(c,"$.relations[*]")) for c in related):
-                findings.append(Finding("competency_not_covered","failed",f"Компетенция {code!r} не связана с дисциплиной/практикой полного учебного плана.",{"source_refs": [_source_ref(program_doc,competency)]}))
+            has_curriculum_link = any(
+                relation.get("src_entity") == "curriculum_item"
+                and relation.get("dst_entity") == "competency"
+                and relation.get("kind") == "формирует"
+                and relation.get("dst_key") == code
+                for document in related
+                for relation in _records(document, "$.relations[*]")
+            )
+            if not has_curriculum_link:
+                findings.append(Finding(
+                    "competency_not_covered",
+                    "failed",
+                    f"Компетенция {code!r} не связана с дисциплиной/практикой полного учебного плана.",
+                    {"source_refs": [_source_ref(program_doc, competency)]},
+                ))
+    coverage_docs = [
+        CoverageDocument(
+            data=doc.data,
+            label=doc.label,
+            role=doc.role,
+            program_id=doc.program_id,
+            document_id=doc.document_id,
+        )
+        for doc in docs
+    ]
+    semantic_checks, semantic_findings = evaluate_competency_coverage(
+        coverage_docs,
+        llm_config=rule.get("llm", {}),
+        evaluator=semantic_evaluator,
+    )
+    checks += semantic_checks
+    findings.extend(Finding(**item) for item in semantic_findings)
     return _result(rule,checks,findings)
 
 
@@ -845,8 +938,8 @@ def _competency_match_candidates(group: Sequence[Document], *, threshold: float 
         for row in _records(doc, '$.competencies[*]'):
             code, formulation = _code(row.get('code')), row.get('formulation')
             if code and isinstance(formulation, str) and formulation.strip():
-                rows[code].append((doc, row, _canonical_formulation(formulation)))
-    findings, checks = [], 0
+                rows[code].append((doc, row, normalize_formulation_text(formulation)))
+    pair_findings, checks = [], 0
     codes = sorted(rows)
     for i, first in enumerate(codes):
         for second in codes[i + 1:]:
@@ -876,28 +969,88 @@ def _competency_match_candidates(group: Sequence[Document], *, threshold: float 
             if not evidence_pairs:
                 continue
             matched_variants.sort(key=lambda v: (v['code'], v['document'], str(v['source_ref'])))
-            findings.append(Finding('competency_code_match_candidate', 'needs_review',
-                f'Возможное соответствие разных кодов {first} и {second}; требуется подтверждение пользователя.',
-                {'codes': [first, second], 'program_id': group[0].program_id,
-                 'similarity': round(best, 4), 'match_threshold': threshold,
-                 'match_method': 'normalized_formulation_similarity',
-                 'heuristic_only': True, 'evidence_pairs': evidence_pairs,
-                 'variants': matched_variants,
-                 'source_refs': [v['source_ref'] for v in matched_variants],
-                 'requires_user_confirmation': True, 'auto_merge': False}))
+            pair_findings.append({
+                'codes': (first, second),
+                'best': best,
+                'evidence_pairs': evidence_pairs,
+                'variants': matched_variants,
+            })
+
+    # A code can be similar to several other codes. Pairwise findings would
+    # then offer overlapping document edits (A↔B and B↔C both rewrite B's
+    # source fields), making it impossible to save a consistent set of
+    # decisions. Present each connected candidate group once so the user
+    # chooses one code for the whole group or keeps the group separate.
+    parents = {code: code for edge in pair_findings for code in edge['codes']}
+
+    def root(code):
+        while parents[code] != code:
+            parents[code] = parents[parents[code]]
+            code = parents[code]
+        return code
+
+    for edge in pair_findings:
+        left, right = map(root, edge['codes'])
+        if left != right:
+            parents[max(left, right)] = min(left, right)
+
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for edge in pair_findings:
+        groups[root(edge['codes'][0])].append(edge)
+
+    findings = []
+    for edges in sorted(
+        groups.values(),
+        key=lambda items: tuple(sorted({code for edge in items for code in edge['codes']})),
+    ):
+        candidate_codes = sorted({code for edge in edges for code in edge['codes']})
+        matched_variants = []
+        evidence_pairs = []
+        for edge in edges:
+            evidence_pairs.extend(edge['evidence_pairs'])
+            for variant in edge['variants']:
+                if variant not in matched_variants:
+                    matched_variants.append(variant)
+        matched_variants.sort(
+            key=lambda v: (v['code'], v['document'], str(v['source_ref']))
+        )
+        findings.append(Finding(
+            'competency_code_match_candidate', 'needs_review',
+            f'Возможное соответствие кодов {", ".join(candidate_codes)}; '
+            'выберите один код для всей группы или оставьте коды разными.',
+            {'codes': candidate_codes, 'program_id': group[0].program_id,
+             'similarity': round(max(edge['best'] for edge in edges), 4),
+             'match_threshold': threshold,
+             'match_method': 'normalized_formulation_similarity',
+             'heuristic_only': True, 'evidence_pairs': evidence_pairs,
+             'variants': matched_variants,
+             'source_refs': [v['source_ref'] for v in matched_variants],
+             'requires_user_confirmation': True, 'auto_merge': False}))
     return checks, findings
 
 
-def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
-    """R-01 without matrix: validate codes, links, and matched curriculum coverage.
+def _competency_code_match_candidates(
+    rule: Mapping[str, Any], docs: Sequence[Document],
+) -> RuleResult:
+    """R-01 before graph building: suggest code matches for user decisions only."""
+    checks, findings = 0, []
+    threshold = float(rule.get("match_threshold", 0.94))
+    for group in _program_groups(docs).values():
+        group_checks, candidates = _competency_match_candidates(group, threshold=threshold)
+        checks += group_checks
+        findings.extend(candidates)
+    return _result(rule, checks, findings)
+
+
+def _competency_consistency(
+    rule: Mapping[str, Any], docs: Sequence[Document],
+) -> RuleResult:
+    """R-01-graph after user decisions: validate codes and final graph links.
 
     No completeness is inferred from a partial program catalogue or curriculum.
     """
     checks, findings = 0, []
     for pid, group in _program_groups(docs).items():
-        candidate_checks, candidates = _competency_match_candidates(group, threshold=float(rule.get('match_threshold', 0.94)))
-        checks += candidate_checks
-        findings.extend(candidates)
         declared: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         authoritative: set[str] = set()
         for doc in group:
@@ -907,6 +1060,8 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
                     declared[code].append((doc, row))
                     if doc.role in {'ckmv', 'characteristic'}:
                         authoritative.add(code)
+        code_findings: dict[str, Finding] = {}
+        code_sources: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         for doc in group:
             for rel in _records(doc, '$.relations[*]'):
                 if rel.get('dst_entity') != 'competency' and rel.get('src_entity') != 'competency':
@@ -916,15 +1071,25 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
                     continue
                 checks += 1
                 if code not in declared:
-                    findings.append(Finding('unknown_competency_code', 'failed',
-                        f'В {doc.label} связь использует неизвестный код компетенции {code}.',
-                        {'code': code, 'source_refs': [_source_ref(doc, rel)]}))
+                    code_findings.setdefault(code, Finding('unknown_competency_code', 'failed',
+                        f'Связи используют неизвестный код компетенции {code}.',
+                        {'code': code, 'program_id': pid, 'occurrence_count': 0}))
                 elif authoritative and code not in authoritative:
                     # A partial CKMV/characteristic list is not an exhaustive catalogue.
-                    findings.append(Finding('competency_not_in_program_catalogue', 'needs_review',
+                    code_findings.setdefault(code, Finding('competency_not_in_program_catalogue', 'needs_review',
                         f'Код {code} не найден в доступных справочниках программы.',
-                        {'code': code, 'source_refs': [_source_ref(doc, rel),
-                          *[_source_ref(d, r) for d, r in declared[code]]]}))
+                        {'code': code, 'program_id': pid, 'occurrence_count': 0}))
+                else:
+                    continue
+                code_findings[code].evidence['occurrence_count'] += 1
+                ref = _source_ref(doc, rel)
+                code_sources[code][json.dumps(ref, sort_keys=True, ensure_ascii=False)] = ref
+        for code, finding in sorted(code_findings.items()):
+            for document, row in declared.get(code, []):
+                ref = _source_ref(document, row)
+                code_sources[code][json.dumps(ref, sort_keys=True, ensure_ascii=False)] = ref
+            finding.evidence['source_refs'] = list(code_sources[code].values())
+            findings.append(finding)
         # Compare only disciplines explicitly represented in the supplied curriculum.
         # A curriculum_item can occur in several semesters; match both name and semester.
         for plan in (d for d in group if d.role == 'curriculum'):
@@ -960,30 +1125,10 @@ def _competency_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -
     return _result(rule, checks, findings)
 
 
-def _canonical_formulation(value: str) -> str:
-    value = unicodedata.normalize('NFKC', value).casefold()
-    return ' '.join(value.split()).rstrip(' .,!?:;')
-
-
-def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
-                             evaluator: CompetencyEvaluator | None = None) -> RuleResult:
-    """R-07: compare all formulations of a code as peers, one finding per code.
-
-    Cross-document pairs are reported individually, while all distinct text
-    variants for one code share at most one semantic model request. A
-    CKMV/characteristic formulation is never authoritative.
-    """
-    checks, findings, llm_calls = 0, [], 0
-    llm_config = rule.get('llm', {})
-    if not isinstance(llm_config, Mapping):
-        llm_config = {}
-    max_calls = llm_config.get('max_calls_per_run', 50)
-    max_variants = llm_config.get('max_group_variants', 8)
-    if not isinstance(max_calls, int) or isinstance(max_calls, bool) or max_calls < 0:
-        max_calls = 50
-    if not isinstance(max_variants, int) or isinstance(max_variants, bool) or max_variants < 2:
-        max_variants = 8
-    for _pid, group in _program_groups(docs).items():
+def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
+    """R-07: collect different formulations of each competency code for user review."""
+    checks, findings = 0, []
+    for program_id, group in _program_groups(docs).items():
         by_code: dict[str, list[tuple[Document, Mapping[str, Any]]]] = defaultdict(list)
         for doc in group:
             if doc.role not in {'rpd', 'rpp', 'ckmv', 'characteristic', 'curriculum', 'matrix'}:
@@ -992,82 +1137,45 @@ def _competency_formulations(rule: Mapping[str, Any], docs: Sequence[Document],
                 code = _code(row.get('code'))
                 if code:
                     by_code[code].append((doc, row))
+
         for code, records in sorted(by_code.items()):
-            variants = [{'document': d.label, 'code': code, 'formulation': row.get('formulation'),
-                         'source_ref': _source_ref(d, row)} for d, row in records]
-            comparisons = []
-            semantic_pairs: dict[tuple[str, str], None] = {}
-            semantic_texts: dict[str, str] = {}
+            variants = [
+                {'document': doc.label, 'code': code, 'formulation': row.get('formulation'),
+                 'source_ref': _source_ref(doc, row)}
+                for doc, row in records
+            ]
             differs = False
             missing = False
-            for i, (left_doc, left_row) in enumerate(records):
-                for j in range(i + 1, len(records)):
-                    right_doc, right_row = records[j]
+            for index, (left_doc, left_row) in enumerate(records):
+                for right_doc, right_row in records[index + 1:]:
                     if left_doc is right_doc:
                         continue
                     checks += 1
                     left, right = left_row.get('formulation'), right_row.get('formulation')
-                    comparison = {'variant_indices': [i, j]}
                     if not isinstance(left, str) or not left.strip() or not isinstance(right, str) or not right.strip():
                         missing = True
-                        comparison.update(status='missing', reason='Отсутствует формулировка')
-                    elif _canonical_formulation(left) == _canonical_formulation(right):
-                        comparison.update(status='technically_equivalent', reason='Различия только в оформлении')
-                    else:
+                    elif (
+                        normalize_variant_formulation_text(left)
+                        != normalize_variant_formulation_text(right)
+                    ):
                         differs = True
-                        left_key, right_key = _canonical_formulation(left), _canonical_formulation(right)
-                        pair_key = tuple(sorted((left_key, right_key)))
-                        semantic_texts.setdefault(left_key, left)
-                        semantic_texts.setdefault(right_key, right)
-                        semantic_pairs.setdefault(pair_key, None)
-                        comparison['_semantic_pair'] = pair_key
-                    comparisons.append(comparison)
-            if semantic_pairs:
-                keys = list(dict.fromkeys(key for pair in semantic_pairs for key in pair))
-                if len(keys) > max_variants:
-                    reason = (f'Число вариантов ({len(keys)}) превышает лимит группового сравнения '
-                              f'({max_variants}); требуется ручная проверка.')
-                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
-                                       for pair in semantic_pairs}
-                elif llm_calls >= max_calls:
-                    reason = f'Достигнут лимит семантических запросов на запуск ({max_calls}); требуется ручная проверка.'
-                    results_by_pair = {pair: {'status': 'uncertain', 'reason': reason}
-                                       for pair in semantic_pairs}
-                else:
-                    llm_calls += 1
-                    evaluated = evaluate_competency_group(
-                        code, [semantic_texts[key] for key in keys],
-                        evaluator=evaluator, config=llm_config)
-                    index_by_key = {key: index for index, key in enumerate(keys)}
-                    results_by_pair = {}
-                    for pair in semantic_pairs:
-                        result = evaluated.get(tuple(sorted((index_by_key[pair[0]], index_by_key[pair[1]]))))
-                        results_by_pair[pair] = result or {
-                            'status': 'uncertain', 'reason': 'Модель не вернула результат для этой пары.'}
-                for comparison in comparisons:
-                    pair_key = comparison.pop('_semantic_pair', None)
-                    if pair_key is not None:
-                        comparison.update(results_by_pair[pair_key])
+
             if not missing and not differs:
                 continue
-            # One user decision covers every document variant for the given code.
             findings.append(Finding(
                 'competency_formulation_missing' if missing else 'competency_formulation_review',
                 'needs_review',
                 f'Варианты формулировки компетенции {code} в разных документах требуют выбора пользователя.',
-                {'code': code, 'program_id': group[0].program_id,
-                 'variants': variants, 'comparisons': comparisons,
-                 'source_refs': [v['source_ref'] for v in variants],
+                {'code': code, 'program_id': program_id,
+                 'variants': variants,
+                 'source_refs': [variant['source_ref'] for variant in variants],
                  'requires_user_confirmation': True,
-                 'auto_select': False}))
+                 'auto_select': False},
+            ))
     return _result(rule, checks, findings)
 
 
-def _semantic_indicator_consistency(
-    rule: Mapping[str, Any],
-    docs: Sequence[Document],
-    semantic_evaluator: SemanticEvaluator | None = None,
-) -> RuleResult:
+def _indicator_formulation_consistency(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
     scope, inputs = rule.get("scope", {}), rule["inputs"]
     allowed = {str(value).lower() for value in scope.get("document_types", [])}
     indicator_documents = []
@@ -1084,19 +1192,15 @@ def _semantic_indicator_consistency(
             document_type=doc.role or "unknown",
             program_id=doc.program_id,
             indicators=indicators,
-            competencies=_records(doc, inputs["competencies_path"]),
         ))
 
-    checks, raw_findings = evaluate_indicator_consistency(
-        documents=indicator_documents,
-        llm_config=rule.get("llm", {}),
-        evaluator=semantic_evaluator,
-    )
+    checks, raw_findings = evaluate_indicator_formulations(documents=indicator_documents)
     return _result(rule, checks, [Finding(**item) for item in raw_findings])
 
 
 HANDLERS = {
     "competency_consistency": _competency_consistency,
+    "competency_code_match_candidates": _competency_code_match_candidates,
     "competency_formulations": _competency_formulations,
     "sum_components_equals_total": _sum_hours,
     "hours_against_curriculum": _hours_against_curriculum,
@@ -1114,9 +1218,12 @@ HANDLERS = {
     "reference_exists": _references,
     "unique_by_fields": _unique,
     "semantic_rpd_alignment": _semantic_rpd_alignment,
-    "semantic_indicator_consistency": _semantic_indicator_consistency,
+    "indicator_formulation_consistency": _indicator_formulation_consistency,
 }
-SEMANTIC_RULE_TYPES = {"semantic_rpd_alignment", "semantic_indicator_consistency"}
+SEMANTIC_RULE_TYPES = {
+    "semantic_rpd_alignment",
+    "competency_coverage",
+}
 
 
 def run_validation(
@@ -1125,7 +1232,7 @@ def run_validation(
     *,
     phase: ValidationPhase = "document_reconciliation",
     semantic_evaluator: SemanticEvaluator | None = None,
-    competency_evaluator: CompetencyEvaluator | None = None,
+    rule_codes: Sequence[str] | None = None,
 ) -> ValidationReport:
     """Проверить документы либо проекцию актуальной версии графа выбранной фазой.
 
@@ -1136,18 +1243,38 @@ def run_validation(
         raise ValidationError(f"Неизвестная фаза валидации: {phase}")
     config = _validate_rules_config(rules_config) if rules_config is not None else load_rules()
     docs = _documents(documents)
+    selected_rule_codes = tuple(rule_codes) if rule_codes is not None else None
+    requested_rule_codes = None
+    if selected_rule_codes is not None:
+        requested_rule_codes = set(selected_rule_codes)
+        if len(requested_rule_codes) != len(selected_rule_codes):
+            raise ValidationError("Список ручных правил содержит повторы")
+        available_manual_rules = {
+            rule["id"]
+            for rule in config.get("rules", [])
+            if rule.get("status") in RUNNABLE_RULE_STATUSES
+            and rule.get("run_mode", "automatic") == "manual"
+            and phase in rule.get("phases", [])
+        }
+        invalid_codes = requested_rule_codes - available_manual_rules
+        if invalid_codes:
+            raise ValidationError(
+                "Нельзя запустить вручную правила: " + ", ".join(sorted(invalid_codes))
+            )
     results = []
     for rule in config.get("rules", []):
         if rule["status"] not in RUNNABLE_RULE_STATUSES:
             continue
         if phase not in rule.get("phases", []):
             continue
+        if requested_rule_codes is None and rule.get("run_mode", "automatic") == "manual":
+            continue
+        if requested_rule_codes is not None and rule["id"] not in requested_rule_codes:
+            continue
         handler = HANDLERS.get(rule.get("type"))
         if handler is None:
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
-        if rule.get("type") == "competency_formulations":
-            results.append(handler(rule, docs, competency_evaluator))
-        elif rule.get("type") in SEMANTIC_RULE_TYPES:
+        if rule.get("type") in SEMANTIC_RULE_TYPES:
             results.append(handler(rule, docs, semantic_evaluator))
         else:
             results.append(handler(rule, docs))

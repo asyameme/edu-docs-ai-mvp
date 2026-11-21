@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from pydantic_ai import Conversation, ConversationTypeAdapter, UsageLimits
 from pydantic_ai.durable_exec.temporal import PydanticAIWorkflow
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.usage import RunUsage
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -13,10 +14,38 @@ with workflow.unsafe.imports_passed_through():
     from app.chat_model import chat_agent
     from worker.agent.contracts import ChatDeps
 
+MAX_CHAT_HISTORY_TURNS = 2
+MAX_CHAT_HISTORY_BYTES = 32_000
+
 
 def _conversation_for_turn(conversation: Conversation) -> Conversation:
-    """Применяет лимиты расходов отдельно к каждому пользовательскому ходу."""
-    return replace(conversation, usage=RunUsage())
+    """Ограничивает контекст чата, сохраняя последние законченные обмены."""
+    messages = conversation.messages
+    user_message_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, ModelRequest)
+        and any(isinstance(part, UserPromptPart) for part in message.parts)
+    ]
+    if len(user_message_indexes) > MAX_CHAT_HISTORY_TURNS:
+        messages = messages[user_message_indexes[-MAX_CHAT_HISTORY_TURNS] :]
+
+    compacted = replace(conversation, messages=messages, usage=RunUsage(), new_message_index=None)
+    while messages and len(ConversationTypeAdapter.dump_json(compacted)) > MAX_CHAT_HISTORY_BYTES:
+        user_message_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, ModelRequest)
+            and any(isinstance(part, UserPromptPart) for part in message.parts)
+        ]
+        if len(user_message_indexes) <= 1:
+            messages = []
+        else:
+            messages = messages[user_message_indexes[1] :]
+        compacted = replace(
+            compacted, messages=messages, usage=RunUsage(), new_message_index=None
+        )
+    return compacted
 
 
 @workflow.defn(name="ProgramChatWorkflowV1")

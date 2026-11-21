@@ -98,6 +98,13 @@ class Variant(Contract):
     changes: list[ReviewMutation] = Field(min_length=1)
 
 
+class RpdAlignmentSummary(Contract):
+    outcome_id: str | None = None
+    outcome_text: str | None = None
+    classification: Literal["supported", "gap", "uncertain", "invalid"] | None = None
+    reason: str | None = None
+
+
 class ReviewIssue(Contract):
     id: UUID
     rule_code: str = Field(min_length=1)
@@ -110,6 +117,7 @@ class ReviewIssue(Contract):
     source_document_ids: list[UUID] = Field(default_factory=list)
     requires_decision: bool = False
     variants: list[Variant] = Field(default_factory=list)
+    rpd_alignment: RpdAlignmentSummary | None = None
 
     @model_validator(mode="after")
     def variants_are_distinct(self) -> Self:
@@ -125,7 +133,7 @@ class Ruleset(Contract):
     id: str = Field(min_length=1)
     revision: str = Field(min_length=1)
     config: dict[str, JsonValue]
-    required_rules: list[str] = Field(min_length=1)
+    required_rules: list[str] = Field(default_factory=list)
     required_document_types: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -139,7 +147,7 @@ class Ruleset(Contract):
 class RuleCoverage(Contract):
     rule_code: str = Field(min_length=1)
     rule_revision: str = Field(min_length=1)
-    status: Literal["passed", "failed", "skipped", "not_applicable"]
+    status: Literal["passed", "failed", "needs_review", "skipped", "not_applicable"]
     reason: str | None = None
 
 
@@ -238,6 +246,7 @@ class AnalysisV2(CheckResult):
 class ReviewCreate(Contract):
     import_job_id: UUID
     expected_version_id: UUID
+    rerun_same_import: bool = False
 
 
 class DecisionCreate(Contract):
@@ -258,6 +267,14 @@ class DecisionCreate(Contract):
 
 class CheckCreate(Contract):
     version_id: UUID
+    rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
+
+    @field_validator("rule_codes")
+    @classmethod
+    def selected_rules_are_unique(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Ручные проверки не должны повторяться")
+        return value
 
 
 class ConfirmCreate(Contract):
@@ -348,6 +365,7 @@ class CheckRequest(Contract):
     snapshot: SnapshotV2
     ruleset: Ruleset
     documents: list[AnalysisDocument] = Field(default_factory=list)
+    rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
 
     @model_validator(mode="after")
     def documents_belong_to_program(self) -> Self:
@@ -356,4 +374,6 @@ class CheckRequest(Contract):
             raise ValueError("Документы проверки не должны повторяться")
         for document in self.documents:
             document.check_program(self.program_id)
+        if self.rule_codes is not None and len(self.rule_codes) != len(set(self.rule_codes)):
+            raise ValueError("Ручные проверки не должны повторяться")
         return self
