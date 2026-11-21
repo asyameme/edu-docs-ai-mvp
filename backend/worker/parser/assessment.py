@@ -672,6 +672,46 @@ def _headerless_ects_columns(rows):
     return {"criterion": 0, "grade_ects": 1, "grade_spbu": 2}
 
 
+def _is_task_points_table(rows):
+    """Отличить баллы за отдельные задания от шкалы итоговых оценок."""
+    if not rows:
+        return False
+    labels = [normalize(cell.text) for cell in rows[0].cells]
+    if any(re.search(r"\b(?:оценка|рейтинг|ects|grade)\b", label) for label in labels):
+        return False
+    # У таблиц с шапкой может быть несколько колонок критериев, например
+    # «Критерии | Критерии | Баллы». Содержимое остаётся в document_sections.
+    if any(re.search(r"балл|\bpoints?\b", label) for label in labels) and any(
+        re.search(r"критери|вид работы|компонент|\bcriteria\b", label) for label in labels
+    ):
+        return True
+
+    # Без шапки или с объединённым заголовком: описание и явные баллы.
+    point_value = re.compile(
+        r"(?:[\d\s.,n/+\-–—]+|(?:от|до)\s+\d+(?:\s+до\s+\d+)?)"
+        r"\s*(?:балл(?:а|ов)?|points?)\.?",
+        re.IGNORECASE,
+    )
+    data = []
+    for row in rows:
+        cells = row.cells
+        if len(cells) == 2 and cells[0]._tc is not cells[1]._tc:
+            if any(cell.text.strip() for cell in cells):
+                data.append(cells)
+    return len(data) >= 2 and all(
+        cells[0].text.strip() and point_value.fullmatch(normalize(cells[1].text))
+        for cells in data
+    )
+
+
+_PROSE_GRADE = re.compile(
+    r'^(?:оценк[ауеи]\s+)?[«"]'
+    r'(?P<grade>отлично|хорошо|удовлетворительно|неудовлетворительно|(?:не\s+)?зачтено)'
+    r'[»"]\s*(?::|(?=заслуживает\b|ставится\b|выставляется\b))',
+    re.IGNORECASE,
+)
+
+
 def is_score_scale_heading(paragraph):
     title = re.sub(
         r"^\d+(?:\.\d+)*\.?\s*",
@@ -719,6 +759,7 @@ def extract_score_scale(document, file_name):
     items = []
     found_table = False
     text_ref = None
+    read_prose_grades = False
 
     def report(category, message, ref, severity="warning"):
         issues.append(ParseIssue(
@@ -730,7 +771,17 @@ def extract_score_scale(document, file_name):
 
     for block, table_ref in blocks:
         if isinstance(block, Paragraph):
-            text_ref = text_ref or table_ref
+            text = " ".join(block.text.split())
+            match = _PROSE_GRADE.match(text)
+            if match and text[match.end():].strip():
+                items.append(ScoreScaleItem(
+                    grade_spbu=match["grade"],
+                    criterion=text,
+                    source_ref=table_ref,
+                ))
+                read_prose_grades = True
+            else:
+                text_ref = text_ref or table_ref
             continue
 
         found_table = True
@@ -749,6 +800,8 @@ def extract_score_scale(document, file_name):
                 header = (-1, columns, 3)
 
         if header is None:
+            if _is_task_points_table(block.rows):
+                continue
             report(
                 "manual_review",
                 "таблица не сопоставлена полям модели; "
@@ -958,7 +1011,7 @@ def extract_score_scale(document, file_name):
                 table_ref,
             )
 
-    if blocks and not found_table:
+    if blocks and not found_table and not read_prose_grades:
         report(
             "manual_review",
             "раздел содержит текст без поддержанной таблицы; "

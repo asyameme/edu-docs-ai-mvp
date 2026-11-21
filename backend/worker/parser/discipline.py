@@ -848,6 +848,7 @@ def build_disciplines(document, file_name, title_parts, workload_track=None, edu
         disciplines.append(discipline)
         issues.append(ParseIssue(
             category="manual_review",
+            severity="info",
             message=(
                 f"Сохранена запись disciplines[{index}]: {track or 'траектория не указана'}, "
                 f"форма обучения: {mode or 'не указана'}. "
@@ -1583,16 +1584,11 @@ def extract_practice_workload(document, file_name):
 
         records.append(record)
 
-    if not records:
+    if not records and plan_ref is None:
         issues.append(ParseIssue(
-            category="manual_review" if plan_ref else "not_found",
-            message=(
-                "Локальные значения нагрузки не найдены; "
-                "документ отсылает к УП"
-                if plan_ref
-                else "В разделе не найдены значения нагрузки"
-            ),
-            source_ref=plan_ref or blocks[0][1],
+            category="not_found",
+            message="В разделе не найдены значения нагрузки",
+            source_ref=blocks[0][1],
         ))
 
     return records, issues, plan_ref

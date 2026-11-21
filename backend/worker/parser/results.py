@@ -210,6 +210,8 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
     }
     code_kinds = {
         "З": "знать",
+        # В кодах документов цифра 3 используется вместо похожей буквы З.
+        "3": "знать",
         "У": "уметь",
         "В": "владеть",
     }
@@ -226,9 +228,8 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
     prefix_pattern = re.compile(
         rf"^{code_pattern}[.:\s\u2013\u2014-]*(?P<text>.*)$"
     )
-    suffix_pattern = re.compile(
-        rf"^(?P<text>.+?)\s*\({code_pattern}\)[.;]?$"
-    )
+    outcome_code = re.compile(code_pattern)
+    suffix_pattern = re.compile(r"^(?P<text>.+?)\s*\((?P<codes>[^()]+)\)[.;]?$")
 
     def add_outcome(value, kind, code=None, message=None):
         value = " ".join(value.split())
@@ -274,7 +275,12 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
 
         heading = heading_pattern.match(line)
 
-        if heading:
+        # В «Уметь:» задан вид группы, а в «владеть навыками ... (код У-1)»
+        # глагол является частью самого результата.
+        if heading and (
+            not outcome_code.search(line)
+            or ":" in heading.group()
+        ):
             flush()
             current_kind = kinds[heading.group(1).casefold()]
             line = line[heading.end():].strip()
@@ -291,12 +297,21 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
 
         flush()
 
-        match = (
-            prefix_pattern.fullmatch(line)
-            or suffix_pattern.fullmatch(line)
-        )
+        prefix = prefix_pattern.fullmatch(line)
+        suffix = suffix_pattern.fullmatch(line)
+        if prefix and len(codes) == len(short_codes) == 1:
+            description = prefix.group("text")
+            matches = [prefix]
+        elif suffix:
+            description = suffix.group("text")
+            matches = [
+                outcome_code.fullmatch(token.strip())
+                for token in re.split(r"[,;]", suffix.group("codes"))
+            ]
+        else:
+            matches = []
 
-        if len(codes) != 1 or len(short_codes) != 1 or match is None:
+        if not matches or len(codes) != len(matches) or not all(matches):
             add_outcome(
                 raw_line.strip(),
                 None,
@@ -307,31 +322,16 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
             )
             continue
 
-        kind = code_kinds.get(match.group("kind"))
-        body_heading = heading_pattern.match(match.group("text"))
-
-        if kind is None:
-            kind = (
-                kinds[body_heading.group(1).casefold()]
-                if body_heading
-                else current_kind
-            )
-
-        message = None
-
-        if current_kind is not None and current_kind != kind:
-            kind = None
-            message = (
-                "Вид результата в заголовке и коде различается; "
-                "нужна проверка"
-            )
-
-        add_outcome(
-            match.group("text"),
-            kind,
-            match.group("code"),
-            message,
-        )
+        for match in matches:
+            kind = code_kinds[match.group("kind")]
+            message = None
+            if current_kind is not None and current_kind != kind:
+                kind = None
+                message = (
+                    "Вид результата в заголовке и коде различается; "
+                    "нужна проверка"
+                )
+            add_outcome(description, kind, match.group("code"), message)
 
     flush()
 

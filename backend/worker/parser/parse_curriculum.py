@@ -33,9 +33,9 @@ def _heading(paragraph, titles):
     return text in titles
 
 
-def _issue(output, category, message, ref):
+def _issue(output, category, message, ref, *, severity="warning"):
     output.parse_issues.append(ParseIssue(
-        category=category, message=message, source_ref=ref,
+        category=category, message=message, severity=severity, source_ref=ref,
     ))
 
 
@@ -252,10 +252,11 @@ def _discipline_name(cell):
     return " ".join(parts)
 
 
-def _add_relations(output, raw, name, ref):
+def _add_relations(output, raw, name, ref, *, elective=False):
     known = {item.code for item in output.competencies}
     if not raw.strip():
-        _issue(output, "empty_cell", f"УП: нет кодов компетенций для {name!r}; связи не созданы", ref)
+        if not elective:
+            _issue(output, "empty_cell", f"УП: нет кодов компетенций для {name!r}; связи не созданы", ref)
         return
     for token in re.split(r"[,;\s]+", raw.strip()):
         parsed = split_competency(token)
@@ -363,6 +364,7 @@ def extract_curriculum_items(output, document):
                         output, "manual_review",
                         "УП: группа выбора не является отдельной дисциплиной: "
                         f"{name_cell.text}; ЗЕТ: {cells[columns['credits']].text}", row_ref,
+                        severity="info",
                     )
                 continue
             if not name:
@@ -385,7 +387,8 @@ def extract_curriculum_items(output, document):
             # Факультативы в исходнике не имеют кода блока, но явно
             # находятся под общей подписью "Факультативные занятия".
             part = context.get("part", "")
-            if raw_block in {"", "-", "\u2013", "\u2014"} and _label(part).startswith("факультативные"):
+            elective = _label(part).startswith("факультативные")
+            if raw_block in {"", "-", "\u2013", "\u2014"} and elective:
                 raw_block = part
             if raw_block in {"", "-", "\u2013", "\u2014"}:
                 _issue(
@@ -410,6 +413,7 @@ def extract_curriculum_items(output, document):
             _add_relations(
                 output, cells[code_col].text, name,
                 row_ref.model_copy(update={"col": code_col + 1}),
+                elective=elective,
             )
         if header is None:
             _issue(output, "unexpected_format", "УП: таблица раздела обучения не имеет поддержанной шапки", table_ref)
@@ -418,16 +422,16 @@ def extract_curriculum_items(output, document):
     elif found and not output.curriculum_items:
         _issue(output, "manual_review", "УП: из таблиц обучения не извлечено ни одной полной строки", blocks[0][1])
 
-    by_name = defaultdict(list)
+    by_context = defaultdict(list)
     for item in output.curriculum_items:
-        by_name[item.discipline_name].append(item)
-    for name, items in by_name.items():
+        by_context[item.discipline_name, item.semester, item.block, item.source_ref.section].append(item)
+    for (name, semester, _, _), items in by_context.items():
         if len(items) > 1:
             _issue(
                 output, "manual_review",
-                f"УП: название {name!r} встречается в {len(items)} строках. "
-                "Строки и их источники сохранены; контракт задает ключ связи "
-                "только названием, без семестра и траектории", items[0].source_ref,
+                f"УП: название {name!r} встречается в {len(items)} строках "
+                f"в семестре {semester} для одного блока и траектории. "
+                "Строки и их источники сохранены", items[0].source_ref,
             )
 
 
@@ -451,7 +455,7 @@ def parse_curriculum(file_path, *, program_id: str | None = None) -> CurriculumO
         raise ValueError("Не удалось однозначно распознать учебный план по титулу")
     output = CurriculumOutput(meta=CurriculumMeta(
         file_name=file_path.name, file_hash=sha256(raw).hexdigest(),
-        parser_config="curriculum_docx_v4", program_id=program_id,
+        parser_config="curriculum_docx_v5", program_id=program_id,
     ))
     extract_curriculum_competencies(output, document)
     extract_curriculum_items(output, document)

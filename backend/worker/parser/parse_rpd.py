@@ -208,7 +208,7 @@ def parse_rpd(
         meta=RPDMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_docx_v6",
+            parser_config="rpd_docx_v7",
             program_id=program_id,
         ),
         disciplines=disciplines,

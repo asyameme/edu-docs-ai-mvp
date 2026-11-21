@@ -501,8 +501,10 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
             )
             continue
 
-        if semesters is not None:
-            if content_semester is None:
+        if semesters:
+            if content_semester is None and len(semesters) == 1:
+                content_semester = semesters[0]
+            elif content_semester is None:
                 report(
                     "manual_review",
                     "семестр таблицы не указан; темы прочитаны "
@@ -554,6 +556,7 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
         topic_start, issue_start = len(topics), len(issues)
         seen_cells = set()
         hour_owners = {}
+        topics_with_activities = set()
         hour_column = columns.get("hours")
 
         def matches_grid(row, cells):
@@ -568,15 +571,15 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
             )
 
         # Объединенные часы не распределяем между разными занятиями.
-        if hour_column is not None:
-            for row in rows[header_index + 1:]:
-                cells = row.cells
-                if not matches_grid(row, cells):
-                    continue
-                owner = (
-                    cells[columns["topic"]]._tc,
-                    cells[columns["activity"]]._tc,
-                )
+        for row in rows[header_index + 1:]:
+            cells = row.cells
+            if not matches_grid(row, cells):
+                continue
+            topic_cell, activity_cell = cells[columns["topic"]], cells[columns["activity"]]
+            if activity_cell.text.strip() and topic_cell._tc is not activity_cell._tc:
+                topics_with_activities.add(topic_cell._tc)
+            if hour_column is not None:
+                owner = topic_cell._tc, activity_cell._tc
                 hour_cell = cells[hour_column]._tc
                 hour_owners.setdefault(hour_cell, set()).add(owner)
 
@@ -662,6 +665,13 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
             ]
 
             if missing:
+                # Объединённая по вертикали тема может начинаться с пустой
+                # строки, а её занятия идут ниже внутри той же ячейки темы.
+                if (
+                    missing == ["activity"] and not values.get("hours")
+                    and selected["topic"]._tc in topics_with_activities
+                ):
+                    continue
                 field = missing[0]
 
                 report(
@@ -720,12 +730,18 @@ def extract_course_content(document, file_name, semesters=None, *, doc_type="RPD
                 table_ref,
             )
 
-    if blocks and not table_found:
+    if blocks and not table_found and text_ref is None:
+        report(
+            "empty_cell",
+            "после заголовков периода не найдено описание занятий",
+            blocks[0][1],
+        )
+    elif not table_found and text_ref is not None:
         report(
             "manual_review",
-            "раздел содержит текст без поддержанной таблицы; "
-            "темы с часами пока не извлечены",
-            blocks[0][1],
+            "содержание изложено текстом и сохраняется в document_sections",
+            text_ref,
+            severity="info",
         )
 
     elif table_found and text_ref is not None:
