@@ -713,7 +713,7 @@ function ChatScreen({
                             <small>{change.reason}</small>
                           </li>)}</ol>
                           {message.plan.unresolvedQuestions.length > 0 && (
-                            <p className="plan-lock-note">Нужно уточнить: {message.plan.unresolvedQuestions.join(" · ")}</p>
+                            <p className="plan-lock-note">Нужно уточнить: {message.plan.unresolvedQuestions.join(" · ")} Ответьте агенту в чате, чтобы он обновил предложение.</p>
                           )}
                         </>
                       )}
@@ -1106,7 +1106,7 @@ function App() {
   useEffect(() => {
     if (processing.reviewJob?.status !== "completed") return;
     setFindingFilter("all");
-    setFindingStatusFilter("pending");
+    setFindingStatusFilter("all");
   }, [processing.reviewJob?.id, processing.reviewJob?.status]);
 
   useEffect(() => {
