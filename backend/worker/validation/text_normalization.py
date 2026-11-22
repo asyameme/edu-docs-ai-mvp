@@ -21,7 +21,12 @@ _INCLUDING_ABBREVIATION = re.compile(
 
 
 def normalize_variant_formulation_text(value: str) -> str:
-    """Normalize presentation differences shared by cross-document variants."""
+    """Normalize presentation differences shared by cross-document variants.
+
+    Уровень освоения («(Базовый)», «(Средний)», …) — часть формулировки:
+    варианты, различающиеся только им, остаются вопросом для выбора
+    пользователя, а не сворачиваются автоматически.
+    """
     value = ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
     value = value.replace('ё', 'е')
     value = _INCLUDING_ABBREVIATION.sub('в том числе', value)

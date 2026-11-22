@@ -44,10 +44,14 @@ SYSTEM_PROMPT = """Ты проверяешь внутреннюю согласо
 Верни только JSON-объект вида:
 {"results":[{"outcome_id":"LO-001","status":"supported|gap|uncertain",
 "course_evidence_ids":["C001"],"assessment_evidence_ids":["A001"],
-"reason":"Краткое объяснение на русском языке"}]}
+"reason":"Развёрнутое объяснение на русском языке"}]}
 Для каждого переданного outcome верни ровно один результат. В evidence_ids используй
 только идентификаторы из входных данных; пустые списки допустимы для gap/uncertain.
-Поле reason заполняй одним коротким предложением не длиннее 20 слов."""
+Поле reason заполняй двумя-тремя короткими предложениями (суммарно не длиннее
+50 слов): сначала кратко, что требует результат обучения; затем что фактически
+есть в содержании и оценивании — назови конкретные темы раздела 2 и оценочные
+средства, которые рассматривал; затем вывод, почему этого достаточно или
+недостаточно для данного результата."""
 
 
 def _source_ref(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -407,17 +411,37 @@ def evaluate_rpd_alignment(
             cited_course_ids = list(dict.fromkeys(raw_course_ids))
             cited_assessment_ids = list(dict.fromkeys(raw_assessment_ids))
             refs = [course_refs[value] for value in cited_course_ids if value in course_refs]
-            refs.extend(
-                ref
+            cited_assessment_entries = [
+                entry
                 for evidence in assessment_by_competency.values()
                 for entry in evidence
                 if entry["id"] in cited_assessment_ids
-                for ref in entry["source_refs"]
-            )
+            ]
+            refs.extend(ref for entry in cited_assessment_entries for ref in entry["source_refs"])
+            # Детали свидетельств нужны пользователю: без них пояснение модели
+            # ссылается на темы и средства, которых он не видел.
             extra = {
                 "classification": status,
                 "course_evidence_ids": cited_course_ids,
                 "assessment_evidence_ids": cited_assessment_ids,
+                "course_evidence": [
+                    {
+                        "id": item["id"],
+                        "topic": str(item.get("topic", ""))[:200],
+                        "activity": str(item.get("activity", ""))[:80],
+                    }
+                    for item in course_items
+                    if item["id"] in cited_course_ids
+                ][:5],
+                "assessment_evidence": [
+                    {
+                        "id": entry["id"],
+                        "indicator_code": entry.get("indicator_code"),
+                        "indicator_text": str(entry.get("indicator_text", ""))[:200],
+                        "assessment_tool": entry.get("assessment_tool"),
+                    }
+                    for entry in cited_assessment_entries
+                ][:5],
                 "reason": reason[:1200],
             }
             if status == "supported" and cited_course_ids and cited_assessment_ids:

@@ -456,8 +456,12 @@ def _ckmv_level(row: Mapping[str, Any]):
     if not isinstance(section, str):
         return None
     section = " ".join(section.casefold().split())
-    return {"профессиональные перекрестные компетенции базового уровня": "base",
-            "профессиональные перекрестные компетенции топ-уровня": "top"}.get(section)
+    return {
+        "профессиональные перекрестные компетенции базового уровня": "base",
+        "профессиональные перекрестные компетенции топ-уровня": "top",
+        "профессиональные компетенции базового уровня": "base",
+        "профессиональные ключевые компетенции для программ топ-уровня": "top",
+    }.get(section)
 
 
 def _unique(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
@@ -498,6 +502,10 @@ def _unique(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResult:
                                 continue
                             if None in levels:
                                 status = "needs_review"
+                        else:
+                            # Точная копия одной и той же компетенции в соседних
+                            # строках РПД — повтор в источнике, не дефект данных.
+                            continue
                 findings.append(Finding("duplicate_key", status, f"В {path} документа {doc.label} повторяется ключ {key!r}.", {
                     "key_fields": fields, "source_refs": [_source_ref(doc, row) for row in rows],
                 }))
@@ -508,10 +516,14 @@ def _semantic_rpd_alignment(
     rule: Mapping[str, Any],
     docs: Sequence[Document],
     semantic_evaluator: SemanticEvaluator | None = None,
+    document_ids: Sequence[str] | None = None,
 ) -> RuleResult:
     scope, inputs = rule.get("scope", {}), rule["inputs"]
     checks, findings = 0, []
     allowed = {str(value).lower() for value in scope.get("document_types", [])}
+    if document_ids is not None:
+        selected = {str(value) for value in document_ids}
+        docs = [doc for doc in docs if str(doc.document_id) in selected]
     for doc in docs:
         if doc.role not in allowed:
             continue
@@ -551,6 +563,11 @@ def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
         disciplines = _records(doc, "$.disciplines[*]")
         plans = [d for d in docs if d.role == "curriculum"
                  and doc.program_id and d.program_id == doc.program_id]
+        # РПП без локальной нагрузки ссылается на учебный план самим текстом;
+        # сверять её не с чем, и предупреждение было бы шумом.
+        if doc.role == "rpp" and not _records(doc, "$.semester_workload[*]") \
+                and doc.data.get("curriculum_workload_reference"):
+            continue
         if not disciplines:
             checks += 1
             findings.append(Finding("discipline_missing", "needs_review",
@@ -559,9 +576,11 @@ def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
             name = discipline.get("name")
             semesters = _semesters(discipline, "semesters")
             refs = [_source_ref(doc, discipline)]
+            registration = discipline.get("registration_number")
+            semester_loads = _records(doc, "$.semester_workload[*]")
             if (not isinstance(name, str) or not name.strip() or not semesters
                     or any(type(s) is not int or s <= 0 for s in semesters)
-                    or not plans or (doc.role == "rpd" and len(semesters) != 1)
+                    or not plans or (doc.role == "rpd" and len(semesters) != 1 and not semester_loads)
                     or (doc.role == "rpp" and len(disciplines) != 1)):
                 checks += 1
                 findings.append(Finding("workload_comparison_incomplete", "needs_review",
@@ -570,11 +589,29 @@ def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
                 continue
             for semester in sorted(semesters):
                 checks += 1
-                matches = [(plan, item) for plan in plans
-                           for item in _records(plan, "$.curriculum_items[*]")
-                           if item.get("discipline_name") == name and item.get("semester") == semester]
-                loads = ([w for w in _records(doc, "$.semester_workload[*]")
-                          if w.get("semester") == semester] if doc.role == "rpp" else [discipline])
+                matches = []
+                if registration:
+                    # Регистрационный номер — явный ключ строки плана; он снимает
+                    # разночтения названий между РПД/РПП и учебным планом.
+                    matches = [(plan, item) for plan in plans
+                               for item in _records(plan, "$.curriculum_items[*]")
+                               if item.get("registration_number") == registration
+                               and item.get("semester") == semester]
+                if not matches and isinstance(name, str):
+                    matches = [(plan, item) for plan in plans
+                               for item in _records(plan, "$.curriculum_items[*]")
+                               if item.get("discipline_name") == name and item.get("semester") == semester]
+                loads = None
+                if doc.role == "rpp":
+                    loads = [w for w in semester_loads if w.get("semester") == semester]
+                elif semester_loads:
+                    # РПД с посеместровой нагрузкой сверяется по строке семестра.
+                    loads = [w for w in semester_loads if w.get("semester") == semester]
+                    if not loads and len(semesters) > 1:
+                        # Итог дисциплины нельзя подставить вместо строки семестра.
+                        loads = []
+                else:
+                    loads = [discipline]
                 evidence = {"source_refs": refs + [_source_ref(d, r) for d, r in matches]
                             + [_source_ref(doc, w) for w in loads if w is not discipline],
                             "semester": semester, "field": field_name}
@@ -598,6 +635,13 @@ def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
                             {**evidence, "candidates": candidates, "auto_merge": False,
                              "source_refs": evidence["source_refs"] + [c["source_ref"] for c in candidates]}))
                         continue
+                if len(matches) > 1:
+                    # Одна и та же дисциплина в плане может занимать несколько строк
+                    # (например, два профиля). Если все строки содержат одинаковые
+                    # значения, выбор строки не влияет на результат сверки.
+                    compared = {item.get(field_name) for _, item in matches}
+                    if len(compared) == 1:
+                        matches = matches[:1]
                 if len(matches) != 1 or len(loads) != 1:
                     findings.append(Finding("workload_pair_missing_or_ambiguous", "needs_review",
                         f"«{name}», семестр {semester}: нет однозначной пары записей нагрузки.", evidence))
@@ -683,6 +727,10 @@ def _semester_workload_totals(rule: Mapping[str, Any], docs: Sequence[Document])
         workloads = _records(doc, "$.semester_workload[*]")
         disciplines = _records(doc, "$.disciplines[*]")
         if len(disciplines) != 1 or not workloads:
+            # РПП, отсылающая к учебному плану самим текстом, — не дефект
+            # разбора: локальной нагрузки в источнике нет.
+            if len(disciplines) == 1 and doc.data.get("curriculum_workload_reference"):
+                continue
             checks += 1
             findings.append(Finding("ambiguous_practice_workload", "needs_review",
                 f"{doc.label}: нужна одна практика и её посеместровая нагрузка.",
@@ -734,9 +782,18 @@ def _outcome_indicator_links(rule: Mapping[str, Any], docs: Sequence[Document]) 
         if doc.role != "ckmv":
             parents = defaultdict(set)
             with_indicator = set()
+            # Компетенция может быть объявлена в другом документе программы,
+            # а в РПД строка ссылается на неё только кодом без формулировки;
+            # такой код подтверждается полем competency_code индикаторов.
+            confirmed_parents = competencies | {
+                parent for parent in (
+                    _code(row.get("competency_code"))
+                    for row in _records(doc, "$.indicators[*]")
+                ) if parent
+            }
             for rel in _records(doc, "$.relations[*]"):
                 parent, target = _code(rel.get("src_key")), _code(rel.get("dst_key"))
-                if rel.get("src_entity") != "competency" or parent not in competencies:
+                if rel.get("src_entity") != "competency" or parent not in confirmed_parents:
                     continue
                 if rel.get("dst_entity") == "indicator" and rel.get("kind") == "имеет" and target in indicators:
                     with_indicator.add(parent)
@@ -940,6 +997,11 @@ def _competency_match_candidates(group: Sequence[Document], *, threshold: float 
             if code and isinstance(formulation, str) and formulation.strip():
                 rows[code].append((doc, row, normalize_formulation_text(formulation)))
     pair_findings, checks = [], 0
+    # Код, встречающийся в нескольких документах одним написанием, — выполненное
+    # сравнение: коды согласованы, кандидатов на сопоставление не требуется.
+    for entries in rows.values():
+        if len({id(doc) for doc, _, _ in entries}) > 1:
+            checks += 1
     codes = sorted(rows)
     for i, first in enumerate(codes):
         for second in codes[i + 1:]:
@@ -1029,16 +1091,161 @@ def _competency_match_candidates(group: Sequence[Document], *, threshold: float 
     return checks, findings
 
 
+def competency_links_for_row(data, collection, index):
+    """Return indexed formation links for the discipline or the exact plan row."""
+    record = data[collection][index]
+    is_plan = collection == "curriculum_items"
+    source = "curriculum_item" if is_plan else "discipline"
+    name = record["discipline_name" if is_plan else "name"]
+    semester = record.get("semester")
+    coords = ("file", "table", "row")
+    row_ref = record.get("source_ref") or {}
+    row_coords = tuple(row_ref.get(key) for key in coords)
+    same_name = (
+        [item for item in data[collection] if item.get("discipline_name") == name]
+        if is_plan else []
+    )
+    result = []
+    for position, relation in enumerate(data.get("relations", [])):
+        if (relation.get("src_entity"), relation.get("dst_entity"), relation.get("kind")) != (
+            source, "competency", "формирует"
+        ):
+            continue
+        key = relation.get("src_key")
+        if is_plan:
+            qualified = key == f"{name}::semester={semester}"
+            if key != name and not qualified:
+                continue
+            ref = relation.get("source_ref") or {}
+            rel_coords = tuple(ref.get(field) for field in coords)
+            if None not in row_coords and None not in rel_coords:
+                if rel_coords != row_coords:
+                    continue
+            elif qualified:
+                if sum(item.get("semester") == semester for item in same_name) != 1:
+                    continue
+            elif len(same_name) != 1:
+                continue
+        elif key != name:
+            continue
+        if _code(relation.get("dst_key")):
+            result.append((position, relation))
+    return result
+
+
+def _competency_link_differences(group, *, aliases=None):
+    """Compare the RP formation list with the plan across all matching semesters."""
+    checks, findings = 0, []
+    aliases = aliases or {}
+    plan_usage = defaultdict(int)
+    plan_rows = [
+        (doc, i, row)
+        for doc in group if doc.role == "curriculum"
+        for i, row in enumerate(_records(doc, "$.curriculum_items[*]"))
+    ]
+    for doc in (item for item in group if item.role in {"rpd", "rpp"}):
+        disciplines = _records(doc, "$.disciplines[*]")
+        for index, discipline in enumerate(disciplines):
+            name = discipline.get("name")
+            semesters = _semesters(discipline, "semesters")
+            registration = discipline.get("registration_number")
+            if (not isinstance(name, str) or not semesters
+                    or any(type(semester) is not int for semester in semesters)):
+                continue
+            matched = [
+                (plan, i, row) for plan, i, row in plan_rows
+                if registration and row.get("registration_number") == registration
+                and row.get("semester") in semesters
+            ] or [
+                (plan, i, row) for plan, i, row in plan_rows
+                if row.get("discipline_name") == name and row.get("semester") in semesters
+            ]
+            if not matched:
+                continue
+            for plan, i, _ in matched:
+                plan_usage[id(plan), i] += 1
+            checks += 1
+            plan_codes, doc_codes = set(), set()
+            plan_targets = []
+            refs = [_source_ref(doc, discipline)]
+            doc_links = competency_links_for_row(doc.data, "disciplines", index)
+            refs.extend(_source_ref(doc, row) for _, row in doc_links)
+            doc_codes.update(_code(row["dst_key"]) for _, row in doc_links)
+            for plan, i, row in matched:
+                links = competency_links_for_row(plan.data, "curriculum_items", i)
+                codes = {_code(rel["dst_key"]) for _, rel in links}
+                plan_codes.update(codes)
+                refs.extend([_source_ref(plan, row), *(_source_ref(plan, rel) for _, rel in links)])
+                plan_targets.append({
+                    "document_id": plan.document_id, "collection": "curriculum_items",
+                    "record_index": i, "expected_codes": sorted(codes),
+                })
+            context = ", ".join(map(str, sorted(semesters)))
+            if (len(matched) != len(semesters)
+                    or {row["semester"] for _, _, row in matched} != semesters
+                    or not all(target["expected_codes"] for target in plan_targets)
+                    or not doc_codes):
+                findings.append(Finding(
+                    "competency_links_incomplete", "needs_review",
+                    f"Недостаточно однозначных связей для сверки компетенций «{name}» (семестры: {context}).",
+                    {"source_refs": refs},
+                ))
+                continue
+            if {aliases.get(code, code) for code in plan_codes} == {
+                aliases.get(code, code) for code in doc_codes
+            }:
+                continue
+            details = []
+            role = "РПД" if doc.role == "rpd" else "РПП"
+            if plan_codes - doc_codes:
+                details.append(f"только в УП: {', '.join(sorted(plan_codes - doc_codes))}")
+            if doc_codes - plan_codes:
+                details.append(f"только в {role}: {', '.join(sorted(doc_codes - plan_codes))}")
+            findings.append(Finding(
+                "competency_relation_mismatch", "failed",
+                f"«{name}» (семестры: {context}): {'; '.join(details)}.",
+                {
+                    "semesters": sorted(semesters),
+                    "only_in_curriculum": sorted(plan_codes - doc_codes),
+                    "only_in_document": sorted(doc_codes - plan_codes),
+                    "source_refs": refs,
+                    "plan_targets": plan_targets,
+                    "plan_rows": [(id(plan), i) for plan, i, _ in matched],
+                    "document_target": {
+                        "document_id": doc.document_id, "collection": "disciplines",
+                        "record_index": index, "expected_codes": sorted(doc_codes),
+                    },
+                    "shared_discipline": sum(item.get("name") == name for item in disciplines) > 1,
+                    "document_label": role,
+                },
+            ))
+    for finding in findings:
+        if finding.code == "competency_relation_mismatch":
+            finding.evidence["plan_row_is_exclusive"] = all(
+                plan_usage[key] == 1 for key in finding.evidence.pop("plan_rows")
+            )
+    return checks, findings
+
+
 def _competency_code_match_candidates(
     rule: Mapping[str, Any], docs: Sequence[Document],
 ) -> RuleResult:
-    """R-01 before graph building: suggest code matches for user decisions only."""
+    """R-01 before graph building: offer code and discipline link choices."""
     checks, findings = 0, []
     threshold = float(rule.get("match_threshold", 0.94))
     for group in _program_groups(docs).values():
         group_checks, candidates = _competency_match_candidates(group, threshold=threshold)
-        checks += group_checks
+        aliases = {
+            code: candidate.evidence["codes"][0]
+            for candidate in candidates for code in candidate.evidence["codes"]
+        }
+        link_checks, differences = _competency_link_differences(group, aliases=aliases)
+        checks += group_checks + link_checks
         findings.extend(candidates)
+        findings.extend(
+            Finding("competency_links_choice", "needs_review", item.message, item.evidence)
+            for item in differences if item.code == "competency_relation_mismatch"
+        )
     return _result(rule, checks, findings)
 
 
@@ -1090,38 +1297,9 @@ def _competency_consistency(
                 code_sources[code][json.dumps(ref, sort_keys=True, ensure_ascii=False)] = ref
             finding.evidence['source_refs'] = list(code_sources[code].values())
             findings.append(finding)
-        # Compare only disciplines explicitly represented in the supplied curriculum.
-        # A curriculum_item can occur in several semesters; match both name and semester.
-        for plan in (d for d in group if d.role == 'curriculum'):
-            plan_rels = _records(plan, '$.relations[*]')
-            for item in _records(plan, '$.curriculum_items[*]'):
-                name, semester = item.get('discipline_name'), item.get('semester')
-                if not isinstance(name, str) or semester is None:
-                    continue
-                related = [r for r in plan_rels if r.get('src_entity') == 'curriculum_item'
-                    and r.get('dst_entity') == 'competency' and r.get('kind') == 'формирует'
-                    and r.get('src_key') in (name, f'{name}::semester={semester}')]
-                plan_codes = {_code(r.get('dst_key')) for r in related} - {None}
-                for doc in (d for d in group if d.role in {'rpd', 'rpp'}):
-                    for discipline in _records(doc, '$.disciplines[*]'):
-                        if discipline.get('name') != name or semester not in _semesters(discipline, 'semesters'):
-                            continue
-                        doc_rels = [r for r in _records(doc, '$.relations[*]')
-                            if r.get('src_entity') == 'discipline' and r.get('src_key') == name
-                            and r.get('dst_entity') == 'competency' and r.get('kind') == 'формирует']
-                        doc_codes = {_code(r.get('dst_key')) for r in doc_rels} - {None}
-                        checks += 1
-                        refs = [_source_ref(plan, item), _source_ref(doc, discipline),
-                            *[_source_ref(plan, r) for r in related], *[_source_ref(doc, r) for r in doc_rels]]
-                        if not related or not doc_rels:
-                            findings.append(Finding('competency_links_incomplete', 'needs_review',
-                                f'Недостаточно связей для проверки компетенций «{name}» в семестре {semester}.',
-                                {'semester': semester, 'source_refs': refs}))
-                        elif plan_codes != doc_codes:
-                            findings.append(Finding('competency_relation_mismatch', 'failed',
-                                f'Компетенции «{name}» в семестре {semester} различаются в УП и {doc.role.upper()}.',
-                                {'semester': semester, 'only_in_curriculum': sorted(plan_codes - doc_codes),
-                                 'only_in_document': sorted(doc_codes - plan_codes), 'source_refs': refs}))
+        link_checks, differences = _competency_link_differences(group)
+        checks += link_checks
+        findings.extend(differences)
     return _result(rule, checks, findings)
 
 
@@ -1233,11 +1411,14 @@ def run_validation(
     phase: ValidationPhase = "document_reconciliation",
     semantic_evaluator: SemanticEvaluator | None = None,
     rule_codes: Sequence[str] | None = None,
+    document_ids: Sequence[str] | None = None,
 ) -> ValidationReport:
     """Проверить документы либо проекцию актуальной версии графа выбранной фазой.
 
     Для graph_validation вызывающая сторона должна передать JSON-проекции той
     версии графа, которую проверяет, а не исходный, уже устаревший пакет.
+    ``document_ids`` ограничивает ручную семантическую проверку РПД (R-11)
+    выбранными документами пакета.
     """
     if phase not in VALIDATION_PHASES:
         raise ValidationError(f"Неизвестная фаза валидации: {phase}")
@@ -1274,7 +1455,9 @@ def run_validation(
         handler = HANDLERS.get(rule.get("type"))
         if handler is None:
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
-        if rule.get("type") in SEMANTIC_RULE_TYPES:
+        if rule.get("type") == "semantic_rpd_alignment":
+            results.append(handler(rule, docs, semantic_evaluator, document_ids))
+        elif rule.get("type") in SEMANTIC_RULE_TYPES:
             results.append(handler(rule, docs, semantic_evaluator))
         else:
             results.append(handler(rule, docs))
