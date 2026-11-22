@@ -9,7 +9,7 @@ from psycopg.rows import dict_row
 from app.domain import SnapshotV2
 from app.errors import DomainError
 
-PROGRAM_COLUMNS = "id, name, current_version_id, created_at"
+PROGRAM_COLUMNS = "id, name, signature, current_version_id, created_at"
 VERSION_COLUMNS = """id, program_id, number, parent_version_id, restored_from_version_id,
                      origin, created_at, graph_snapshot(graph_state_id,review) AS snapshot"""
 DOCUMENT_COLUMNS = """id, program_id, original_name, format, media_type, size_bytes,
@@ -70,6 +70,18 @@ class Repository:
         ):
             cursor.execute(
                 "SELECT " + PROGRAM_COLUMNS + " FROM programs WHERE id = %s", (program_id,)
+            )
+            return self.require(cursor.fetchone())
+
+    def update_signature(self, program_id, value):
+        with (
+            self.pool.connection() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SET LOCAL statement_timeout = '5s'")
+            cursor.execute(
+                "UPDATE programs SET signature = %s WHERE id = %s RETURNING " + PROGRAM_COLUMNS,
+                (value, program_id),
             )
             return self.require(cursor.fetchone())
 

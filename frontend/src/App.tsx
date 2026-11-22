@@ -1331,17 +1331,17 @@ function App() {
               <div className="program-signature" role="group" aria-label="Подпись программы">
                 <span>Подпись: <strong>{processing.signature ?? "не указана"}</strong></span>
                 {signatureEditing ? (
-                  <form className="program-signature-editor" onSubmit={(event) => {
+                  <form className="program-signature-editor" onSubmit={async (event) => {
                     event.preventDefault();
-                    if (processing.saveSignature(signatureDraft)) setSignatureEditing(false);
+                    if (await processing.saveSignature(signatureDraft)) setSignatureEditing(false);
                   }}>
                     <label htmlFor="program-signature-input">Имя для подписи</label>
-                    <input id="program-signature-input" type="text" maxLength={120} autoFocus
+                    <input id="program-signature-input" type="text" autoFocus
                       value={signatureDraft} onChange={(event) => setSignatureDraft(event.target.value)}
-                      disabled={processing.reviewBusy} />
-                    <button className="secondary-button" type="submit" disabled={processing.reviewBusy}>Сохранить</button>
+                      disabled={processing.reviewBusy || processing.signatureSaving} />
+                    <button className="secondary-button" type="submit" disabled={processing.reviewBusy || processing.signatureSaving}>Сохранить</button>
                     {processing.signature && <button className="competency-cancel-button" type="button"
-                      disabled={processing.reviewBusy} onClick={() => setSignatureEditing(false)}>Отмена</button>}
+                      disabled={processing.reviewBusy || processing.signatureSaving} onClick={() => setSignatureEditing(false)}>Отмена</button>}
                   </form>
                 ) : (
                   <button className="secondary-button" type="button" onClick={() => {

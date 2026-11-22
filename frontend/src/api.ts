@@ -27,6 +27,7 @@ export type ImportJob = {
 };
 
 export type ProgramRead = {
+  signature: string | null;
   id: string;
   name: string;
   current_version_id: string;
