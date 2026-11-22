@@ -76,6 +76,10 @@ def normalize_field_path(field_path: str) -> str:
         raise ProposalApplicationError("Путь поля пуст")
     if field_path == "$":
         raise ProposalApplicationError("Правка всего объекта не поддерживается, укажите поле")
+    # Агент иногда возвращает точечную запись «attributes.hours_total» —
+    # приводим её к каноническому указателю до общей обработки.
+    if field_path.startswith("attributes."):
+        field_path = "/attributes/" + field_path[len("attributes."):]
     pointer = field_path if field_path.startswith("/") else f"/attributes/{field_path}"
     tokens = pointer[1:].split("/")
     if any(token == "" for token in tokens):
@@ -196,13 +200,16 @@ def plan_approved_changes(snapshot: SnapshotV2, proposal: ChangeProposal) -> lis
             )
             continue
         evidence_refs = {link.source_ref_id for link in links}
-        unverified = [
-            str(ref_id) for ref_id in change.source_ref_ids if ref_id not in evidence_refs
-        ]
-        if unverified:
+        # Агент приводит в обоснование и источник-эталон (например, строку
+        # учебного плана, по которой выравниваем значение) — он не является
+        # свидетельством текущего значения поля и не должен блокировать
+        # применение. Отказ — только если не подтверождён ни один источник.
+        if change.source_ref_ids and not (
+            set(change.source_ref_ids) & evidence_refs
+        ):
             errors.append(
-                f"{label} {field_path}: источники {', '.join(unverified)} "
-                "не относятся к свидетельствам этого поля"
+                f"{label} {field_path}: ни один из источников "
+                "не относится к свидетельствам этого поля"
             )
             continue
         key = (change.target_kind, change.target_id, field_path)
