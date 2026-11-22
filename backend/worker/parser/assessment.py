@@ -481,11 +481,18 @@ def extract_assessment_tools(document, file_name, indicators, *, doc_type="RPD")
                 )
 
             if not names:
-                report(
-                    "unexpected_format" if has_nontext else "empty_cell",
-                    "не удалось прочитать название оценочного средства",
-                    tool_ref,
-                )
+                if has_nontext:
+                    report(
+                        "unexpected_format",
+                        "не удалось прочитать название оценочного средства",
+                        tool_ref,
+                    )
+                else:
+                    report(
+                        "empty_cell",
+                        "оценочное средство не указано",
+                        tool_ref,
+                    )
 
             if uncertain_names:
                 report(

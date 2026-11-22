@@ -238,8 +238,15 @@ def _hours_total(output, cells, header, ref):
 
 def _discipline_name(cell):
     parts = []
+    registration = None
     for line in cell.text.splitlines():
-        line = re.sub(r"^\s*\[\d+\]\s*", "", line)
+        match = re.match(r"^\s*\[(\d+)\]\s*", line)
+        if match and registration is None:
+            # Ведущие нули убираем: титул РПД пишет номер без них.
+            registration = match.group(1).lstrip("0") or "0"
+            line = line[match.end():]
+        else:
+            line = re.sub(r"^\s*\[\d+\]\s*", "", line)
         line = " ".join(line.split())
         if not line:
             continue
@@ -249,7 +256,21 @@ def _discipline_name(cell):
         ):
             break
         parts.append(line)
-    return " ".join(parts)
+    return " ".join(parts), registration
+
+
+# Служебные пометки учебного плана: формат доставки (онлайн), вариант курса
+# (основной/общий) и пометка трека/семестра траектории. РПД и РПП этих пометок
+# не содержат, поэтому для сопоставления документов они убираются из названия.
+_ADMIN_NAME_QUALIFIER = re.compile(
+    r"\s*\((?:онлайн-курс|онлайн|осн курс|общ курс)\)"
+    r"|\s*,\s*(?:тр \d+ сем|осн тр)$"
+)
+
+
+def _clean_discipline_name(name):
+    cleaned = _ADMIN_NAME_QUALIFIER.sub("", name)
+    return " ".join(cleaned.split()) or name
 
 
 def _add_relations(output, raw, name, ref, *, elective=False):
@@ -350,7 +371,8 @@ def extract_curriculum_items(output, document):
                 continue
             columns = header["columns"]
             name_cell = cells[columns["name"]]
-            name = _discipline_name(name_cell)
+            name, registration_number = _discipline_name(name_cell)
+            name = _clean_discipline_name(name)
             row_ref = row_ref.model_copy(update={
                 "section": "; ".join(filter(None, [table_ref.section, semester_title, *context.values()])),
                 "col": columns["name"] + 1,
@@ -408,6 +430,7 @@ def extract_curriculum_items(output, document):
                 discipline_name=name, semester=actual_semester,
                 credit_units=credits, hours_total=hours,
                 block=raw_block, source_ref=row_ref,
+                registration_number=registration_number,
             ))
             code_col = columns["codes"]
             _add_relations(
