@@ -145,6 +145,7 @@ class ReviewActivities:
                         config=input_data["ruleset"]["config"],
                         ruleset=input_data["ruleset"],
                         rule_codes=job["parameters"].get("manual_rule_codes"),
+                        document_ids=job["parameters"].get("manual_document_ids"),
                     )
             else:
                 if not self.settings.analysis_url:

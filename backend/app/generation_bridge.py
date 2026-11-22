@@ -65,6 +65,10 @@ def approved_changes(snapshot: SnapshotV2) -> list[FieldChange]:
         raise GenerationBridgeError("Изменения требуют подтверждённой версии программы")
     for decision in snapshot.review.decisions if snapshot.review else []:
         for change in decision.changes:
+            if change.get("op") == "set_competency_links" and set(change["codes"]) == set(
+                change["expected_codes"]
+            ):
+                continue
             if change.get("op") not in {"set_attribute", "set_document_value"}:
                 raise GenerationBridgeError(
                     "Генератор DOCX пока не поддерживает структурные изменения графа"

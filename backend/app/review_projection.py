@@ -25,6 +25,34 @@ _ISSUE_FIELDS = {
 _COVERAGE_FIELDS = {"rule_code", "rule_revision", "status", "reason"}
 
 
+def _short(value, limit=200):
+    return value if isinstance(value, str) and len(value) <= limit else (
+        value[:limit] if isinstance(value, str) else None
+    )
+
+
+def _evidence_list(source, key, fields, limit=5):
+    items = source.get(key)
+    if not isinstance(items, list):
+        return None
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row = {}
+        for field in fields:
+            value = item.get(field)
+            if isinstance(value, str) and value.strip():
+                row[field] = _short(value)
+            elif value is not None and not isinstance(value, str):
+                row[field] = value
+        if row:
+            result.append(row)
+        if len(result) >= limit:
+            break
+    return result or None
+
+
 def _rpd_alignment_summary(issue):
     if issue.get("rule_code") != "R-11":
         return None
@@ -47,6 +75,13 @@ def _rpd_alignment_summary(issue):
         ),
         "classification": classification,
         "reason": source.get("reason") if isinstance(source.get("reason"), str) else None,
+        "course_evidence": _evidence_list(
+            source, "course_evidence", ("id", "topic", "activity")
+        ),
+        "assessment_evidence": _evidence_list(
+            source, "assessment_evidence",
+            ("id", "indicator_code", "indicator_text", "assessment_tool"),
+        ),
     }
 
 

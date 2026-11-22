@@ -4,8 +4,9 @@ from copy import deepcopy
 
 from app.errors import DomainError
 from app.parser_document import parse_output
-from app.review_contract import DocumentMutation
+from app.review_contract import CompetencyLinksMutation, DocumentMutation
 from app.review_logic import digest, pointer_parts
+from worker.validation.validator import competency_links_for_row
 
 _PROTECTED = {"meta", "source_ref", "parse_issues"}
 
@@ -97,6 +98,9 @@ def _normalize(change):
 def validate_document_mutations(documents, changes):
     """Проверяет применимость всех вариантов по отдельности к исходным JSON."""
     for change in changes:
+        if change.get("op") == "set_competency_links":
+            _validate_competency_links(documents, change)
+            continue
         mutation, parts = _normalize(change)
         identity = str(mutation.document_id)
         if identity not in documents:
@@ -115,7 +119,7 @@ def validate_document_mutation_variants(documents, variants):
         if not changes:
             continue
         selected = apply_document_mutations(documents, changes)
-        affected = {str(_normalize(change)[0].document_id) for change in changes}
+        affected = {str(change["document_id"]) for change in changes}
         for document_id in affected:
             try:
                 parse_output(selected[document_id])
@@ -125,9 +129,76 @@ def validate_document_mutation_variants(documents, variants):
                 ) from error
 
 
-def apply_document_mutations(original_documents, changes):
+def _validate_competency_links(documents, change):
+    mutation = CompetencyLinksMutation.model_validate(change)
+    identity = str(mutation.document_id)
+    document = documents.get(identity)
+    if document is None:
+        raise DomainError(422, "Вариант ссылается на документ вне исходного пакета")
+    records = document.get(mutation.collection, [])
+    if mutation.record_index >= len(records):
+        raise DomainError(422, "Не найдена исходная строка связей")
+    row = records[mutation.record_index]
+    links = competency_links_for_row(document, mutation.collection, mutation.record_index)
+    if {link["dst_key"] for _, link in links} != set(mutation.expected_codes):
+        raise DomainError(409, "Исходный список компетенций изменился")
+    if (not row.get("source_ref")
+            or any(not code or code != code.strip() for code in mutation.codes)
+            or len(mutation.codes) != len(set(mutation.codes))):
+        raise DomainError(422, "Вариант содержит некорректные коды или источник")
+    return mutation
+
+
+def _apply_competency_links(result, original, changes, aliases, origins):
+    updates = {}
+    for change in changes:
+        mutation = _validate_competency_links(original, change)
+        if set(mutation.codes) == set(mutation.expected_codes):
+            continue
+        identity = str(mutation.document_id)
+        key = (identity, mutation.collection, mutation.record_index)
+        codes = {aliases.get(code, code) for code in mutation.codes}
+        if key in updates and updates[key] != codes:
+            raise DomainError(409, "Для одной строки выбраны разные списки компетенций")
+        updates[key] = codes
+
+    known = {
+        row["code"] for document in result.values() for row in document.get("competencies", [])
+    }
+    for identity in {key[0] for key in updates}:
+        document = result[identity]
+        remove, append = set(), []
+        for (_, collection, index), codes in sorted(
+            (key, codes) for key, codes in updates.items() if key[0] == identity
+        ):
+            if not codes <= known:
+                raise DomainError(422, "Выбранный список содержит неизвестные компетенции")
+            row = document[collection][index]
+            existing = competency_links_for_row(document, collection, index)
+            remove.update(i for i, relation in existing if relation["dst_key"] not in codes)
+            is_plan = collection == "curriculum_items"
+            present = {relation["dst_key"] for _, relation in existing}
+            for code in sorted(codes - present):
+                append.append({
+                    "src_entity": "curriculum_item" if is_plan else "discipline",
+                    "src_key": row["discipline_name" if is_plan else "name"],
+                    "dst_entity": "competency", "dst_key": code, "kind": "формирует",
+                    "source_ref": deepcopy(row["source_ref"]),
+                })
+        kept = [i for i in range(len(document["relations"])) if i not in remove]
+        document["relations"] = [document["relations"][i] for i in kept] + append
+        if origins is not None:
+            origins[identity] = kept + [None] * len(append)
+
+
+def apply_document_mutations(original_documents, changes, *, relation_origins=None):
     """Каждый полный набор решений заново накладывается на неизменённый импорт."""
-    normalized = [_normalize(change) for change in changes]
+    normalized, link_changes = [], []
+    for change in changes:
+        if change.get("op") == "set_competency_links":
+            link_changes.append(change)
+        else:
+            normalized.append(_normalize(change))
     touched = {}
     for mutation, parts in normalized:
         identity = str(mutation.document_id)
@@ -156,6 +227,13 @@ def apply_document_mutations(original_documents, changes):
         unique.setdefault((document_id, tuple(parts)), (document, mutation, parts))
 
     result = deepcopy(original_documents)
+    aliases = {}
     for (document_id, _), (_, mutation, parts) in unique.items():
         _write(result[document_id], parts, mutation.value)
+        if len(parts) == 3 and parts[0] == "competencies" and parts[-1] == "code":
+            aliases[mutation.expected_old_value] = mutation.value
+    if link_changes:
+        _apply_competency_links(
+            result, original_documents, link_changes, aliases, relation_origins
+        )
     return result

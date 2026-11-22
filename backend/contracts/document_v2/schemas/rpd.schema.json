@@ -169,15 +169,25 @@
         },
         "credit_units": {
           "anyOf": [
-            {"minimum": 1, "type": "integer"},
-            {"type": "null"}
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
           ],
           "title": "Credit Units"
         },
         "hours_total": {
           "anyOf": [
-            {"minimum": 0, "type": "integer"},
-            {"type": "null"}
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
           ],
           "title": "Hours Total"
         },
@@ -203,6 +213,18 @@
           },
           "title": "Prerequisites",
           "type": "array"
+        },
+        "registration_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Registration Number"
         }
       },
       "required": [
@@ -543,6 +565,52 @@
       "title": "ScoreScaleItem",
       "type": "object"
     },
+    "SemesterWorkload": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "semester": {
+          "maximum": 8,
+          "minimum": 1,
+          "title": "Semester",
+          "type": "integer"
+        },
+        "credit_units": {
+          "minimum": 0,
+          "title": "Credit Units",
+          "type": "integer"
+        },
+        "hours_total": {
+          "minimum": 0,
+          "title": "Hours Total",
+          "type": "integer"
+        },
+        "hours_by_kind": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Hours By Kind",
+          "type": "object"
+        },
+        "control_forms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Control Forms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_ref",
+        "semester",
+        "credit_units",
+        "hours_total"
+      ],
+      "title": "SemesterWorkload",
+      "type": "object"
+    },
     "SourceRefV2": {
       "additionalProperties": false,
       "description": "Координаты значения в исходном DOCX или XLSX.\n\nparagraph_index считает абзацы тела DOCX с 1, включая таблицы и исключая\nколонтитулы и сноски. Номера table, row и col также начинаются с 1;\nrow=1 обозначает заголовок таблицы. Для XLSX используются sheet_name и cell.\nТекст фрагмента хранится отдельно от ссылки.",
@@ -688,6 +756,17 @@
       ],
       "default": null
     },
+    "registration_number_source_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "meta": {
       "$ref": "#/$defs/RPDMeta"
     },
@@ -697,6 +776,13 @@
       },
       "minItems": 1,
       "title": "Disciplines",
+      "type": "array"
+    },
+    "semester_workload": {
+      "items": {
+        "$ref": "#/$defs/SemesterWorkload"
+      },
+      "title": "Semester Workload",
       "type": "array"
     },
     "competencies": {

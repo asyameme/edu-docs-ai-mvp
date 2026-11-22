@@ -232,7 +232,7 @@ class DocumentBuilder:
             )
 
 
-def to_snapshot_v2(program_id, files, *, original_files=None):
+def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=None):
     builder, parsed_documents, codes = DocumentBuilder(program_id), {}, {}
     normalized_documents = {}
     store_selected_json = original_files is None
@@ -301,13 +301,41 @@ def to_snapshot_v2(program_id, files, *, original_files=None):
             and len(output["disciplines"]) > 1
             and len(discipline_names) == 1
         )
-        if len(output.get("relations", [])) != len(original_relations):
+        selected_relations = output.get("relations", [])
+        origins = (relation_origins or {}).get(document_id, list(range(len(original_relations))))
+        if len(selected_relations) != len(origins):
             raise ValueError("Выбор изменил структуру списка связей")
-        for member, original_member in zip(
-            output.get("relations", []), original_relations, strict=True
-        ):
-            if member.get("source_ref") != original_member.get("source_ref"):
+        for member, origin in zip(selected_relations, origins, strict=True):
+            original_member = original_relations[origin] if origin is not None else None
+            if original_member is not None and member.get("source_ref") != original_member.get("source_ref"):
                 raise ValueError("Выбор изменил provenance исходной связи")
+            for endpoint_kind, endpoint_key in (
+                (member["src_entity"], member["src_key"]),
+                (member["dst_entity"], member["dst_key"]),
+            ):
+                # РПД может ссылаться на компетенцию одним кодом без локальной
+                # формулировки (описание живет в ЦКМВ или учебном плане). Глобальный
+                # поиск в этот момент находит несколько одноименных сущностей других
+                # документов и не выбирает одну. Код известен программе, поэтому
+                # фиксируем ссылку местной записью; неизвестный программе код
+                # остается неразрешенным и видимым как раньше.
+                if (
+                    endpoint_kind == "competency"
+                    and not builder.local[document_id, "competency", str(endpoint_key)]
+                    and builder.global_keys["competency", str(endpoint_key)]
+                ):
+                    builder.entity(
+                        document_id,
+                        "competency",
+                        endpoint_key,
+                        {"code": endpoint_key, "source_ref": member["source_ref"]},
+                        placeholder=True,
+                    )
+            # A user-added edge is anchored to the row but was not observed in the DOCX.
+            attributes = (
+                {k: v for k, v in member.items() if k != "source_ref"}
+                if original_member is not None else {}
+            )
             builder.connect(
                 document_id,
                 member,
@@ -316,7 +344,7 @@ def to_snapshot_v2(program_id, files, *, original_files=None):
                 member["dst_entity"],
                 member["dst_key"],
                 member["kind"],
-                {k: v for k, v in member.items() if k != "source_ref"},
+                attributes,
                 original_member=original_member,
                 shared_discipline=(
                     multi_profile_rpd

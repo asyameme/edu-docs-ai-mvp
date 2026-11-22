@@ -52,6 +52,18 @@
         "block": {
           "title": "Block",
           "type": "string"
+        },
+        "registration_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Registration Number"
         }
       },
       "required": [

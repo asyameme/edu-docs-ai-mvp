@@ -259,6 +259,7 @@ class ReviewRepository:
                         ),
                     }
                 rule_codes = getattr(body, "rule_codes", None)
+                document_ids = getattr(body, "document_ids", None)
                 if rule_codes is not None:
                     rule_definitions = ruleset.get("config", {}).get("rules", [])
                     manual_rule_codes = {
@@ -277,6 +278,27 @@ class ReviewRepository:
                         )
                     parameters["manual_rule_codes"] = list(rule_codes)
                     ruleset = {**ruleset, "required_rules": []}
+                if document_ids is not None:
+                    if rule_codes is None or "R-11" not in rule_codes:
+                        raise DomainError(
+                            422,
+                            "Выбор документа допустим только для ручной проверки R-11",
+                        )
+                    known = {
+                        str(item["document_id"]): (item.get("parsed") or {}).get("meta", {}).get("doc_type")
+                        for item in source_documents
+                    }
+                    unknown = [str(value) for value in document_ids if str(value) not in known]
+                    not_rpd = [
+                        str(value) for value in document_ids
+                        if str(value) in known and known[str(value)] != "RPD"
+                    ]
+                    if unknown or not_rpd:
+                        raise DomainError(
+                            422,
+                            "Проверка по документу доступна только для РПД этого пакета",
+                        )
+                    parameters["manual_document_ids"] = [str(value) for value in document_ids]
                 parameters.update(
                     content_hash=content_hash(snapshot),
                     ruleset=ruleset,
@@ -285,6 +307,8 @@ class ReviewRepository:
                         "snapshot": snapshot.model_dump(mode="json"),
                         "ruleset": ruleset,
                         **({"rule_codes": list(rule_codes)} if rule_codes is not None else {}),
+                        **({"document_ids": [str(value) for value in document_ids]}
+                           if document_ids is not None else {}),
                         # Worker повторно накладывает сохранённые решения после чтения
                         # исходных parsed-артефактов; изменённый JSON не подменяет оригинал.
                         "documents": source_documents,
@@ -580,7 +604,7 @@ class ReviewRepository:
                 if issue["job_id"] != review_id:
                     raise DomainError(409, "Предграфовое решение должно относиться к AnalysisV2")
                 if any(
-                    change.get("op") != "set_document_value"
+                    change.get("op") not in {"set_document_value", "set_competency_links"}
                     for decision in snapshot.review.decisions for change in decision.changes
                 ):
                     raise DomainError(
@@ -595,7 +619,10 @@ class ReviewRepository:
                 ]
                 changes = [change for choice in choices for change in choice["changes"]]
                 changes.extend(variant["changes"])
-                selected_documents = apply_document_mutations(original, changes)
+                relation_origins = {}
+                selected_documents = apply_document_mutations(
+                    original, changes, relation_origins=relation_origins
+                )
                 choices.append(
                     {
                         "conflict_id": str(body.conflict_id),
@@ -622,7 +649,8 @@ class ReviewRepository:
                         for identity, value in selected_documents.items()
                     ]
                     graph_data, build_issues = to_snapshot_v2(
-                        program_id, files, original_files=documents
+                        program_id, files, original_files=documents,
+                        relation_origins=relation_origins,
                     )
                     build_errors = graph_build_issues(build_issues)
                     if build_errors:
