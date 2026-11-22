@@ -64,6 +64,14 @@ export type PrepareReviewRequest = {
 
 export type ReviewMutation =
   | {
+    op: "set_competency_links";
+    document_id: string;
+    collection: "disciplines" | "curriculum_items";
+    record_index: number;
+    expected_codes: string[];
+    codes: string[];
+  }
+  | {
     op: "set_document_value";
     document_id: string;
     field_path: string;
@@ -111,6 +119,13 @@ export type RpdAlignmentSummary = {
   outcome_text: string | null;
   classification: "supported" | "gap" | "uncertain" | "invalid" | null;
   reason: string | null;
+  course_evidence?: Array<{ id?: string; topic?: string; activity?: string }> | null;
+  assessment_evidence?: Array<{
+    id?: string;
+    indicator_code?: string;
+    indicator_text?: string;
+    assessment_tool?: string;
+  }> | null;
 };
 
 export type ReviewIssue = {

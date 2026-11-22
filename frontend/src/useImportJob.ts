@@ -28,10 +28,9 @@ function operationHeaders(idempotencyKey: string = crypto.randomUUID()): Headers
 export function useImportJob() {
   const initial = useRef(loadSession() ?? emptySession);
   const sessionRef = useRef(initial.current);
-  const initialSessionKey = `${initial.current.programId}:${initial.current.jobId}`;
-  const [recoveredReviewFor, setRecoveredReviewFor] = useState<string | null>(
-    initial.current.reviewId ? initialSessionKey : null,
-  );
+  // Всегда проверяем сохранённую сверку один раз: reviewId мог протухнуть,
+  // если подготовку перезапустили в другой вкладке или снаружи.
+  const [recoveredReviewFor, setRecoveredReviewFor] = useState<string | null>(null);
   const prepareRequestRef = useRef("");
   const busyRef = useRef(false);
   const reviewBusyRef = useRef(false);
@@ -61,6 +60,22 @@ export function useImportJob() {
     sessionRef.current = next;
     setSession(next);
     saveSession(next);
+  }, []);
+
+  // Программа из сохранённой сессии исчезла (например, БД пересоздали):
+  // молча возвращаем страницу к начальному экрану загрузки.
+  const resetStaleSession = useCallback(() => {
+    sessionRef.current = emptySession;
+    setSession(emptySession);
+    saveSession(emptySession);
+    setProgram(null);
+    setJob(null);
+    setReviewJob(null);
+    setReviewDetails(null);
+    setCheckJob(null);
+    setOptionalRuleChecks({});
+    setRecoveredReviewFor(null);
+    setNotice("");
   }, []);
 
   const applyProgramState = useCallback((latest: ProgramRead, analysisVersionId?: string | null) => {
@@ -209,6 +224,11 @@ export function useImportJob() {
         if (!active) return;
         if (error instanceof ApiError && error.status === 404) {
           await restoreSingleProgram();
+          if (active && sessionRef.current.programId === session.programId) {
+            // Восстановить нечего: программы больше нет — сбрасываем сессию,
+            // чтобы страница вернулась к начальному экрану загрузки.
+            resetStaleSession();
+          }
           return;
         }
         setNotice(error instanceof Error ? error.message : "Не удалось открыть программу");
@@ -216,7 +236,7 @@ export function useImportJob() {
     };
     void openProgram();
     return () => { active = false; };
-  }, [session.programId, applyProgramState, loadReviewDetails]);
+  }, [session.programId, applyProgramState, loadReviewDetails, resetStaleSession]);
 
   useEffect(() => {
     if (!session.programId) return;
@@ -313,18 +333,23 @@ export function useImportJob() {
         }
       } catch (error) {
         if (!active) return;
+        if (error instanceof ApiError && error.status === 404) {
+          // Задание импорта исчезло вместе с программой (БД пересоздали).
+          resetStaleSession();
+          return;
+        }
         setNotice(error instanceof Error ? error.message : "Не удалось получить состояние задачи");
-        if (!(error instanceof ApiError && error.status === 404)) timer = setTimeout(connect, 5000);
+        timer = setTimeout(connect, 5000);
       }
     };
     void connect();
     return () => { active = false; clearTimeout(timer); stream?.close(); };
-  }, [session.programId, session.jobId, job?.attempt]);
+  }, [session.programId, session.jobId, job?.attempt, resetStaleSession]);
 
   useEffect(() => {
     const sessionKey = `${session.programId}:${session.jobId}`;
     if (
-      !session.programId || !session.jobId || session.reviewId || !program || !job ||
+      !session.programId || !session.jobId || !program || !job ||
       !["completed", "partial"].includes(job.status) || recoveredReviewFor === sessionKey
     ) return;
 
@@ -335,13 +360,25 @@ export function useImportJob() {
           `/api/v1/programs/${session.programId}/versions/${program.current_version_id}/review?limit=1&offset=0`,
         );
         const savedReview = details.version.snapshot.review;
-        if (savedReview?.import_job_id === session.jobId && savedReview.review_id) {
+        // Сверку могли переподготовить в другой вкладке или снаружи: тогда
+        // сохранённый reviewId протух, и решения и проверки уходят не в ту
+        // подготовку с ошибкой «Версия не принадлежит этой подготовке».
+        const staleReview = Boolean(
+          session.reviewId && savedReview?.review_id && savedReview.review_id !== session.reviewId
+        );
+        if (
+          (!session.reviewId || staleReview) &&
+          savedReview?.import_job_id === session.jobId && savedReview.review_id
+        ) {
           updateSession({
             versionId: program.current_version_id,
             reviewId: savedReview.review_id,
             analysisVersionId: savedReview.analysis_version_id,
             prepareKey: undefined,
+            checkJobId: undefined,
+            checkVersionId: undefined,
           });
+          setCheckJob(null);
           setNotice("");
         }
       } catch (error) {
@@ -493,13 +530,18 @@ export function useImportJob() {
         })
         .catch((error: unknown) => {
           if (!active) return;
+          if (error instanceof ApiError && error.status === 404) {
+            // Сверка исчезла вместе с программой (БД пересоздали).
+            resetStaleSession();
+            return;
+          }
           setNotice(error instanceof Error ? error.message : "Не удалось получить состояние сверки");
-          if (!(error instanceof ApiError && error.status === 404)) retryTimer = setTimeout(connect, 5000);
+          retryTimer = setTimeout(connect, 5000);
         });
     };
     connect();
     return () => { active = false; clearTimeout(retryTimer); stream?.close(); };
-  }, [session.programId, session.reviewId, applyProgramState]);
+  }, [session.programId, session.reviewId, applyProgramState, resetStaleSession]);
 
   useEffect(() => {
     const versionId = session.versionId;
@@ -546,6 +588,12 @@ export function useImportJob() {
         }
       } catch (error) {
         if (!active) return;
+        if (error instanceof ApiError && error.status === 404) {
+          // Задание проверки относилось к исчезнувшей версии; молча забываем его.
+          setCheckJob(null);
+          updateSession({ checkJobId: undefined, checkVersionId: undefined });
+          return;
+        }
         setNotice(error instanceof Error ? error.message : "Не удалось получить состояние проверки");
         timer = setTimeout(() => void poll(), 3000);
       }
@@ -570,6 +618,18 @@ export function useImportJob() {
         }
       } catch (error) {
         if (!active) return;
+        if (error instanceof ApiError && error.status === 404) {
+          // Проверка правила относилась к исчезнувшей версии; забываем её.
+          const rest = { ...(sessionRef.current.optionalRuleCheckJobIds ?? {}) };
+          delete rest[ruleCode];
+          updateSession({ optionalRuleCheckJobIds: Object.keys(rest).length ? rest : undefined });
+          setOptionalRuleChecks((current) => {
+            const next = { ...current };
+            delete next[ruleCode];
+            return next;
+          });
+          return;
+        }
         setNotice(error instanceof Error ? error.message : `Не удалось получить результат ${ruleCode}`);
         timers.set(ruleCode, setTimeout(() => void poll(ruleCode, jobId), 3000));
       }
@@ -688,17 +748,73 @@ export function useImportJob() {
       updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
       setCheckJob(null);
       setNotice("");
-      try {
-        await loadReviewDetails(version.id, current.programId);
-      } catch {
+      // Полная перезагрузка сверки занимает ~10 секунд на большом пакете, и
+      // ждать её после каждого решения невозможно. Отмечаем решение локально,
+      // а актуальные данные догружаем в фоне: следующий клик не блокируется.
+      setReviewDetails((details) => details && {
+        ...details,
+        issues: details.issues.map((issue) => issue.id === conflictId
+          ? { ...issue, decision: { variant_id: variantId, author: signature } }
+          : issue),
+      });
+      void loadReviewDetails(version.id, current.programId).catch(() => {
         setNotice("Выбор сохранён, обновляем список расхождений…");
-      }
+      });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось сохранить выбранное значение");
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
     }
+  }
+
+  // Уровень освоения («Базовый», «Средний», …) в скобках — служебная пометка
+  // ЦКМВ: одни документы её приводят, другие нет, содержание совпадает.
+  const LEVEL_NOTE = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/i;
+  const LEVEL_NOTE_ALL = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/gi;
+
+  function variantLabelText(label: string): string {
+    return label.replace(/^Выбрать значение из документов:\s*/i, "").trim();
+  }
+
+  function variantBaseText(label: string): string {
+    return variantLabelText(label)
+      .replace(LEVEL_NOTE_ALL, "")
+      .replaceAll("ё", "е")
+      .toLocaleLowerCase("ru")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/[.,;:!?]+$/, "")
+      .trim();
+  }
+
+  function variantHasLevel(label: string): boolean {
+    return LEVEL_NOTE.test(variantLabelText(label));
+  }
+
+  async function decideLevelOnlyVariants(): Promise<number> {
+    const current = sessionRef.current;
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return 0;
+    const details = reviewDetails;
+    if (!details) return 0;
+
+    const targets: Array<{ conflictId: string; variantId: string }> = [];
+    for (const issue of details.issues) {
+      if (!issue.requires_decision || issue.decision || issue.variants.length < 2) continue;
+
+      const bases = new Set(issue.variants.map((variant) => variantBaseText(variant.label)));
+      if (bases.size !== 1) continue;
+
+      const withLevel = issue.variants.filter((variant) => variantHasLevel(variant.label));
+      if (withLevel.length !== 1) continue;
+
+      targets.push({ conflictId: issue.id, variantId: withLevel[0].id });
+    }
+
+    for (const target of targets) {
+      await decide(target.conflictId, target.variantId);
+    }
+    return targets.length;
   }
 
   async function acceptChatProposal(sessionId: string, turnId: string, expectedVersionId: string) {
@@ -764,7 +880,7 @@ export function useImportJob() {
     }
   }, [updateSession]);
 
-  async function runOptionalRuleCheck(ruleCode: OptionalRuleCode) {
+  async function runOptionalRuleCheck(ruleCode: OptionalRuleCode, documentId?: string) {
     const current = sessionRef.current;
     const currentDetails = reviewDetails;
     const anotherCheckRunning = Object.values(optionalRuleChecks).some(
@@ -787,7 +903,11 @@ export function useImportJob() {
         {
           method: "POST",
           headers: operationHeaders(),
-          body: JSON.stringify({ version_id: current.versionId, rule_codes: [ruleCode] }),
+          body: JSON.stringify({
+            version_id: current.versionId,
+            rule_codes: [ruleCode],
+            ...(ruleCode === "R-11" && documentId ? { document_ids: [documentId] } : {}),
+          }),
         },
       );
       const optionalRuleCheckJobIds = {
@@ -870,8 +990,13 @@ export function useImportJob() {
     setPrepareAttempt((attempt) => attempt + 1);
   }
 
+  const sessionVerified = Boolean(
+    session.programId && session.jobId &&
+    recoveredReviewFor === `${session.programId}:${session.jobId}`,
+  );
   return {
     programId: session.programId,
+    sessionVerified,
     versionId: session.versionId ?? "",
     program,
     signature: signatureForProgram(signature, session.programId),
@@ -890,6 +1015,7 @@ export function useImportJob() {
     retry,
     retryPrepare,
     decide,
+    decideLevelOnlyVariants,
     acceptChatProposal,
     runCheck,
     runOptionalRuleCheck,

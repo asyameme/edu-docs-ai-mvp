@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "r
 import { ImportProgress } from "./ImportProgress";
 import { GenerationScreen } from "./GenerationScreen";
 import { DiagnosticList } from "./DiagnosticList";
-import { groupDiagnostics, importDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
+import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
 import { api } from "./api";
 import type {
@@ -533,7 +533,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
           ...("relation" in change ? change.relation.source_ref_ids : []),
         ]);
         const changeDocumentIds = variant.changes.flatMap((change) =>
-          change.op === "set_document_value" ? [change.document_id] : [],
+          "document_id" in change ? [change.document_id] : [],
         );
         const source = sourceDescription(
           changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
@@ -558,12 +558,13 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
     const source = sourceDescription(issue.source_ref_ids, issue.source_document_ids ?? []);
     return reviewDiagnostic(issue, source.diagnosticDocuments);
   });
-  const importIssues = job ? importDiagnostics(job) : [];
-
+  // Замечания парсера остаются только в блоке «Результаты парсинга»:
+  // это отчёт об извлечении, а не расхождения документов. Здесь же —
+  // находки сверки и проверки, которые пользователь должен видеть в сводке.
   return {
     documentCount,
     findings,
-    issues: [...reviewIssues, ...importIssues],
+    issues: reviewIssues,
   };
 }
 
@@ -938,7 +939,9 @@ function App() {
   const [customCodes, setCustomCodes] = useState<Record<string, string>>({});
   const [findingFilter, setFindingFilter] = useState<FindingFilter>("all");
   const [findingStatusFilter, setFindingStatusFilter] = useState<FindingStatusFilter>("all");
+  const [rpdDocumentId, setRpdDocumentId] = useState("");
   const [acceptedWarningIds, setAcceptedWarningIds] = useState<string[]>([]);
+  const [levelAutoNotice, setLevelAutoNotice] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(hasDemoPreview ? demoChatMessages : []);
   const [chatDraft, setChatDraft] = useState("");
   const [chatAvailability, setChatAvailability] = useState<"loading" | "available" | "unavailable">("loading");
@@ -1005,7 +1008,6 @@ function App() {
     (currentCheckReport?.issues ?? (graphReady ? [] : prepareReport?.issues ?? []))
       .filter((issue) => !issue.requires_decision).map((issue) => reviewDiagnostic(issue, [])),
   ).length;
-  const parserDiagnosticCount = processing.job ? groupDiagnostics(importDiagnostics(processing.job)).length : 0;
   const checkWarningDiagnostics = checkWarnings.map((issue) => {
     const ids = new Set(issue.source_document_ids ?? []);
     for (const ref of processing.reviewDetails?.version.snapshot.source_refs ?? []) {
@@ -1115,6 +1117,7 @@ function App() {
     const reviewId = details?.version.snapshot.review?.review_id;
     if (
       isDemoMode || !graphReady || !details || !versionId || !reviewId ||
+      !processing.sessionVerified ||
       processing.versionId !== versionId || processing.reviewBusy || details.confirmed ||
       details.check_job_id || processing.checkJob?.input_version_id === versionId
     ) return;
@@ -1130,6 +1133,7 @@ function App() {
     processing.reviewBusy,
     processing.reviewDetails,
     processing.runCheck,
+    processing.sessionVerified,
     processing.versionId,
   ]);
 
@@ -1471,6 +1475,22 @@ function App() {
 
                 {parsedProgram ? (
                   <>
+                    {processing.job && (
+                      <details className="issues-details parse-result-details">
+                        <summary>
+                          Результаты парсинга · {formatFileCount(processing.job.files.length)} ·{" "}
+                          {processing.job.issues.some((issue) => issue.severity === "error")
+                            ? "есть ошибки разбора"
+                            : "ошибок разбора нет"}
+                        </summary>
+                        <ImportProgress
+                          programId={processing.programId}
+                          job={processing.job}
+                          busy={processing.busy}
+                          onRetry={processing.retry}
+                        />
+                      </details>
+                    )}
                     <div className="competency-filter-toolbar" aria-label="Фильтры результатов проверки">
                       <div className="competency-filter-rules" role="group" aria-label="Фильтр по правилу">
                         {(["all", "R-01", "R-07", "R-08", "R-11"] as const).map((filter) => (
@@ -1509,7 +1529,7 @@ function App() {
                                 ? `В полной проверке групп замечаний: ${displayedValidationIssueCount}.`
                                 : graphReady
                                   ? "Решения сохранены, граф сущностей и связей собран."
-                                  : `Групп замечаний проверки: ${displayedValidationIssueCount}${parserDiagnosticCount ? `; групп сообщений парсера: ${parserDiagnosticCount}` : ""}.`}
+                                  : `Групп замечаний проверки: ${displayedValidationIssueCount}.`}
                             </p>
                           </div>
                           <span className={`status-pill ${checkMatchesCurrentVersion || graphReady ? "status-pill--green" : "status-pill--warning"}`}>
@@ -1580,6 +1600,9 @@ function App() {
                             const running = Boolean(check && ["pending", "processing"].includes(check.status));
                             const coverage = check?.report?.coverage.find((item) => item.rule_code === code);
                             const issues = check?.report?.issues.filter((issue) => issue.rule_code === code) ?? [];
+                            const rpdDocuments = (processing.job?.files ?? [])
+                              .filter((file) => /(^|\/)РПД\//i.test(file.member_name.replaceAll("\\", "/")))
+                              .sort((left, right) => left.member_name.localeCompare(right.member_name, "ru"));
                             const diagnostics = issues.map((issue: ReviewIssue) => {
                               const documentIds = new Set(issue.source_document_ids ?? []);
                               for (const ref of processing.reviewDetails?.version.snapshot.source_refs ?? []) {
@@ -1605,6 +1628,37 @@ function App() {
                                 >
                                   {running ? "Проверка выполняется…" : check ? "Запустить снова" : "Запустить проверку"}
                                 </button>
+                                {code === "R-11" && rpdDocuments.length > 0 && (
+                                  <div className="optional-rule-document-scope">
+                                    <label htmlFor="r-11-document-scope">
+                                      Документ РПД
+                                      <select
+                                        id="r-11-document-scope"
+                                        value={rpdDocumentId}
+                                        disabled={isConfirmed || processing.reviewBusy || optionalCheckIsRunning}
+                                        onChange={(event) => setRpdDocumentId(event.target.value)}
+                                      >
+                                        <option value="">Все документы</option>
+                                        {rpdDocuments.map((file) => (
+                                          <option key={file.document_id} value={file.document_id}>
+                                            {shortDocumentName(file.member_name)}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                    <button
+                                      className="secondary-button"
+                                      type="button"
+                                      disabled={
+                                        !rpdDocumentId || isConfirmed || processing.reviewBusy ||
+                                        checkIsRunning || optionalCheckIsRunning
+                                      }
+                                      onClick={() => void processing.runOptionalRuleCheck(code, rpdDocumentId)}
+                                    >
+                                      Проверить выбранный документ
+                                    </button>
+                                  </div>
+                                )}
                                 {check?.status === "failed" || check?.status === "conflict" ? (
                                   <p className="optional-rule-check-status optional-rule-check-status--error" role="alert">
                                     {check.message || "Не удалось завершить проверку."}
@@ -1616,6 +1670,64 @@ function App() {
                                 ) : check?.status === "pending" || check?.status === "processing" ? (
                                   <p className="optional-rule-check-status" role="status">Задание поставлено в очередь.</p>
                                 ) : null}
+                                {code === "R-11" && diagnostics.length > 0 && (
+                                  <ul className="r11-explanations" aria-label="Пояснения модели к результатам проверки">
+                                    {issues.map((issue: ReviewIssue) => {
+                                      const alignment = issue.rpd_alignment;
+                                      const verdict = alignment?.classification === "gap"
+                                        ? "пробел"
+                                        : alignment?.classification === "uncertain"
+                                          ? "связь неясна"
+                                          : alignment?.classification === "supported"
+                                            ? "подтверждено"
+                                            : "ответ модели требует проверки";
+                                      const courseEvidence = alignment?.course_evidence ?? [];
+                                      const assessmentEvidence = alignment?.assessment_evidence ?? [];
+                                      return (
+                                        <li key={issue.id}>
+                                          <span className={`r11-verdict r11-verdict--${alignment?.classification ?? "unknown"}`}>{verdict}</span>
+                                          <div>
+                                            <strong>{alignment?.outcome_id ?? issue.message.slice(0, 40)}</strong>
+                                            {alignment?.reason && <p>{alignment.reason}</p>}
+                                            {assessmentEvidence.length > 0 && (
+                                              <div className="r11-context">
+                                                <span className="r11-context-label">Цепочка оценивания</span>
+                                                <ul>
+                                                  {assessmentEvidence.map((evidence, index) => (
+                                                    <li key={evidence.id ?? index}>
+                                                      {evidence.indicator_code && <em>{evidence.indicator_code}. </em>}
+                                                      {evidence.indicator_text}
+                                                      {evidence.assessment_tool && <span className="r11-tool"> · {evidence.assessment_tool}</span>}
+                                                    </li>
+                                                  ))}
+                                                </ul>
+                                              </div>
+                                            )}
+                                            {courseEvidence.length > 0 && (
+                                              <div className="r11-context">
+                                                <span className="r11-context-label">Цитируемые темы раздела 2</span>
+                                                <ul>
+                                                  {courseEvidence.map((evidence, index) => (
+                                                    <li key={evidence.id ?? index}>
+                                                      {evidence.topic}
+                                                      {evidence.activity && <span className="r11-tool"> · {evidence.activity}</span>}
+                                                    </li>
+                                                  ))}
+                                                </ul>
+                                              </div>
+                                            )}
+                                            {alignment?.outcome_text && (
+                                              <details className="r11-outcome-text">
+                                                <summary>Текст результата обучения</summary>
+                                                <p>{alignment.outcome_text}</p>
+                                              </details>
+                                            )}
+                                          </div>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
                                 {diagnostics.length > 0 && <DiagnosticList items={diagnostics} />}
                                 {coverage?.status === "passed" && diagnostics.length === 0 && (
                                   <p className="optional-rule-check-empty" role="status">Проблем не найдено.</p>
@@ -1851,6 +1963,34 @@ function App() {
                       <p className="upload-notice" role="alert">
                         Не выполнены обязательные проверки: {skippedRequiredChecks.join(", ")}.
                       </p>
+                    )}
+
+                    {!isConfirmed && unresolvedCount > 0 && (
+                      <div className="level-only-decisions">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={processing.reviewBusy || isConfirmed}
+                          onClick={() => {
+                            setLevelAutoNotice(null);
+                            void processing.decideLevelOnlyVariants().then((applied) => {
+                              setLevelAutoNotice(applied > 0
+                                ? `Автоматически выбрано формулировок с указанием уровня: ${applied}.`
+                                : "Вопросов, где варианты различаются только уровнем, не найдено.");
+                            });
+                          }}
+                        >
+                          {processing.reviewBusy ? "Выбираем…" : "Выбрать формулировки с уровнем"}
+                        </button>
+                        <p className="level-only-decisions-hint">
+                          Для вопросов, где один вариант отличается от другого только указанием
+                          уровня (Базовый, Средний, Продвинутый, …), выбирается вариант с уровнем.
+                          Остальные вопросы остаются на ручной выбор.
+                        </p>
+                        {levelAutoNotice && (
+                          <p className="level-only-decisions-status" role="status">{levelAutoNotice}</p>
+                        )}
+                      </div>
                     )}
 
                     <div className="confirm-version">
