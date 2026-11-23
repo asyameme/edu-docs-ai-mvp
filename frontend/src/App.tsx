@@ -1938,8 +1938,9 @@ function App() {
 
                     {!isDemoMode && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
                       <div className="processing-caption" role="status">
-                        Повторная проверка версии выполняется · {processing.checkJob.progress}%
+                        <p>Повторная проверка версии выполняется</p>
                         <progress max={100} value={processing.checkJob.progress} aria-label="Прогресс повторной проверки" />
+                        <span> {processing.checkJob.progress}%</span>
                       </div>
                     )}
 
@@ -2062,13 +2063,16 @@ function App() {
                     )}
                     {processing.reviewJob && (
                       <div className="processing-caption" role="status">
-                        {processing.reviewJob.status === "completed"
-                          ? "Сверка завершена. Загружаем результаты…"
-                          : processing.reviewJob.status === "failed" || processing.reviewJob.status === "conflict"
-                            ? processing.reviewJob.message || "Не удалось подготовить сверку."
-                            : `Подготавливаем сверку · ${processing.reviewJob.progress}%`}
-                        {!["completed", "failed", "conflict"].includes(processing.reviewJob.status) && (
-                          <progress max={100} value={processing.reviewJob.progress} aria-label="Прогресс подготовки сверки" />
+                        {processing.reviewJob.status === "completed" ? (
+                          <p>Сверка завершена. Загружаем результаты…</p>
+                        ) : processing.reviewJob.status === "failed" || processing.reviewJob.status === "conflict" ? (
+                          <p>{processing.reviewJob.message || "Не удалось подготовить сверку."}</p>
+                        ) : (
+                          <>
+                            <p>Подготавливаем сверку</p>
+                            <progress max={100} value={processing.reviewJob.progress} aria-label="Прогресс подготовки сверки" />
+                            <span> {processing.reviewJob.progress}%</span>
+                          </>
                         )}
                       </div>
                     )}

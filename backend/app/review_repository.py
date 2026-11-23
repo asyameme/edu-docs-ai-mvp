@@ -387,6 +387,22 @@ class ReviewRepository:
                 )
             ]
 
+    def note_progress(self, job_id, percent, stage):
+        """Записать контрольную точку выполнения в отчёт задания.
+
+        Workflow сверки знает только старт и финал, поэтому полоска
+        прогресса в интерфейсе читает эти точки из отчёта, пока
+        задание выполняется.
+        """
+        with self.pool.connection() as connection, connection.cursor() as cur:
+            cur.execute(
+                """UPDATE processing_jobs
+                   SET report = report || jsonb_build_object(
+                       'progress_percent', %s::int, 'progress_stage', %s::text)
+                   WHERE id = %s AND NOT (report ? 'outcome')""",
+                (int(percent), stage, job_id),
+            )
+
     def publish(self, job_id, result, artifacts=(), raw_result=None, raw_hash=None):
         from app.audit_storage import save_response
 
