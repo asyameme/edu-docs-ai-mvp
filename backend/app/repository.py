@@ -14,6 +14,18 @@ VERSION_COLUMNS = """id, program_id, number, parent_version_id, restored_from_ve
                      origin, created_at, graph_snapshot(graph_state_id,review) AS snapshot"""
 DOCUMENT_COLUMNS = """id, program_id, original_name, format, media_type, size_bytes,
                       sha256, created_at"""
+# Лимит 5 с защищает очередь к занятой программе: пул соединений API мал, и
+# ждущие запросы не должны исчерпать его. Работа после захвата блокировки
+# (сборка полного графа, запись пакета оригиналов) идёт уже без конкуренции
+# и занимает десятки секунд — ей нужен отдельный, более широкий лимит.
+LOCK_WAIT = "5s"
+LOCKED_WORK = "120s"
+
+
+def limit_lock_wait(cursor):
+    """Ограничить ожидание блокировки программы, но не запись после неё."""
+    cursor.execute("SELECT set_config('lock_timeout', %s, true)", (LOCK_WAIT,))
+    cursor.execute("SELECT set_config('statement_timeout', %s, true)", (LOCKED_WORK,))
 
 
 def version_dto(row):
@@ -131,7 +143,7 @@ class Repository:
             self.pool.connection() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET LOCAL statement_timeout = '5s'")
+            limit_lock_wait(cursor)
             cursor.execute(
                 "SELECT current_version_id FROM programs WHERE id=%s FOR UPDATE", (program_id,)
             )

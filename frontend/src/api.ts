@@ -148,7 +148,11 @@ export type ReviewIssue = {
   variants: ReviewVariant[];
   rpd_alignment?: RpdAlignmentSummary | null;
   effective_status?: string;
-  decision?: { variant_id: string; author: string | null } | null;
+  decision?: {
+    variant_id: string;
+    author: string | null;
+    changes?: Array<{ value?: unknown }>;
+  } | null;
 };
 
 export type ReviewSnapshot = {
@@ -260,6 +264,32 @@ export type CheckReport = {
 export type CheckJob = ReviewJob & {
   content_hash: string;
   report: CheckReport | null;
+};
+
+export type GenerationJob = {
+  id: string;
+  program_id: string;
+  version_id: string | null;
+  version_number: number | null;
+  status: "pending" | "processing" | "completed" | "failed";
+  error: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
+  created_at: string;
+  // Что генерация изменила в документах и что оставила для ручной правки.
+  applied: string[];
+  notes: string[];
+};
+
+export type PackageDocument = {
+  document_id: string;
+  member_name: string;
+  doc_type: string;
+};
+
+export type PackageComposition = {
+  ready: boolean;
+  documents: PackageDocument[];
 };
 
 export type OptionalRuleCode = "R-09" | "R-11";

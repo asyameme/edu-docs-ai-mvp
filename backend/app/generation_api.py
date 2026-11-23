@@ -7,13 +7,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.errors import DomainError
 from app.generation_repository import GenerationRepository
-from app.program_api import OperationKey, RepoDep
+from app.program_api import Limit, Offset, OperationKey, RepoDep
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/generation", tags=["Generation"])
 
@@ -34,11 +34,22 @@ class GenerationRead(BaseModel):
     program_id: UUID
     version_id: UUID | None
     import_job_id: UUID | None
+    version_number: int | None = None
     status: Literal["pending", "processing", "completed", "failed"]
     error: str | None
     size_bytes: int | None
     sha256: str | None
     created_at: datetime
+    # Что генерация изменила в документах и что оставила для ручной правки.
+    applied: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+@router.get("")
+def list_generations(
+    program_id: UUID, repo: RepoDep, limit: Limit = 20, offset: Offset = 0
+) -> list[GenerationRead]:
+    return GenerationRepository(repo.pool).listing(program_id, limit, offset)
 
 
 @router.post("", status_code=202)
@@ -48,6 +59,12 @@ def create_generation(
     jobs = GenerationRepository(repo.pool)
     job_id = jobs.create(program_id, body.version_id, body.import_job_id, operation_key)
     return jobs.job(program_id, job_id)
+
+
+# Объявлен до /{job_id}: иначе путь «composition» попадёт в проверку UUID.
+@router.get("/composition")
+def read_composition(program_id: UUID, repo: RepoDep) -> dict:
+    return GenerationRepository(repo.pool).composition(program_id)
 
 
 @router.get("/{job_id}")

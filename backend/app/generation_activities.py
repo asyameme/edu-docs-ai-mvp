@@ -8,8 +8,10 @@ from temporalio import activity
 from app.errors import DomainError
 from app.generation_bridge import (
     GenerationBridgeError,
-    approved_changes,
+    apply_competency_list_edits,
+    describe_unresolved,
     snapshot_matrix_graph,
+    snapshot_plan,
 )
 from app.generation_repository import GenerationRepository
 from worker.generation import (
@@ -19,6 +21,7 @@ from worker.generation import (
     GenerationPackageError,
     OriginalDocument,
     SourceEvidence,
+    UnresolvedPatch,
     build_generation_documents,
     generate_program_package,
 )
@@ -36,7 +39,9 @@ class GenerationActivities:
         data = self.repo.input(job_id)
         if isinstance(data, str):
             return data
-        snapshot, sources, rows = data
+        snapshot, sources, rows, parsed_documents = data
+        notes: list[str] = []
+        applied: list[str] = []
         try:
             source_by_id = {item["document_id"]: item for item in sources}
             originals = []
@@ -68,10 +73,20 @@ class GenerationActivities:
                 SourceEvidence(str(item.id), str(item.document_id), item.locator)
                 for item in snapshot.source_refs
             ]
+            plan = snapshot_plan(snapshot, parsed_documents)
+            unresolved: list[UnresolvedPatch] = []
             documents = build_generation_documents(
-                approved_changes(snapshot), links, refs, originals
+                plan.changes, links, refs, originals, unresolved
             )
-            content = generate_program_package(documents, snapshot_matrix_graph(snapshot))
+            notes.extend(describe_unresolved(snapshot, documents, unresolved))
+            # Решение о списке компетенций, которое нельзя записать в документ,
+            # попадает в отчёт генерации, а не блокирует весь пакет.
+            documents = apply_competency_list_edits(
+                documents, plan.competency_lists, parsed_documents, notes
+            )
+            content = generate_program_package(
+                documents, snapshot_matrix_graph(snapshot), notes=notes, applied=applied
+            )
             if len(content) > MAX_PACKAGE_BYTES:
                 raise GenerationBridgeError("Сгенерированный ZIP превышает допустимый размер")
         except (
@@ -85,7 +100,9 @@ class GenerationActivities:
         ) as error:
             self.repo.fail(job_id, str(error))
             return "failed"
-        return self.repo.finish(job_id, content)
+        return self.repo.finish(
+            job_id, content, notes=notes, applied=applied
+        )
 
     @activity.defn(name="generation_failed_v1")
     def failed(self, request: dict) -> None:

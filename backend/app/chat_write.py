@@ -18,6 +18,8 @@ from worker.agent.proposal_apply import (
     ProposalApplicationError,
     apply_change,
     plan_approved_changes,
+    touched_document_ids,
+    unwritable_changes,
 )
 
 
@@ -71,6 +73,35 @@ class ChatWriteRepository:
                     changes = plan_approved_changes(snapshot, proposal)
                 except ProposalApplicationError as error:
                     raise DomainError(422, str(error)) from error
+                # Правка, которую нельзя записать в исходный документ (значение
+                # вычислено из других ячеек, текст размазан по разным форматам),
+                # не должна доживать до генерации после подтверждения версии.
+                touched = sorted(touched_document_ids(snapshot, changes))
+                rows = (
+                    cur.execute(
+                        "SELECT id,content FROM source_documents "
+                        "WHERE program_id=%s AND id=ANY(%s)",
+                        (program_id, touched),
+                    ).fetchall()
+                    if touched
+                    else []
+                )
+                problems = unwritable_changes(
+                    snapshot, changes, {str(row["id"]): bytes(row["content"]) for row in rows}
+                )
+                if problems:
+                    missing = any("не найдено в документе" in item for item in problems)
+                    raise DomainError(
+                        422,
+                        "Правку нельзя записать в исходные документы:\n"
+                        + "\n".join(f"• {item}" for item in problems)
+                        + (
+                            "\nСкорее всего, значение вычислено из других ячеек документа — "
+                            "измените их."
+                            if missing
+                            else ""
+                        ),
+                    )
                 from app.domain import ReviewDecision
 
                 review = ReviewRepository.require_review(

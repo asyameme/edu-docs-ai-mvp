@@ -9,7 +9,7 @@ from psycopg.types.json import Jsonb
 from app.config import get_settings
 from app.errors import DomainError
 from app.graph_storage import hydrate_report, load_graph, parsed_artifact, save_graph
-from app.repository import Repository
+from app.repository import Repository, limit_lock_wait
 
 
 def workflow_identity(job_id, attempt):
@@ -28,7 +28,9 @@ class ImportRepository:
     def create(self, program_id, fingerprint, key, stored):
         used = set()
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
-            cur.execute("SET LOCAL statement_timeout = '5s'")
+            # Оригиналы пакета записываются после блокировки: до сотен мегабайт
+            # в одной транзакции, поэтому лимит 5 с относится только к ожиданию.
+            limit_lock_wait(cur)
             cur.execute(
                 "SELECT current_version_id FROM programs WHERE id=%s FOR UPDATE", (program_id,)
             )

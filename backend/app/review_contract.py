@@ -276,7 +276,9 @@ class ReviewCreate(Contract):
 class DecisionCreate(Contract):
     expected_version_id: UUID
     conflict_id: UUID
-    variant_id: UUID
+    # Либо готовый вариант из карточки, либо собственное значение пользователя.
+    variant_id: UUID | None = None
+    custom_value: str | None = Field(default=None, min_length=1, max_length=4000)
     signature: str = Field(min_length=1, max_length=120)
     check_job_id: UUID | None = None
 
@@ -287,6 +289,22 @@ class DecisionCreate(Contract):
         if not value:
             raise ValueError("Подпись не должна быть пустой")
         return value
+
+    @field_validator("custom_value")
+    @classmethod
+    def normalize_custom_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Собственное значение не должно быть пустым")
+        return value
+
+    @model_validator(mode="after")
+    def variant_or_custom(self) -> Self:
+        if (self.variant_id is None) == (self.custom_value is None):
+            raise ValueError("Укажите готовый вариант или собственное значение")
+        return self
 
 
 class DecisionSelection(Contract):

@@ -13,12 +13,13 @@ from app.document_reconciliation import apply_document_mutations
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.graph_storage import hydrate_job, pack_tree
-from app.repository import Repository
+from app.repository import Repository, limit_lock_wait
 from app.review_contract import CheckResult, DecisionBatchCreate
 from app.review_logic import (
     apply_changes,
     changes_in_base_sources,
     content_hash,
+    custom_decision_changes,
     digest,
 )
 from app.review_projection import (
@@ -58,7 +59,9 @@ class ReviewRepository:
 
     @staticmethod
     def lock(cur, program_id):
-        cur.execute("SET LOCAL statement_timeout='5s'")
+        # 5 с — это ожидание занятой программы; сборка и запись графа после
+        # захвата идёт с широким лимитом (см. repository.limit_lock_wait).
+        limit_lock_wait(cur)
         return Repository.require(
             cur.execute(
                 "SELECT current_version_id FROM programs WHERE id=%s FOR UPDATE",
@@ -598,7 +601,7 @@ class ReviewRepository:
             )
             issue = Repository.require(
                 cur.execute(
-                    "SELECT job_id,version_id,details FROM validation_issues "
+                    "SELECT job_id,version_id,rule_code,details FROM validation_issues "
                     "WHERE program_id=%s AND id=%s",
                     (program_id, body.conflict_id),
                 ).fetchone()
@@ -611,11 +614,22 @@ class ReviewRepository:
             if issue["job_id"] != review_id and issue["version_id"] != current:
                 raise DomainError(409, "Конфликт относится к прежней редакции")
             details = issue["details"]
-            variant = next(
-                (v for v in details["variants"] if v["id"] == str(body.variant_id)), None
-            )
-            if not details["requires_decision"] or variant is None:
-                raise DomainError(422, "Выберите один из предложенных вариантов")
+            if body.custom_value is not None:
+                if review["parameters"].get("schema_version") != 2:
+                    raise DomainError(422, "Свой вариант поддержан только сверкой V2")
+                # Детерминированный ID: повтор запроса с тем же ключом даёт то же решение.
+                selected_variant_id = str(uuid5(UUID(str(review_id)), f"custom:{body.conflict_id}"))
+                selected_changes = custom_decision_changes(
+                    details, body.custom_value, rule_code=issue["rule_code"]
+                )
+            else:
+                variant = next(
+                    (v for v in details["variants"] if v["id"] == str(body.variant_id)), None
+                )
+                if not details["requires_decision"] or variant is None:
+                    raise DomainError(422, "Выберите один из предложенных вариантов")
+                selected_variant_id = str(body.variant_id)
+                selected_changes = variant["changes"]
             if review["parameters"].get("schema_version") == 2:
                 if issue["job_id"] != review_id:
                     raise DomainError(409, "Предграфовое решение должно относиться к AnalysisV2")
@@ -634,7 +648,7 @@ class ReviewRepository:
                     if item.conflict_id != body.conflict_id
                 ]
                 changes = [change for choice in choices for change in choice["changes"]]
-                changes.extend(variant["changes"])
+                changes.extend(selected_changes)
                 relation_origins = {}
                 selected_documents = apply_document_mutations(
                     original, changes, relation_origins=relation_origins
@@ -642,9 +656,9 @@ class ReviewRepository:
                 choices.append(
                     {
                         "conflict_id": str(body.conflict_id),
-                        "variant_id": str(body.variant_id),
+                        "variant_id": selected_variant_id,
                         "check_job_id": str(review_id),
-                        "changes": variant["changes"],
+                        "changes": selected_changes,
                         "decided_at": datetime.now(UTC).isoformat(),
                         "author": body.signature,
                     }
@@ -874,6 +888,10 @@ class ReviewRepository:
                 if isinstance(graph_data, SnapshotV2)
                 else SnapshotV2.model_validate(graph_data).model_dump(mode="json")
             )
+            # Собранный граф не несёт контекста подготовки: как и в decide, берём его
+            # из прежней версии, иначе последний пакетный выбор падает до записи.
+            if state["review"] is None:
+                state["review"] = snapshot.review.model_dump(mode="json")
             state["review"]["graph_ready"] = graph_ready
             state["review"]["decisions"] = choices
             next_snapshot = SnapshotV2.model_validate(state)

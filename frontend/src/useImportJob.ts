@@ -769,6 +769,42 @@ export function useImportJob() {
     }
   }
 
+  async function decideCustom(conflictId: string, value: string) {
+    const current = sessionRef.current;
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return;
+    const signature = signatureForProgram(signatureRef.current, current.programId);
+    if (!signature) {
+      setNotice("Укажите подпись для этой программы кнопкой над программой.");
+      return;
+    }
+    reviewBusyRef.current = true;
+    setReviewBusy(true);
+    try {
+      const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions`, {
+        method: "POST",
+        headers: operationHeaders(),
+        body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, custom_value: value, signature }),
+      });
+      updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
+      setCheckJob(null);
+      setNotice("");
+      setReviewDetails((details) => details && {
+        ...details,
+        issues: details.issues.map((issue) => issue.id === conflictId
+          ? { ...issue, decision: { variant_id: `custom:${conflictId}`, author: signature } }
+          : issue),
+      });
+      void loadReviewDetails(version.id, current.programId).catch(() => {
+        setNotice("Выбор сохранён, обновляем список расхождений…");
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось сохранить собственный вариант");
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewBusy(false);
+    }
+  }
+
   // Уровень освоения («Базовый», «Средний», …) в скобках — служебная пометка
   // ЦКМВ: одни документы её приводят, другие нет, содержание совпадает.
   const LEVEL_NOTE = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/i;
@@ -1077,6 +1113,7 @@ export function useImportJob() {
     retry,
     retryPrepare,
     decide,
+    decideCustom,
     decideLevelOnlyVariants,
     acceptChatProposal,
     runCheck,
