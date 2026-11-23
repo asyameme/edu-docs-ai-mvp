@@ -87,6 +87,9 @@ class Discipline(BaseEntity):
     hours_by_kind: dict[str, int]
     control_forms: list[str] = []
     prerequisites: list[str] = []
+    # Регистрационный номер рабочей программы с титула РПД/РПП; связывает
+    # дисциплину со строкой учебного плана, где номер указан в квадратных скобках.
+    registration_number: str | None = None
 
     @field_validator("semesters")
     @classmethod
@@ -139,6 +142,10 @@ class CurriculumItem(BaseEntity):
     credit_units: int = Field(ge=0)
     hours_total: int = Field(ge=0)
     block: str
+    # Регистрационный номер рабочей программы из квадратных скобок в названии
+    # (например, «[076083] Глубокое обучение…»); служит ключом сопоставления
+    # со строкой РПД/РПП, когда названия в документах различаются.
+    registration_number: str | None = None
 
 
 class AcademicHoursRange(ContractModel):
@@ -280,11 +287,15 @@ class WorkingProgramOutput(ContractModel):
     education_languages_source_ref: SourceRef | None = None
     title_credit_units: int | None = Field(default=None, ge=1)
     title_credit_units_source_ref: SourceRef | None = None
+    registration_number_source_ref: SourceRef | None = None
 
 
 class RPDOutput(WorkingProgramOutput):
     meta: RPDMeta
     disciplines: list[Discipline] = Field(min_length=1)
+    # Посеместровая нагрузка из таблицы структуры РПД; для дисциплин,
+    # размазанных на несколько семестров, позволяет сверять часы по семестрам.
+    semester_workload: list[SemesterWorkload] = Field(default_factory=list)
     competencies: list[Competency] = Field(default_factory=list)
     indicators: list[Indicator] = Field(default_factory=list)
     learning_outcomes: list[LearningOutcome] = Field(default_factory=list)

@@ -11,6 +11,7 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from io import BytesIO
 from xml.sax.saxutils import quoteattr
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
@@ -128,11 +129,25 @@ def _run_for_text_node(paragraph: ET.Element, target: ET.Element) -> ET.Element 
     return None
 
 
-def _run_properties(run: ET.Element | None) -> bytes | None:
+# Язык фрагмента и отключённая проверка правописания вид текста не меняют.
+_NON_VISUAL_PROPERTIES = {f"{W}lang", f"{W}noProof", f"{W}rPrChange"}
+
+
+def _format_signature(run: ET.Element | None) -> tuple | None:
+    """Видимое оформление фрагмента; None, когда сам фрагмент не найден."""
     if run is None:
         return None
     properties = run.find(f"{W}rPr")
-    return ET.tostring(properties, encoding="utf-8") if properties is not None else b""
+    if properties is None:
+        return ()
+    return (
+        tuple(sorted(properties.attrib.items())),
+        tuple(
+            (child.tag, tuple(sorted(child.attrib.items())))
+            for child in properties
+            if child.tag not in _NON_VISUAL_PROPERTIES
+        ),
+    )
 
 
 def _set_text(node: ET.Element, value: str) -> None:
@@ -141,6 +156,50 @@ def _set_text(node: ET.Element, value: str) -> None:
         node.set(_XML_SPACE, "preserve")
     else:
         node.attrib.pop(_XML_SPACE, None)
+
+
+def _edit_in_place(text_nodes, values, spans, first, last, start, old_text, new_text, runs) -> int:
+    """Внести локальную правку в текст с разным оформлением, не трогая остальное.
+
+    Правка разбивается на неизменные и изменённые участки, и изменённые
+    вносятся в те фрагменты, где они находились: пометку уровня можно удалить
+    даже из фрагмента с другим шрифтом, а заменённое число сохраняет своё
+    выделение. Однозначно оформить нельзя только новый текст на стыке
+    по-разному оформленных фрагментов — такая замена отклоняется, как раньше.
+    """
+
+    edits: dict[int, list[tuple[int, int, str]]] = {}
+    matcher = SequenceMatcher(None, old_text, new_text, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        left, right = start + i1, start + i2
+        inserted = new_text[j1:j2]
+        if tag == "insert":
+            # Вставка на стыке относится к левому фрагменту, к началу — к первому.
+            owners = [k for k in range(first, last + 1) if spans[k][0] < left <= spans[k][1]]
+            owner = owners[0] if owners else first
+            position = left - spans[owner][0]
+            edits.setdefault(owner, []).append((position, position, inserted))
+            continue
+        owners = [k for k in range(first, last + 1) if spans[k][0] < right and left < spans[k][1]]
+        if inserted and len({_format_signature(runs[k - first]) for k in owners}) > 1:
+            raise DocxPatchError(
+                "Искомый текст пересекает фрагменты с разным форматированием; "
+                "автоматическая замена может изменить оформление"
+            )
+        for k in owners:
+            local_start = max(left, spans[k][0]) - spans[k][0]
+            local_end = min(right, spans[k][1]) - spans[k][0]
+            edits.setdefault(k, []).append(
+                (local_start, local_end, inserted if k == owners[0] else "")
+            )
+    for k, changes in edits.items():
+        value = values[k]
+        for local_start, local_end, text in sorted(changes, reverse=True):
+            value = value[:local_start] + text + value[local_end:]
+        _set_text(text_nodes[k], value)
+    return 1
 
 
 def _replace_in_paragraph(paragraph: ET.Element, old_text: str, new_text: str) -> int:
@@ -185,14 +244,12 @@ def _replace_in_paragraph(paragraph: ET.Element, old_text: str, new_text: str) -
         raise DocxPatchError("Искомый текст пересекает разрыв, поле или гиперссылку")
 
     involved_runs = [_run_for_text_node(paragraph, text_nodes[i]) for i in range(first, last + 1)]
-    properties = {_run_properties(run) for run in involved_runs}
-    if len(properties) > 1:
-        raise DocxPatchError(
-            "Искомый текст пересекает фрагменты с разным форматированием; "
-            "автоматическая замена может изменить оформление"
-        )
     if any(run is None for run in involved_runs):
         raise DocxPatchError("Не удалось безопасно определить форматирование текста")
+    if len({_format_signature(run) for run in involved_runs}) > 1:
+        return _edit_in_place(
+            text_nodes, values, spans, first, last, start, old_text, new_text, involved_runs
+        )
 
     left, _ = spans[first]
     _set_text(text_nodes[first], values[first][: start - left] + new_text)
@@ -203,28 +260,12 @@ def _replace_in_paragraph(paragraph: ET.Element, old_text: str, new_text: str) -
     return 1
 
 
-def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
-    """Return a DOCX copy with source-ref-addressed text changes applied.
+def _rewrite_document_xml(document: bytes, transform) -> bytes:
+    """Return a DOCX copy with ``transform`` applied to ``word/document.xml``.
 
-    Only ``word/document.xml`` is rewritten; all other package parts retain
-    their uncompressed contents. The input byte string is never modified.
-    Ambiguous, stale, or unsupported locations fail before any result is
-    returned.
+    Only that part is rewritten; all other package parts keep their contents.
+    The input byte string is never modified.
     """
-
-    _validate_docx(document)
-    if not patches:
-        return document
-    for patch in patches:
-        if not patch.old_text:
-            raise DocxPatchError("old_text не может быть пустым")
-        if any(character in patch.new_text for character in "\r\n\t"):
-            raise DocxPatchError(
-                "new_text должен быть одним текстовым фрагментом без табов и переносов"
-            )
-    active_patches = [patch for patch in patches if patch.old_text != patch.new_text]
-    if not active_patches:
-        return document
 
     source = ZipFile(BytesIO(document), "r")
     try:
@@ -243,21 +284,7 @@ def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
                 except ValueError:
                     continue
 
-        for patch in active_patches:
-            paragraphs = _resolve_paragraphs(root, patch.source_ref)
-            matches: list[ET.Element] = []
-            for paragraph in paragraphs:
-                combined = "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
-                matches.extend([paragraph] * combined.count(patch.old_text))
-            if len(matches) != 1:
-                context = (
-                    patch.source_ref.get("section") or patch.source_ref.get("table") or "документ"
-                )
-                detail = "не найден" if not matches else "найден неоднозначно"
-                raise DocxPatchError(f"Текст {patch.old_text!r} {detail} (источник: {context})")
-            changed = _replace_in_paragraph(matches[0], patch.old_text, patch.new_text)
-            if changed != 1:
-                raise DocxPatchError(f"Не удалось заменить текст {patch.old_text!r}")
+        transform(root)
 
         updated_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
         declaration_end = updated_xml.find(b"?>")
@@ -289,6 +316,219 @@ def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
         source.close()
 
 
+def _apply_text_patches(root: ET.Element, patches: Sequence[DocxPatch]) -> None:
+    for patch in patches:
+        paragraphs = _resolve_paragraphs(root, patch.source_ref)
+        matches: list[ET.Element] = []
+        for paragraph in paragraphs:
+            combined = "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
+            matches.extend([paragraph] * combined.count(patch.old_text))
+        if len(matches) != 1:
+            context = patch.source_ref.get("section") or patch.source_ref.get("table") or "документ"
+            detail = "не найден" if not matches else "найдено неоднозначно"
+            raise DocxPatchError(f"Текст {patch.old_text!r} {detail} (источник: {context})")
+        changed = _replace_in_paragraph(matches[0], patch.old_text, patch.new_text)
+        if changed != 1:
+            raise DocxPatchError(f"Не удалось заменить текст {patch.old_text!r}")
+
+
+def patch_docx_bytes(document: bytes, patches: Sequence[DocxPatch]) -> bytes:
+    """Return a DOCX copy with source-ref-addressed text changes applied.
+
+    Only ``word/document.xml`` is rewritten; all other package parts retain
+    their uncompressed contents. The input byte string is never modified.
+    Ambiguous, stale, or unsupported locations fail before any result is
+    returned.
+    """
+
+    _validate_docx(document)
+    if not patches:
+        return document
+    for patch in patches:
+        if not patch.old_text:
+            raise DocxPatchError("old_text не может быть пустым")
+        if any(character in patch.new_text for character in "\r\n\t"):
+            raise DocxPatchError(
+                "new_text должен быть одним текстовым фрагментом без табов и переносов"
+            )
+    active_patches = [patch for patch in patches if patch.old_text != patch.new_text]
+    if not active_patches:
+        return document
+    return _rewrite_document_xml(document, lambda root: _apply_text_patches(root, active_patches))
+
+
+@dataclass(frozen=True, slots=True)
+class RowRemoval:
+    """Delete one table row selected by parser ``source_ref`` coordinates.
+
+    ``expect_code`` is the code one of the row cells must start with. A row that
+    does not match is kept and reported: nothing is deleted by position alone.
+    """
+
+    source_ref: Mapping[str, object]
+    expect_code: str
+
+
+_NUMBERED_CELL = re.compile(r"^(\d+)([.)]?)$")
+
+
+def _cell_texts(row: ET.Element) -> list[str]:
+    return [
+        "".join(node.text or "" for node in cell.iter(f"{W}t")).lstrip()
+        for cell in row.findall(f"{W}tc")
+    ]
+
+
+def _starts_with_code(text: str, code: str) -> bool:
+    """True when ``text`` begins with the whole ``code``, not a longer one."""
+    return text.startswith(code) and (
+        len(text) == len(code) or not text[len(code)].isalnum()
+    )
+
+
+def _renumber_rows(table: ET.Element) -> None:
+    """Make a pure numbering column gap-free again after rows were deleted.
+
+    Applies only when every data row has a single numeric text in its first
+    cell; any other layout is left untouched.
+    """
+
+    data = []
+    for row in table.findall(f"{W}tr")[1:]:
+        cells = row.findall(f"{W}tc")
+        texts = list(cells[0].iter(f"{W}t")) if cells else []
+        if len(texts) != 1:
+            return
+        data.append((texts[0], _NUMBERED_CELL.fullmatch(texts[0].text or "")))
+    if not data or not all(match for _, match in data):
+        return
+    if [int(match.group(1)) for _, match in data] == list(range(1, len(data) + 1)):
+        return
+    for position, (node, match) in enumerate(data, 1):
+        _set_text(node, f"{position}{match.group(2)}")
+
+
+def remove_table_rows(
+    document: bytes, removals: Sequence[RowRemoval]
+) -> tuple[bytes, tuple[str, ...]]:
+    """Return a DOCX copy without the listed table rows, plus the rows kept.
+
+    Coordinates are one-based ``table``/``row`` in the document *before* any
+    removal, so every target is resolved against the original layout before the
+    first row is deleted. A row is deleted only when one of its cells starts
+    with ``expect_code`` and the row does not open a vertically merged cell;
+    every other target stays in place and is described in the second value.
+    A numbering column, when the table has one, is renumbered without gaps.
+    """
+
+    _validate_docx(document)
+    if not removals:
+        return document, ()
+
+    def select(root: ET.Element) -> tuple[list[tuple[ET.Element, ET.Element]], list[str]]:
+        body = root.find(f"{W}body")
+        if body is None:
+            raise DocxPatchError("В DOCX не найдено тело документа")
+        tables = body.findall(f"{W}tbl")
+        doomed: list[tuple[ET.Element, ET.Element]] = []
+        kept: list[str] = []
+        for removal in removals:
+            table_number = _positive_int(removal.source_ref.get("table"), "table")
+            row_number = _positive_int(removal.source_ref.get("row"), "row")
+            where = f"таблица {table_number}, строка {row_number}"
+            if table_number > len(tables) or row_number > len(
+                tables[table_number - 1].findall(f"{W}tr")
+            ):
+                kept.append(f"{where}: такой строки нет в документе")
+                continue
+            table = tables[table_number - 1]
+            row = table.findall(f"{W}tr")[row_number - 1]
+            cells = _cell_texts(row)
+            if not removal.expect_code or not any(
+                _starts_with_code(text, removal.expect_code) for text in cells
+            ):
+                shown = " | ".join(cells)[:60]
+                kept.append(
+                    f"{where}: нет ячейки, начинающейся с «{removal.expect_code}» "
+                    f"(строка: «{shown}»)"
+                )
+                continue
+            if any(v.get(f"{W}val") == "restart" for v in row.iter(f"{W}vMerge")):
+                kept.append(f"{where}: строка начинает объединённую по вертикали ячейку")
+                continue
+            if (table, row) not in doomed:
+                doomed.append((table, row))
+        return doomed, kept
+
+    doomed, kept = select(_document_root(document))
+    if not doomed:
+        # Нечего удалять: файл возвращается байт в байт.
+        return document, tuple(kept)
+
+    def transform(root: ET.Element) -> None:
+        touched = []
+        for table, row in select(root)[0]:
+            table.remove(row)
+            if table not in touched:
+                touched.append(table)
+        for table in touched:
+            _renumber_rows(table)
+
+    return _rewrite_document_xml(document, transform), tuple(kept)
+
+
+def _document_root(document: bytes) -> ET.Element:
+    _validate_docx(document)
+    source = ZipFile(BytesIO(document), "r")
+    try:
+        xml = source.read(DOCUMENT_PART)
+    finally:
+        source.close()
+    try:
+        return ET.fromstring(xml)
+    except ET.ParseError as exc:
+        raise DocxPatchError("Не удалось прочитать word/document.xml") from exc
+
+
+def _row_cells(document: bytes, table: object, row: object) -> list[ET.Element]:
+    root = _document_root(document)
+    body = root.find(f"{W}body")
+    if body is None:
+        raise DocxPatchError("В DOCX не найдено тело документа")
+    tables = body.findall(f"{W}tbl")
+    table_number = _positive_int(table, "table")
+    if table_number > len(tables):
+        raise DocxPatchError(
+            f"Таблица #{table_number} из source_ref не найдена; в документе {len(tables)} таблиц"
+        )
+    rows = tables[table_number - 1].findall(f"{W}tr")
+    row_number = _positive_int(row, "row")
+    if row_number > len(rows):
+        raise DocxPatchError(
+            f"Строка #{row_number} из source_ref не найдена в таблице #{table_number}"
+        )
+    return rows[row_number - 1].findall(f"{W}tc")
+
+
+def read_row_cells(document: bytes, table: object, row: object) -> tuple[str, ...]:
+    """Return the text of each physical cell of one table row."""
+    return tuple(
+        "\n".join(
+            "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
+            for paragraph in cell.findall(f"{W}p")
+        )
+        for cell in _row_cells(document, table, row)
+    )
+
+
+def cell_has_vertical_merge(document: bytes, table: int, row: int, column: int) -> bool:
+    cells = _row_cells(document, table, row)
+    number = _positive_int(column, "col")
+    if number > len(cells):
+        raise DocxPatchError(f"В строке {row} нет столбца {column}")
+    return cells[number - 1].find(f"{W}tcPr/{W}vMerge") is not None
+
+
 def read_area_text(document: bytes, source_ref: Mapping[str, object]) -> tuple[str, ...]:
     """Return the visible text of each paragraph selected by ``source_ref``.
 
@@ -298,17 +538,7 @@ def read_area_text(document: bytes, source_ref: Mapping[str, object]) -> tuple[s
     document order; runs and paragraphs without ``w:t`` contribute nothing.
     """
 
-    _validate_docx(document)
-    source = ZipFile(BytesIO(document), "r")
-    try:
-        xml = source.read(DOCUMENT_PART)
-    finally:
-        source.close()
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError as exc:
-        raise DocxPatchError("Не удалось прочитать word/document.xml") from exc
     return tuple(
         "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
-        for paragraph in _resolve_paragraphs(root, source_ref)
+        for paragraph in _resolve_paragraphs(_document_root(document), source_ref)
     )

@@ -141,10 +141,12 @@ export function DiagnosticList({ items, acceptance }: { items: Diagnostic[]; acc
           ? "Ошибок и предупреждений нет. Информационные сообщения доступны в фильтре."
           : "По выбранному фильтру замечаний нет."}
       </p>}
-      <ul className="diagnostic-groups">{visible.slice(0, limit).map((group) => (
+      {/* Секция принятия предупреждений требует отметки каждой группы:
+          пагинация скрыла бы чекбоксы и блокировала подтверждение версии. */}
+      <ul className="diagnostic-groups">{visible.slice(0, acceptance ? visible.length : limit).map((group) => (
         <DiagnosticGroupCard key={group.id} group={group} acceptance={acceptance} query={search} />
       ))}</ul>
-      {visible.length > limit && <button type="button" className="secondary-button"
+      {!acceptance && visible.length > limit && <button type="button" className="secondary-button"
         onClick={() => setLimit((current) => current + PAGE_SIZE)}>
         Показать ещё группы · осталось {visible.length - limit}
       </button>}

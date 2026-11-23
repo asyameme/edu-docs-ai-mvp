@@ -71,6 +71,13 @@ def match_excerpt(text, query, context=160):
     return ("…" if left else "") + text[left:right] + ("…" if right < len(text) else "")
 
 
+# Доля одного вложенного показателя (часы по видам нагрузки, списки семестров):
+# при меньшей доле «часы по видам» обрезались до трёх записей из шести, и модель
+# честно отвечала, что остальные виды «не детализированы».
+_CHILD_SHARE = 3
+_CHILD_MIN_BYTES = 300
+
+
 def _bounded_value(value, budget=1800, depth=0):
     """Ограничивает размер вложенного значения из пользовательского графа."""
     if budget <= 0:
@@ -89,7 +96,7 @@ def _bounded_value(value, budget=1800, depth=0):
             if remaining <= 0:
                 break
             safe_key = str(key)[:100]
-            child_budget = min(remaining, max(96, budget // 12))
+            child_budget = min(remaining, max(_CHILD_MIN_BYTES, budget // _CHILD_SHARE))
             safe_value = _bounded_value(item, child_budget, depth + 1)
             result[safe_key] = safe_value
             remaining -= len(json.dumps({safe_key: safe_value}, ensure_ascii=False).encode("utf-8"))
@@ -102,7 +109,9 @@ def _bounded_value(value, budget=1800, depth=0):
         for item in value[:12]:
             if remaining <= 0:
                 break
-            safe_value = _bounded_value(item, min(remaining, max(96, budget // 12)), depth + 1)
+            safe_value = _bounded_value(
+                item, min(remaining, max(_CHILD_MIN_BYTES, budget // _CHILD_SHARE)), depth + 1
+            )
             result.append(safe_value)
             remaining -= len(json.dumps(safe_value, ensure_ascii=False).encode("utf-8"))
         return result

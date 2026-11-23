@@ -169,15 +169,25 @@
         },
         "credit_units": {
           "anyOf": [
-            {"minimum": 1, "type": "integer"},
-            {"type": "null"}
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
           ],
           "title": "Credit Units"
         },
         "hours_total": {
           "anyOf": [
-            {"minimum": 0, "type": "integer"},
-            {"type": "null"}
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
           ],
           "title": "Hours Total"
         },
@@ -203,6 +213,18 @@
           },
           "title": "Prerequisites",
           "type": "array"
+        },
+        "registration_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Registration Number"
         }
       },
       "required": [
@@ -781,6 +803,17 @@
       "title": "Title Credit Units"
     },
     "title_credit_units_source_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "registration_number_source_ref": {
       "anyOf": [
         {
           "$ref": "#/$defs/SourceRefV2"

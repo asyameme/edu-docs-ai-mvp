@@ -433,6 +433,24 @@
           ],
           "default": null,
           "title": "Rule Codes"
+        },
+        "document_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Document Ids"
         }
       },
       "required": [
@@ -500,6 +518,60 @@
         "formulation"
       ],
       "title": "Competency",
+      "type": "object"
+    },
+    "CompetencyLinksMutation": {
+      "additionalProperties": false,
+      "description": "Replace the competency set of one identified discipline or plan row.",
+      "properties": {
+        "op": {
+          "const": "set_competency_links",
+          "title": "Op",
+          "type": "string"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "collection": {
+          "enum": [
+            "disciplines",
+            "curriculum_items"
+          ],
+          "title": "Collection",
+          "type": "string"
+        },
+        "record_index": {
+          "minimum": 0,
+          "title": "Record Index",
+          "type": "integer"
+        },
+        "expected_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Codes",
+          "type": "array"
+        },
+        "codes": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Codes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "document_id",
+        "collection",
+        "record_index",
+        "expected_codes",
+        "codes"
+      ],
+      "title": "CompetencyLinksMutation",
       "type": "object"
     },
     "CourseTopic": {
@@ -582,6 +654,18 @@
         "block": {
           "title": "Block",
           "type": "string"
+        },
+        "registration_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Registration Number"
         }
       },
       "required": [
@@ -747,6 +831,18 @@
           },
           "title": "Prerequisites",
           "type": "array"
+        },
+        "registration_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Registration Number"
         }
       },
       "required": [
@@ -1628,6 +1724,17 @@
           ],
           "default": null
         },
+        "registration_number_source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "meta": {
           "$ref": "#/$defs/RPDMeta"
         },
@@ -1637,6 +1744,13 @@
           },
           "minItems": 1,
           "title": "Disciplines",
+          "type": "array"
+        },
+        "semester_workload": {
+          "items": {
+            "$ref": "#/$defs/SemesterWorkload"
+          },
+          "title": "Semester Workload",
           "type": "array"
         },
         "competencies": {
@@ -1793,6 +1907,17 @@
           "title": "Title Credit Units"
         },
         "title_credit_units_source_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "registration_number_source_ref": {
           "anyOf": [
             {
               "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
@@ -2316,6 +2441,85 @@
       "title": "RoleCompetencyLink",
       "type": "object"
     },
+    "RpdAlignmentEvidenceItem": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "topic": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topic"
+        },
+        "activity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "indicator_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Indicator Code"
+        },
+        "indicator_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Indicator Text"
+        },
+        "assessment_tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assessment Tool"
+        }
+      },
+      "title": "RpdAlignmentEvidenceItem",
+      "type": "object"
+    },
     "RpdAlignmentSummary": {
       "additionalProperties": false,
       "properties": {
@@ -2372,6 +2576,36 @@
           ],
           "default": null,
           "title": "Reason"
+        },
+        "course_evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RpdAlignmentEvidenceItem"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Course Evidence"
+        },
+        "assessment_evidence": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RpdAlignmentEvidenceItem"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assessment Evidence"
         }
       },
       "title": "RpdAlignmentSummary",
@@ -2705,6 +2939,9 @@
               },
               {
                 "$ref": "#/$defs/DocumentMutation"
+              },
+              {
+                "$ref": "#/$defs/CompetencyLinksMutation"
               }
             ]
           },

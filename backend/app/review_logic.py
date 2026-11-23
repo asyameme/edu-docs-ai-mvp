@@ -61,6 +61,29 @@ def copy_sources(snapshot, version_id):
     return SnapshotV2.model_validate(data)
 
 
+def custom_decision_changes(details, custom_value, *, rule_code):
+    """Изменения своего варианта: пути и исходные значения берутся из шаблона.
+
+    Шаблоном служит первый готовый вариант вопроса: у всех вариантов правила
+    совпадает набор полей документов и исходные значения, различается только
+    новое значение. Свой вариант пользователя подставляется вместо него.
+    """
+
+    if not rule_code.startswith(("R-07", "R-08")):
+        raise DomainError(
+            422, "Свой вариант доступен только для правил формулировок (R-07, R-08)"
+        )
+    variants = details.get("variants") or []
+    template = variants[0]["changes"] if variants else []
+    if not template:
+        raise DomainError(422, "Для своего варианта нет шаблона полей документов")
+    if any(change.get("op") != "set_document_value" for change in template):
+        raise DomainError(
+            422, "Свой вариант допустим только для замены текста в документах"
+        )
+    return [{**change, "value": custom_value} for change in template]
+
+
 def changes_in_base_sources(changes, source_snapshot, base_snapshot):
     """Патчи проверки приводятся к исходным свидетельствам перед пересборкой выбора."""
     source = SnapshotV2.model_validate(source_snapshot)

@@ -43,6 +43,12 @@ export type VersionRead = {
   snapshot: ReviewSnapshot;
 };
 
+export type DecisionBatchRequest = {
+  expected_version_id: string;
+  selections: Array<{ conflict_id: string; variant_id: string }>;
+  signature: string;
+};
+
 export type ReviewJob = {
   id: string;
   review_id: string;
@@ -63,6 +69,14 @@ export type PrepareReviewRequest = {
 };
 
 export type ReviewMutation =
+  | {
+    op: "set_competency_links";
+    document_id: string;
+    collection: "disciplines" | "curriculum_items";
+    record_index: number;
+    expected_codes: string[];
+    codes: string[];
+  }
   | {
     op: "set_document_value";
     document_id: string;
@@ -111,6 +125,13 @@ export type RpdAlignmentSummary = {
   outcome_text: string | null;
   classification: "supported" | "gap" | "uncertain" | "invalid" | null;
   reason: string | null;
+  course_evidence?: Array<{ id?: string; topic?: string; activity?: string }> | null;
+  assessment_evidence?: Array<{
+    id?: string;
+    indicator_code?: string;
+    indicator_text?: string;
+    assessment_tool?: string;
+  }> | null;
 };
 
 export type ReviewIssue = {
@@ -127,7 +148,11 @@ export type ReviewIssue = {
   variants: ReviewVariant[];
   rpd_alignment?: RpdAlignmentSummary | null;
   effective_status?: string;
-  decision?: { variant_id: string; author: string | null } | null;
+  decision?: {
+    variant_id: string;
+    author: string | null;
+    changes?: Array<{ value?: unknown }>;
+  } | null;
 };
 
 export type ReviewSnapshot = {
@@ -239,6 +264,32 @@ export type CheckReport = {
 export type CheckJob = ReviewJob & {
   content_hash: string;
   report: CheckReport | null;
+};
+
+export type GenerationJob = {
+  id: string;
+  program_id: string;
+  version_id: string | null;
+  version_number: number | null;
+  status: "pending" | "processing" | "completed" | "failed";
+  error: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
+  created_at: string;
+  // Что генерация изменила в документах и что оставила для ручной правки.
+  applied: string[];
+  notes: string[];
+};
+
+export type PackageDocument = {
+  document_id: string;
+  member_name: string;
+  doc_type: string;
+};
+
+export type PackageComposition = {
+  ready: boolean;
+  documents: PackageDocument[];
 };
 
 export type OptionalRuleCode = "R-09" | "R-11";

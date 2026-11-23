@@ -19,7 +19,7 @@ from backend.contracts.document_v2.models import (
     SourceRef,
 )
 
-from .common import finalize_output, normalize, paragraph_indices
+from .common import finalize_output, normalize, normalize_competency_code, paragraph_indices
 from .results import split_competency
 
 
@@ -185,6 +185,7 @@ def _read_competencies(document, paragraph_ref, issues, title_ref):
         entry = split_competency(block.text)
         if entry is not None:
             code, formulation = entry
+            code = normalize_competency_code(code)
             ref = paragraph_ref(block, section)
             competencies.append(Competency(code=code, formulation=formulation, source_ref=ref))
             if not formulation:

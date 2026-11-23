@@ -305,7 +305,7 @@ def project_snapshot_documents(documents, snapshot):
     if snapshot.review:
         for decision in snapshot.review.decisions:
             for change in decision.changes:
-                if change.get("op") == "set_document_value":
+                if change.get("op") in {"set_document_value", "set_competency_links"}:
                     document_changes.append(change)
                     continue
                 if change.get("op") != "set_attribute":
@@ -550,17 +550,19 @@ def validation_documents(documents):
     return inputs
 
 
-def run_document_rules(inputs, config, *, phase, rule_codes=None):
+def run_document_rules(inputs, config, *, phase, rule_codes=None, document_ids=None):
     """Запускает общий движок с тем же профилем и бюджетом на указанной стадии."""
     budget = _ValidationBudget()
     return run_validation(
         inputs, config, phase=phase,
         semantic_evaluator=budget.semantic,
         rule_codes=rule_codes,
+        document_ids=document_ids,
     ).to_dict()
 
 
-def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, rule_codes=None):
+def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, rule_codes=None,
+                    document_ids=None):
     """Проверяет сохранённые документы и связывает замечания с их источниками."""
     config = config or load_rules()
     inputs = validation_documents(documents)
@@ -574,7 +576,8 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, r
     if rule_codes is not None:
         ruleset = {**ruleset, "required_rules": []}
     report = run_document_rules(
-        inputs, config, phase="graph_validation", rule_codes=rule_codes
+        inputs, config, phase="graph_validation", rule_codes=rule_codes,
+        document_ids=document_ids,
     )
     refs = {}
     document_aliases = {}

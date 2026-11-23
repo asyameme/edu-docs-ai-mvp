@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -76,6 +77,10 @@ def normalize_field_path(field_path: str) -> str:
         raise ProposalApplicationError("Путь поля пуст")
     if field_path == "$":
         raise ProposalApplicationError("Правка всего объекта не поддерживается, укажите поле")
+    # Агент иногда возвращает точечную запись «attributes.hours_total» —
+    # приводим её к каноническому указателю до общей обработки.
+    if field_path.startswith("attributes."):
+        field_path = "/attributes/" + field_path[len("attributes."):]
     pointer = field_path if field_path.startswith("/") else f"/attributes/{field_path}"
     tokens = pointer[1:].split("/")
     if any(token == "" for token in tokens):
@@ -196,13 +201,16 @@ def plan_approved_changes(snapshot: SnapshotV2, proposal: ChangeProposal) -> lis
             )
             continue
         evidence_refs = {link.source_ref_id for link in links}
-        unverified = [
-            str(ref_id) for ref_id in change.source_ref_ids if ref_id not in evidence_refs
-        ]
-        if unverified:
+        # Агент приводит в обоснование и источник-эталон (например, строку
+        # учебного плана, по которой выравниваем значение) — он не является
+        # свидетельством текущего значения поля и не должен блокировать
+        # применение. Отказ — только если не подтверождён ни один источник.
+        if change.source_ref_ids and not (
+            set(change.source_ref_ids) & evidence_refs
+        ):
             errors.append(
-                f"{label} {field_path}: источники {', '.join(unverified)} "
-                "не относятся к свидетельствам этого поля"
+                f"{label} {field_path}: ни один из источников "
+                "не относится к свидетельствам этого поля"
             )
             continue
         key = (change.target_kind, change.target_id, field_path)
@@ -245,6 +253,97 @@ def apply_change(snapshot: SnapshotV2, change: ApprovedChange) -> SnapshotV2:
     return updated
 
 
+def _evidence_with_unit(snapshot: SnapshotV2, change) -> list[FieldEvidence]:
+    """Записанные свидетельства одного поля с единицей измерения для поиска в документе."""
+    links: list[FieldEvidence] = []
+    for link in _evidence_links(
+        snapshot, change.target_kind, UUID(str(change.target_id)), change.field_path
+    ):
+        observed = link.observed_value
+        if "unit" not in observed:
+            unit = _fallback_unit(change.field_path)
+            if unit is not None:
+                observed = {**observed, "unit": unit}
+        links.append(
+            FieldEvidence(
+                change.target_kind,
+                str(change.target_id),
+                change.field_path,
+                str(link.source_ref_id),
+                observed,
+            )
+        )
+    return links
+
+
+def unwritable_changes(
+    snapshot: SnapshotV2, changes: list[ApprovedChange], documents: Mapping[str, bytes]
+) -> list[str]:
+    """Изменения предложения, которые не получится записать в исходные документы.
+
+    Проверка та же, что выполнит генерация: записанное значение должно стоять
+    на своём месте ровно один раз, и замена должна применяться к документу.
+    Вызывается до создания версии, чтобы пользователь узнал об отказе сразу, а
+    не после подтверждения. ``documents`` — байты DOCX по идентификатору.
+    """
+
+    from app.generation_bridge import field_label
+    from worker.generation.patches import (
+        GenerationMappingError,
+        check_patch_applies,
+        plan_patches,
+    )
+
+    problems: list[str] = []
+    for change in changes:
+        links = _evidence_with_unit(snapshot, change)
+        used = {link.source_ref_id for link in links}
+        sources = [
+            SourceEvidence(str(ref.id), str(ref.document_id), ref.locator)
+            for ref in snapshot.source_refs
+            if str(ref.id) in used
+        ]
+        try:
+            planned = plan_patches(
+                [
+                    # Свидетельства хранят идентификатор текстом — ключ должен совпасть.
+                    FieldChange(
+                        change.target_kind,
+                        str(change.target_id),
+                        change.field_path,
+                        change.new_value,
+                    )
+                ],
+                links,
+                sources,
+            )
+        except GenerationMappingError as error:
+            # Список, таблица или текст с переносами вместо одного значения.
+            label = field_label(change.field_path)
+            problems.append(
+                f"{label}: это не одно значение (список, таблица или текст с "
+                "переносами) — укажите отдельное поле"
+                if "нельзя записать в документ" in str(error) or "одним текстовым" in str(error)
+                else f"{label}: {error}"
+            )
+            continue
+        for document_id, patches in planned.items():
+            document = documents.get(document_id)
+            if document is None:
+                problems.append(
+                    f"{field_label(change.field_path)}: исходный документ недоступен"
+                )
+                continue
+            for patch in patches:
+                reason = check_patch_applies(document, patch)
+                if reason:
+                    problems.append(
+                        f"{field_label(change.field_path)}: прежнее значение "
+                        f"«{patch.old_text[:60]}» {reason}"
+                    )
+    return problems
+
+
 def generation_inputs(
     snapshot: SnapshotV2, changes: list[ApprovedChange]
 ) -> tuple[list[FieldChange], list[FieldEvidence], list[SourceEvidence]]:
@@ -265,27 +364,9 @@ def generation_inputs(
     links: list[FieldEvidence] = []
     used_refs: set[UUID] = set()
     for change in field_changes:
-        for link in _evidence_links(
-            snapshot,
-            change.target_kind,
-            UUID(change.target_id),
-            change.field_path,
-        ):
-            used_refs.add(link.source_ref_id)
-            observed = link.observed_value
-            if "unit" not in observed:
-                unit = _fallback_unit(change.field_path)
-                if unit is not None:
-                    observed = {**observed, "unit": unit}
-            links.append(
-                FieldEvidence(
-                    change.target_kind,
-                    change.target_id,
-                    change.field_path,
-                    str(link.source_ref_id),
-                    observed,
-                )
-            )
+        for link in _evidence_with_unit(snapshot, change):
+            used_refs.add(UUID(link.source_ref_id))
+            links.append(link)
     missing = used_refs - set(refs)
     if missing:
         unknown = ", ".join(sorted(map(str, missing)))

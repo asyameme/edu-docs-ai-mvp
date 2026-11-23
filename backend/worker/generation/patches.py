@@ -7,20 +7,27 @@ by document and resolved against the original file bytes, so the patcher
 receives coordinates plus the exact on-page text to replace. Evidence that no
 longer matches the document, or changes without recorded evidence, fail before
 any patching starts. Only attribute writes map to text replacement; adding or
-removing entities changes the document structure and stays out of scope.
+removing entities changes the document structure and stays out of scope —
+except competency lists, which ``generation_bridge`` maps onto table rows.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from json import JSONDecodeError
 from json import dumps as _json_dumps
 from json import loads as _json_loads
 from typing import Literal
 
-from .docx_patch import DocxPatch, read_area_text
+from .docx_patch import (
+    DocxPatch,
+    DocxPatchError,
+    RowRemoval,
+    patch_docx_bytes,
+    read_area_text,
+)
 from .generator import SourceDocx
 from .package import DocumentType
 
@@ -85,6 +92,25 @@ class PlannedPatch:
     old_text: str
     new_text: str
     change: FieldChange
+
+
+@dataclass(frozen=True, slots=True)
+class UnresolvedPatch:
+    """A planned patch that will not be written into its document.
+
+    ``occurrences`` is 0 when the recorded value is missing from its location,
+    above 1 when it is found there more than once, and ``CONFLICT`` when other
+    changes demand a different text for the same place.
+    """
+
+    document_id: str
+    patch: PlannedPatch
+    occurrences: int
+    reason: str | None = None
+
+
+# Несколько изменений требуют разных текстов в одном месте документа.
+CONFLICT = -1
 
 
 def _describe(change: FieldChange) -> str:
@@ -212,14 +238,19 @@ def plan_patches(
 
 
 def resolve_planned_patches(
-    documents: Mapping[str, bytes], planned: Mapping[str, Sequence[PlannedPatch]]
+    documents: Mapping[str, bytes],
+    planned: Mapping[str, Sequence[PlannedPatch]],
+    unresolved: list[UnresolvedPatch] | None = None,
 ) -> dict[str, tuple[DocxPatch, ...]]:
     """Check every planned patch against the original bytes and freeze it.
 
     The recorded observed value must still occur in the area selected by the
-    coordinates; otherwise the evidence is stale and patching is refused.
-    Two patches claiming the same source location and old text with different
+    coordinates; otherwise the evidence is stale and patching is refused. Two
+    patches claiming the same source location and old text with different
     replacements fail here. Identical claims collapse to one patch.
+
+    With ``unresolved`` given, a value missing from its location no longer
+    fails the whole plan: the patch is reported there and left out.
     """
 
     resolved: dict[str, tuple[DocxPatch, ...]] = {}
@@ -227,41 +258,114 @@ def resolve_planned_patches(
         document = documents.get(document_id)
         if document is None:
             raise GenerationMappingError(f"В пакете нет документа {document_id}")
-        claimed: dict[tuple[str, str], str] = {}
         frozen: list[DocxPatch] = []
+        owners: list[PlannedPatch] = []
+        claimed: dict[tuple[str, str], int] = {}
+        dropped: set[int] = set()
+        conflicted: set[tuple[str, str]] = set()
         for patch in patches:
-            area = read_area_text(document, patch.source_ref)
-            occurrences = sum(text.count(patch.old_text) for text in area)
-            if occurrences == 0:
-                raise GenerationMappingError(
-                    f"В документе {document_id} не найдено записанное значение "
-                    f"{patch.old_text!r} поля {_describe(patch.change)}; "
-                    "свидетельство устарело относительно исходного файла"
-                )
-            if occurrences > 1:
+            try:
+                source_ref, occurrences = locate_observed_value(document, patch)
+            except DocxPatchError as error:
+                if unresolved is None:
+                    raise
+                unresolved.append(UnresolvedPatch(document_id, patch, 0, str(error)))
+                continue
+            if occurrences != 1:
+                if unresolved is not None:
+                    unresolved.append(UnresolvedPatch(document_id, patch, occurrences))
+                    continue
+                if occurrences == 0:
+                    raise GenerationMappingError(
+                        f"В документе {document_id} не найдено записанное значение "
+                        f"{patch.old_text!r} поля {_describe(patch.change)}; "
+                        "свидетельство устарело относительно исходного файла"
+                    )
                 raise GenerationMappingError(
                     f"В документе {document_id} значение {patch.old_text!r} "
                     f"найдено неоднозначно в области источника поля {_describe(patch.change)}"
                 )
-            claim_key = (_patch_location_key(patch.source_ref), patch.old_text)
+            claim_key = (_patch_location_key(source_ref), patch.old_text)
             previous = claimed.get(claim_key)
-            if previous is not None and previous != patch.new_text:
-                raise GenerationMappingError(
-                    f"Два изменения претендуют на один фрагмент {patch.old_text!r} "
-                    f"в одном источнике документа {document_id}"
-                )
+            conflicts = claim_key in conflicted or (
+                previous is not None and frozen[previous].new_text != patch.new_text
+            )
+            if conflicts:
+                if unresolved is None:
+                    raise GenerationMappingError(
+                        f"Два изменения претендуют на один фрагмент {patch.old_text!r} "
+                        f"в одном источнике документа {document_id}"
+                    )
+                # В одно место документа просят записать разные тексты: не пишем
+                # ни один и отдаём оба решения в отчёт.
+                if previous is not None:
+                    unresolved.append(UnresolvedPatch(document_id, owners[previous], CONFLICT))
+                    dropped.add(previous)
+                    del claimed[claim_key]
+                conflicted.add(claim_key)
+                unresolved.append(UnresolvedPatch(document_id, patch, CONFLICT))
+                continue
             if previous is not None:
                 continue
-            claimed[claim_key] = patch.new_text
+            claimed[claim_key] = len(frozen)
+            owners.append(patch)
             frozen.append(
                 DocxPatch(
-                    source_ref=patch.source_ref,
+                    source_ref=source_ref,
                     old_text=patch.old_text,
                     new_text=patch.new_text,
                 )
             )
-        resolved[document_id] = tuple(frozen)
+        resolved[document_id] = tuple(
+            item for index, item in enumerate(frozen) if index not in dropped
+        )
     return resolved
+
+
+def locate_observed_value(document: bytes, patch: PlannedPatch) -> tuple[dict, int]:
+    """Find where the recorded value occurs for one planned patch.
+
+    The parser addresses a record by one cell, but the value itself may sit in a
+    neighbouring cell of the same table row (a formulation next to its code).
+    The recorded cell is checked first; when it does not contain the value and
+    the whole row contains it exactly once, the row becomes the patch location.
+    """
+    source_ref = patch.source_ref
+    occurrences = sum(text.count(patch.old_text) for text in read_area_text(document, source_ref))
+    if occurrences == 0 and source_ref.get("col") is not None:
+        row_ref = {key: value for key, value in source_ref.items() if key != "col"}
+        row_area = read_area_text(document, row_ref)
+        if sum(text.count(patch.old_text) for text in row_area) == 1:
+            return row_ref, 1
+    return dict(source_ref), occurrences
+
+
+def check_patch_applies(document: bytes, patch: PlannedPatch) -> str | None:
+    """Return why one planned patch cannot be applied to ``document``, or None.
+
+    This is the strict check used before an edit is accepted: the recorded value
+    must be found exactly once at its location, and the replacement itself must
+    succeed on a scratch copy (text spanning differently formatted fragments is
+    refused by the patcher).
+    """
+
+    try:
+        source_ref, occurrences = locate_observed_value(document, patch)
+        if occurrences == 0:
+            return "не найдено в документе"
+        if occurrences > 1:
+            return "встречается в источнике несколько раз"
+        patch_docx_bytes(
+            document,
+            [
+                DocxPatch(
+                    source_ref=source_ref, old_text=patch.old_text, new_text=patch.new_text
+                )
+            ],
+        )
+    except DocxPatchError as error:
+        return str(error)
+    return None
 
 
 def build_generation_documents(
@@ -269,13 +373,14 @@ def build_generation_documents(
     links: Sequence[FieldEvidence],
     refs: Sequence[SourceEvidence],
     originals: Sequence[OriginalDocument],
+    unresolved: list[UnresolvedPatch] | None = None,
 ) -> list[SourceDocx]:
     """Convert approved changes into the generator input.
 
     Every original document is returned: documents without changes carry no
     patches and pass through the generator byte-identical. Evidence pointing
-    outside the package and stale observed values raise before any patching
-    starts.
+    outside the package raises before any patching starts; a stale observed
+    value raises too, unless ``unresolved`` is given to collect it.
     """
 
     planned = plan_patches(changes, links, refs)
@@ -286,13 +391,39 @@ def build_generation_documents(
             "Свидетельства ссылаются на документы вне пакета: " + ", ".join(sorted(missing))
         )
     documents = {document_id: item.content for document_id, item in original_index.items()}
-    resolved = resolve_planned_patches(documents, planned)
+    resolved = resolve_planned_patches(documents, planned, unresolved)
     return [
         SourceDocx(
             document_type=document.document_type,
             file_name=document.file_name,
             content=document.content,
             patches=resolved.get(document.document_id, ()),
+            document_id=document.document_id,
         )
         for document in originals
+    ]
+
+
+def with_document_changes(
+    documents: Sequence[SourceDocx],
+    document_id: str,
+    *,
+    patches: Sequence[DocxPatch] = (),
+    row_removals: Sequence[RowRemoval] = (),
+) -> list[SourceDocx]:
+    """Return the documents with extra changes added to one of them.
+
+    Text patches and row removals of the same document are applied together:
+    patches first, then the removals, both against the original coordinates.
+    """
+
+    return [
+        replace(
+            document,
+            patches=document.patches + tuple(patches),
+            row_removals=document.row_removals + tuple(row_removals),
+        )
+        if document.document_id == document_id
+        else document
+        for document in documents
     ]

@@ -1,7 +1,7 @@
 """Название дисциплины, варианты нагрузки, часы, ЗЕТ и пререквизиты."""
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 from docx.oxml.ns import qn
 from docx.table import Table
@@ -39,6 +39,7 @@ def read_title_details(document, title_blocks, output):
 
     credits = {}
     languages = {}
+    registration = {}
     previous_language_label = False
     seen = set()
     for paragraph, coordinates in paragraphs:
@@ -61,6 +62,13 @@ def read_title_details(document, title_blocks, output):
         if amount:
             credits.setdefault(int(amount[1]), ref)
 
+        number = re.fullmatch(
+            r"регистрационный номер(?: рабочей программы)?\s*:?\s*0*(\d+)[\s_.-]*",
+            text,
+        )
+        if number:
+            registration.setdefault(number[1], ref)
+
         label = re.fullmatch(r"язык(?:и|\(и\))? обучения\s*(?::\s*(.*))?", text)
         value = (label[1] or "") if label else text if previous_language_label else ""
         previous_language_label = bool(label and not value)
@@ -73,7 +81,17 @@ def read_title_details(document, title_blocks, output):
     if len(languages) == 1:
         names, output.education_languages_source_ref = next(iter(languages.items()))
         output.education_languages = list(names)
-    for values, label in ((credits, "ЗЕТ"), (languages, "языки обучения")):
+    if len(registration) == 1:
+        number, ref = next(iter(registration.items()))
+        for discipline in getattr(output, "disciplines", []):
+            if discipline.registration_number is None:
+                discipline.registration_number = number
+        output.registration_number_source_ref = ref
+    for values, label in (
+        (credits, "ЗЕТ"),
+        (languages, "языки обучения"),
+        (registration, "регистрационный номер"),
+    ):
         if len(values) > 1:
             output.parse_issues.append(ParseIssue(
                 category="ambiguous",
@@ -257,6 +275,21 @@ def extract_control_forms(
                         forms.append(form)
 
     if not found_columns or not forms and not issues:
+        if found_columns:
+            relaxed_forms, _ = extract_control_forms(document, file_name)
+
+            if relaxed_forms:
+                issues.append(ParseIssue(
+                    category="manual_review",
+                    severity="info",
+                    message=(
+                        "Формы аттестации прочитаны без фильтра траектории: "
+                        "метки вариантов в таблицах организации не совпадают"
+                    ),
+                    source_ref=SourceRef(file=file_name),
+                ))
+                return relaxed_forms, issues
+
         issues.append(ParseIssue(
             category="not_found",
             message=(
@@ -520,7 +553,7 @@ def build_discipline(
     ]
 
     if not name or not data:
-        return None, issues
+        return None, [], issues
 
     variant_rows, variant_conflicts = variants if variants is not None else organization_variant_rows(
         document, file_name,
@@ -536,7 +569,7 @@ def build_discipline(
     issues.extend(variant_issues)
 
     if not data:
-        return None, issues
+        return None, [], issues
 
     if len({item["source_ref"].table for item in data}) != 1:
         problem(
@@ -544,7 +577,7 @@ def build_discipline(
             "их нельзя автоматически объединить",
             data[0]["source_ref"],
         )
-        return None, issues
+        return None, [], issues
 
     semesters = set()
     total_labels = {"итого", "всего"}
@@ -564,7 +597,7 @@ def build_discipline(
                     item["source_ref"],
                     "unexpected_format",
                 )
-                return None, issues
+                return None, [], issues
 
             semesters.add(int(match.group(1)))
 
@@ -573,7 +606,7 @@ def build_discipline(
             "Не найдены семестры дисциплины",
             data[0]["source_ref"],
         )
-        return None, issues
+        return None, [], issues
 
     totals = [
         item
@@ -594,7 +627,7 @@ def build_discipline(
             totals[0]["source_ref"],
             "ambiguous",
         )
-        return None, issues
+        return None, [], issues
 
     first_ref = selected[0]["source_ref"]
     primary_ref = first_ref.model_copy(update={"col": None})
@@ -643,7 +676,7 @@ def build_discipline(
                 ref,
                 "unexpected_format",
             )
-            return None, issues
+            return None, [], issues
 
         periods = {
             normalize(period)
@@ -658,7 +691,7 @@ def build_discipline(
                 ref,
                 "ambiguous",
             )
-            return None, issues
+            return None, [], issues
 
         key = normalize(item["label"]).replace("\u0451", "е")
         key = re.sub(r"сам\.\s*раб\.", "сам.раб.", key)
@@ -675,7 +708,7 @@ def build_discipline(
                     "в правила суммирования часов",
                     ref,
                 )
-                return None, issues
+                return None, [], issues
 
             key = canonical
 
@@ -688,7 +721,7 @@ def build_discipline(
                     "Неизвестная группа часов в шапке",
                     ref,
                 )
-                return None, issues
+                return None, [], issues
 
             if group.startswith("самостоятельная работа") and (
                 "сам.раб." not in key
@@ -712,7 +745,7 @@ def build_discipline(
                 ref,
                 "ambiguous",
             )
-            return None, issues
+            return None, [], issues
 
         seen.add(signature)
         number = int(value)
@@ -736,7 +769,7 @@ def build_discipline(
             primary_ref,
             "empty_cell",
         )
-        return None, issues
+        return None, [], issues
 
     if declared_hours:
         covered = set().union(*(
@@ -752,7 +785,7 @@ def build_discipline(
                 "Общие часы указаны не для всех семестров",
                 primary_ref,
             )
-            return None, issues
+            return None, [], issues
 
         hours_total = sum(
             number
@@ -772,14 +805,6 @@ def build_discipline(
             ),
             source_ref=primary_ref,
         ))
-
-    if len(semesters) > 1:
-        problem(
-            "В Discipline сохранена общая нагрузка. "
-            "Текущая модель не передает часы и ЗЕТ "
-            "отдельно для каждого семестра",
-            primary_ref,
-        )
 
     forms, form_issues = extract_control_forms(
         document,
@@ -809,8 +834,59 @@ def build_discipline(
             "section": f"титул; {primary_ref.section}",
         }),
     )
+    semester_workload = _semester_workload_rows(data, semesters, discipline)
+    if len(semesters) > 1 and not semester_workload:
+        problem(
+            "В Discipline сохранена общая нагрузка: не удалось разнести "
+            "часы и ЗЕТ отдельно по семестрам",
+            primary_ref,
+        )
+    return discipline, semester_workload, issues
 
-    return discipline, issues
+
+def _semester_workload_rows(data, semesters, discipline):
+    """Собрать посеместровую нагрузку РПД, растянутой на несколько семестров.
+
+    Строки создаются только когда для каждого семестра есть и часы, и ЗЕТ;
+    иначе нагрузка остается только на дисциплине и сверка по семестрам
+    честно сообщает о недостатке данных.
+    """
+    if len(semesters) < 2:
+        return []
+    hours_by_semester = defaultdict(int)
+    credits_by_semester = defaultdict(int)
+    for item in data:
+        periods = [
+            normalize(period)
+            for period in item["periods"]
+            if normalize(period) not in {"итого", "всего"}
+        ]
+        if len(periods) != 1:
+            continue
+        match = re.fullmatch(r"семестр\s+([1-8])", periods[0])
+        if match is None:
+            continue
+        semester = int(match.group(1))
+        value = item["value"]
+        if value is None or value < 0 or value != value.to_integral_value():
+            continue
+        if item["kind"] in {"hours", "hours_total"}:
+            hours_by_semester[semester] += int(value)
+        elif item["kind"] == "credit_units":
+            credits_by_semester[semester] += int(value)
+    workloads = []
+    for semester in sorted(semesters):
+        hours = hours_by_semester.get(semester)
+        units = credits_by_semester.get(semester)
+        if not hours or not units:
+            return []
+        workloads.append(SemesterWorkload(
+            semester=semester,
+            credit_units=units,
+            hours_total=hours,
+            source_ref=discipline.source_ref.model_copy(update={"col": None}),
+        ))
+    return workloads
 
 
 def build_disciplines(document, file_name, title_parts, workload_track=None, education_mode=None):
@@ -823,18 +899,20 @@ def build_disciplines(document, file_name, title_parts, workload_track=None, edu
             variant = variants.get((ref.table, ref.row), (None, None))
             groups.setdefault(variant, []).append(item)
     if len(groups) <= 1 or workload_track is not None or education_mode is not None:
-        discipline, issues = build_discipline(
+        discipline, semester_workload, issues = build_discipline(
             document, file_name, title_parts, workload_track, education_mode,
             workload=(values, issues), variants=(variants, conflicts),
         )
-        return [discipline] if discipline is not None else [], issues
+        return [discipline] if discipline is not None else [], semester_workload, issues
 
     disciplines = []
+    semester_workload = []
     for (track, mode), records in groups.items():
-        discipline, variant_issues = build_discipline(
+        discipline, workloads, variant_issues = build_discipline(
             document, file_name, title_parts, track, mode,
             workload=(records, []), variants=(variants, conflicts),
         )
+        semester_workload.extend(workloads)
         issues.extend(issue for issue in variant_issues if not issue.message.startswith("Выбран вариант нагрузки:"))
         if discipline is None:
             name = extract_discipline_name(title_parts)
@@ -848,6 +926,7 @@ def build_disciplines(document, file_name, title_parts, workload_track=None, edu
         disciplines.append(discipline)
         issues.append(ParseIssue(
             category="manual_review",
+            severity="info",
             message=(
                 f"Сохранена запись disciplines[{index}]: {track or 'траектория не указана'}, "
                 f"форма обучения: {mode or 'не указана'}. "
@@ -855,7 +934,7 @@ def build_disciplines(document, file_name, title_parts, workload_track=None, edu
             ),
             source_ref=discipline.source_ref,
         ))
-    return disciplines, issues
+    return disciplines, semester_workload, issues
 
 
 def align_workload_columns(header_row, data_row):
@@ -1583,16 +1662,11 @@ def extract_practice_workload(document, file_name):
 
         records.append(record)
 
-    if not records:
+    if not records and plan_ref is None:
         issues.append(ParseIssue(
-            category="manual_review" if plan_ref else "not_found",
-            message=(
-                "Локальные значения нагрузки не найдены; "
-                "документ отсылает к УП"
-                if plan_ref
-                else "В разделе не найдены значения нагрузки"
-            ),
-            source_ref=plan_ref or blocks[0][1],
+            category="not_found",
+            message="В разделе не найдены значения нагрузки",
+            source_ref=blocks[0][1],
         ))
 
     return records, issues, plan_ref

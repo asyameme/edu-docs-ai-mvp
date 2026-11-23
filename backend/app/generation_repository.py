@@ -12,7 +12,7 @@ from app.config import get_settings
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.graph_storage import load_graph
-from app.repository import Repository
+from app.repository import Repository, limit_lock_wait
 from app.review_contract import CheckResult
 from app.review_logic import content_hash, digest
 from app.review_projection import project_legacy_review_result
@@ -108,7 +108,8 @@ class GenerationRepository:
             ).encode()
         ).hexdigest()
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
-            cur.execute("SET LOCAL statement_timeout='5s'")
+            # Чтение подтверждённого графа после блокировки не лимитируется 5 с.
+            limit_lock_wait(cur)
             Repository.require(
                 cur.execute(
                     "SELECT id FROM programs WHERE id=%s FOR UPDATE", (program_id,)
@@ -182,11 +183,12 @@ class GenerationRepository:
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
             row = Repository.require(
                 cur.execute(
-                    "SELECT id,program_id,parameters->>'version_id' AS version_id,"
-                    "parameters->>'import_job_id' AS import_job_id,report,created_at,"
-                    "workflow_id,temporal_namespace "
-                    "FROM processing_jobs "
-                    "WHERE program_id=%s AND id=%s AND type='generate'",
+                    "SELECT j.id,j.program_id,j.parameters->>'version_id' AS version_id,"
+                    "j.parameters->>'import_job_id' AS import_job_id,j.report,j.created_at,"
+                    "j.workflow_id,j.temporal_namespace,v.number AS version_number "
+                    "FROM processing_jobs j LEFT JOIN program_versions v "
+                    "ON v.program_id=j.program_id AND v.id::text=j.parameters->>'version_id' "
+                    "WHERE j.program_id=%s AND j.id=%s AND j.type='generate'",
                     (program_id, job_id),
                 ).fetchone()
             )
@@ -195,6 +197,7 @@ class GenerationRepository:
                 "id": row["id"],
                 "program_id": row["program_id"],
                 "version_id": row["version_id"],
+                "version_number": row["version_number"],
                 "import_job_id": row["import_job_id"],
                 "status": report.get("outcome") or "pending",
                 "_workflow_id": row["workflow_id"],
@@ -202,6 +205,8 @@ class GenerationRepository:
                 "error": report.get("error"),
                 "size_bytes": report.get("size_bytes"),
                 "sha256": report.get("sha256"),
+                "applied": report.get("applied") or [],
+                "notes": report.get("notes") or [],
                 "created_at": row["created_at"],
             }
 
@@ -251,9 +256,60 @@ class GenerationRepository:
             ).fetchall()
             if {row["id"] for row in originals} != set(snapshot.document_ids):
                 raise DomainError(409, "Не все исходные документы версии доступны")
-            return snapshot, job["parameters"]["documents"], originals
+            return snapshot, job["parameters"]["documents"], originals, self._parsed_documents(
+                cur, job["program_id"], snapshot
+            )
 
-    def finish(self, job_id, content):
+    @staticmethod
+    def _parsed_documents(cur, program_id, snapshot):
+        """Разбор импорта до решений пользователя: по нему решения находят строки документов."""
+        if snapshot.review is None:
+            return {}
+        from app.graph_storage import hydrate_job
+
+        review = hydrate_job(
+            cur,
+            Repository.require(
+                cur.execute(
+                    "SELECT * FROM processing_jobs WHERE program_id=%s AND id=%s "
+                    "AND type='validate'",
+                    (program_id, snapshot.review.review_id),
+                ).fetchone()
+            ),
+        )
+        return {
+            str(item["document_id"]): item["parsed"]
+            for item in review["parameters"]["input"]["documents"]
+        }
+
+    def composition(self, program_id):
+        """Документы, которые войдут в ZIP: тот же состав, из которого работает генератор."""
+        Repository(self.pool).program(program_id)
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            version = cur.execute(
+                "SELECT graph_state_id,review FROM program_versions v JOIN programs p "
+                "ON p.current_version_id=v.id WHERE p.id=%s",
+                (program_id,),
+            ).fetchone()
+            pending = (version["review"] or {}).get("graph_ready") is False
+            if version["graph_state_id"] is None or pending:
+                return {"ready": False, "documents": []}
+            try:
+                return {"ready": True, "documents": _source_files(cur, version["graph_state_id"])}
+            except DomainError:
+                return {"ready": False, "documents": []}
+
+    def listing(self, program_id, limit, offset):
+        Repository(self.pool).program(program_id)
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            rows = cur.execute(
+                """SELECT id FROM processing_jobs WHERE program_id=%s AND type='generate'
+                   ORDER BY created_at DESC,id LIMIT %s OFFSET %s""",
+                (program_id, limit, offset),
+            ).fetchall()
+        return [self.job(program_id, row["id"]) for row in rows]
+
+    def finish(self, job_id, content, notes=(), applied=()):
         checksum = hashlib.sha256(content).hexdigest()
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -296,6 +352,9 @@ class GenerationRepository:
                             "size_bytes": len(content),
                             "sha256": checksum,
                             "completed_at": datetime.now(UTC).isoformat(),
+                            # Что изменено в документах и что оставлено для ручной правки.
+                            "applied": list(applied),
+                            "notes": list(notes),
                         }
                     ),
                     job_id,

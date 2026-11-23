@@ -89,7 +89,18 @@ class DocumentMutation(Contract):
         return self
 
 
-ReviewMutation = Mutation | DocumentMutation
+class CompetencyLinksMutation(Contract):
+    """Replace the competency set of one identified discipline or plan row."""
+
+    op: Literal["set_competency_links"]
+    document_id: UUID
+    collection: Literal["disciplines", "curriculum_items"]
+    record_index: int = Field(ge=0)
+    expected_codes: list[str]
+    codes: list[str] = Field(min_length=1)
+
+
+ReviewMutation = Mutation | DocumentMutation | CompetencyLinksMutation
 
 
 class Variant(Contract):
@@ -98,11 +109,24 @@ class Variant(Contract):
     changes: list[ReviewMutation] = Field(min_length=1)
 
 
+class RpdAlignmentEvidenceItem(Contract):
+    id: str | None = None
+    topic: str | None = None
+    activity: str | None = None
+    indicator_code: str | None = None
+    indicator_text: str | None = None
+    assessment_tool: str | None = None
+
+
 class RpdAlignmentSummary(Contract):
     outcome_id: str | None = None
     outcome_text: str | None = None
     classification: Literal["supported", "gap", "uncertain", "invalid"] | None = None
     reason: str | None = None
+    # Детали свидетельств, на которые ссылается пояснение модели:
+    # темы раздела 2 и цепочка индикатор → оценочное средство.
+    course_evidence: list[RpdAlignmentEvidenceItem] | None = None
+    assessment_evidence: list[RpdAlignmentEvidenceItem] | None = None
 
 
 class ReviewIssue(Contract):
@@ -235,7 +259,7 @@ class AnalysisV2(CheckResult):
             if issue.requires_decision and not issue.variants:
                 raise ValueError("A decision issue must provide at least one variant")
             if issue.variants and any(
-                not isinstance(change, DocumentMutation)
+                not isinstance(change, (DocumentMutation, CompetencyLinksMutation))
                 for variant in issue.variants
                 for change in variant.changes
             ):
@@ -252,7 +276,9 @@ class ReviewCreate(Contract):
 class DecisionCreate(Contract):
     expected_version_id: UUID
     conflict_id: UUID
-    variant_id: UUID
+    # Либо готовый вариант из карточки, либо собственное значение пользователя.
+    variant_id: UUID | None = None
+    custom_value: str | None = Field(default=None, min_length=1, max_length=4000)
     signature: str = Field(min_length=1, max_length=120)
     check_job_id: UUID | None = None
 
@@ -264,10 +290,55 @@ class DecisionCreate(Contract):
             raise ValueError("Подпись не должна быть пустой")
         return value
 
+    @field_validator("custom_value")
+    @classmethod
+    def normalize_custom_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Собственное значение не должно быть пустым")
+        return value
+
+    @model_validator(mode="after")
+    def variant_or_custom(self) -> Self:
+        if (self.variant_id is None) == (self.custom_value is None):
+            raise ValueError("Укажите готовый вариант или собственное значение")
+        return self
+
+
+class DecisionSelection(Contract):
+    conflict_id: UUID
+    variant_id: UUID
+
+
+class DecisionBatchCreate(Contract):
+    expected_version_id: UUID
+    selections: list[DecisionSelection] = Field(min_length=1, max_length=500)
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
+
+    @model_validator(mode="after")
+    def conflict_ids_are_unique(self) -> Self:
+        ids = [item.conflict_id for item in self.selections]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Расхождения в пакетном выборе не должны повторяться")
+        return self
+
 
 class CheckCreate(Contract):
     version_id: UUID
     rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
+    # Ручная проверка R-11 может запускаться по одному документу РПД,
+    # чтобы не ждать LLM-оценку всех дисциплин пакета.
+    document_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=4)
 
     @field_validator("rule_codes")
     @classmethod
@@ -275,6 +346,14 @@ class CheckCreate(Contract):
         if value is not None and len(value) != len(set(value)):
             raise ValueError("Ручные проверки не должны повторяться")
         return value
+
+    @model_validator(mode="after")
+    def documents_only_for_manual_rules(self) -> Self:
+        if self.document_ids is not None and self.rule_codes is None:
+            raise ValueError("Список документов допустим только для ручных правил")
+        if self.document_ids is not None and len(self.document_ids) != len(set(self.document_ids)):
+            raise ValueError("Документы ручной проверки не должны повторяться")
+        return self
 
 
 class ConfirmCreate(Contract):
@@ -366,6 +445,7 @@ class CheckRequest(Contract):
     ruleset: Ruleset
     documents: list[AnalysisDocument] = Field(default_factory=list)
     rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
+    document_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=4)
 
     @model_validator(mode="after")
     def documents_belong_to_program(self) -> Self:
