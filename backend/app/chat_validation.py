@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+from collections import Counter
 from typing import Literal
 from uuid import UUID
 
@@ -47,6 +48,8 @@ def _fit_chat_check_result(result: "ChatCheckResult") -> "ChatCheckResult":
     """Гарантирует лимит размера всего JSON-ответа инструмента."""
 
     while len(to_json(result)) > MAX_CHAT_TOOL_PAYLOAD_BYTES:
+        if not result.truncated:
+            result.summary += " Показана только часть подробностей."
         result.truncated = True
         if result.issues:
             result.issues.pop()
@@ -82,6 +85,42 @@ class ChatCheckIssue(BaseModel):
     source_ref_ids: list[UUID]
 
 
+_STATUS_WORDS = (
+    ("passed", "пройдено"),
+    ("failed", "с замечаниями"),
+    ("skipped", "пропущено"),
+    ("not_applicable", "не применяется"),
+)
+
+
+def check_summary(status, counts, all_rules_passed, truncated) -> str:
+    """Итог проверки готовыми словами.
+
+    Модель пересказывает флаг ``all_rules_passed=false`` как «все правила не
+    пройдены», хотя он означает «не все пройдены». Готовая формулировка с
+    числами по статусам снимает эту двусмысленность.
+    """
+
+    if status == "pending":
+        return "Проверка ещё выполняется, выводов о правилах делать нельзя."
+    if status == "failed":
+        return "Проверка завершилась ошибкой, выводов о правилах делать нельзя."
+    parts = [f"{counts[key]} {word}" for key, word in _STATUS_WORDS if counts.get(key)]
+    summary = (
+        f"Правил в проверке: {', '.join(parts)}."
+        if parts
+        else "Состав правил проверки недоступен."
+    )
+    if status == "partial":
+        return summary + " Проверка выполнена частично."
+    # Counts come from the complete report even when its details are shortened.
+    if all_rules_passed or (counts.get("passed", 0) and len(counts) == 1):
+        summary += " Все правила пройдены."
+    if truncated:
+        summary += " Показана только часть подробностей."
+    return summary
+
+
 class ChatCheckResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -97,6 +136,8 @@ class ChatCheckResult(BaseModel):
     total_issues: int
     truncated: bool
     all_rules_passed: bool | None
+    # Готовый итог словами: модель приводит его, а не пересказывает флаг.
+    summary: str = ""
 
 
 class ChatValidationTools:
@@ -151,6 +192,7 @@ class ChatValidationTools:
         total_issues = 0
         truncated = False
         all_rules_passed: bool | None = None
+        status_counts: dict[str, int] = {}
 
         if status in {"completed", "partial"}:
             raw_result = report.get("result")
@@ -163,6 +205,7 @@ class ChatValidationTools:
                     raise DomainError(503, "Сохранённый результат проверки повреждён") from error
                 total_coverage = len(result.coverage)
                 total_issues = len(result.issues)
+                status_counts = Counter(item.status for item in result.coverage)
                 coverage_truncated = total_coverage > MAX_CHAT_CHECK_COVERAGE
                 issues_truncated = total_issues > MAX_CHAT_CHECK_ISSUES
                 truncated = coverage_truncated or issues_truncated
@@ -215,6 +258,9 @@ class ChatValidationTools:
 
         message, message_cut = _bounded_text(message, 512)
         truncated |= message_cut
+        all_rules_passed = (
+            all_rules_passed and not truncated if all_rules_passed is not None else None
+        )
         return _fit_chat_check_result(
             ChatCheckResult(
                 check_job_id=check_job_id,
@@ -230,9 +276,8 @@ class ChatValidationTools:
                 total_coverage=total_coverage,
                 total_issues=total_issues,
                 truncated=truncated,
-                all_rules_passed=(
-                    all_rules_passed and not truncated if all_rules_passed is not None else None
-                ),
+                all_rules_passed=all_rules_passed,
+                summary=check_summary(status, status_counts, all_rules_passed, truncated),
             )
         )
 
@@ -284,8 +329,11 @@ def register_chat_validation_tools(agent: Agent) -> None:
 
         При pending сообщи, что задача ещё выполняется. При partial или failed
         объясни, что проверка не завершена полностью или завершилась ошибкой.
-        Даже при completed говори, что все правила пройдены, только если
-        all_rules_passed=true; иначе перечисли статусы покрытия и замечания.
+        Итог проверки приводи по готовому полю summary — дословно по числам:
+        сколько правил пройдено, сколько с замечаниями, сколько пропущено.
+        Говори, что все правила пройдены, только если all_rules_passed=true.
+        all_rules_passed=false означает «не все пройдены» (хотя бы одно правило
+        не пройдено), а не «не пройдено ни одно»; не смешивай эти формулировки.
         При truncated=true явно сообщи, что показана только часть результата.
         """
 

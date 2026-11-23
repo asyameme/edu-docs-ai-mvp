@@ -129,6 +129,7 @@ def _proposal(snapshot_data, *, field="hours", expected=108, new=54, refs=None, 
 def test_normalize_field_path_forms():
     assert normalize_field_path("hours") == "/attributes/hours"
     assert normalize_field_path("/attributes/hours") == "/attributes/hours"
+    assert normalize_field_path("attributes.hours") == "/attributes/hours"
     assert normalize_field_path("hours~1total") == "/attributes/hours~1total"
     for bad in ("$", "/source_ref_ids/0", "hours/", "a~2b", " "):
         with pytest.raises(ProposalApplicationError):
@@ -163,10 +164,21 @@ def test_plan_rejects_missing_field_and_unknown_target(snapshot):
         plan_approved_changes(snap, _proposal(data, target=_uuid()))
 
 
-def test_plan_rejects_unverified_sources(snapshot):
+def test_plan_rejects_when_no_source_matches_evidence(snapshot):
     snap, data = snapshot
-    with pytest.raises(ProposalApplicationError, match="не относятся к свидетельствам"):
+    with pytest.raises(ProposalApplicationError, match="ни один из источников"):
         plan_approved_changes(snap, _proposal(data, refs=[_uuid()]))
+
+
+def test_plan_allows_reference_source_alongside_evidence(snapshot):
+    snap, data = snapshot
+    # Агент прикладывает источник-эталон (учебный план), не являющийся
+    # свидетельством поля: применение не блокируется.
+    approved = plan_approved_changes(
+        snap,
+        _proposal(data, refs=[data["ref_rpd"], _uuid()]),
+    )
+    assert approved[0].evidence_ref_ids == (data["ref_plan"], data["ref_rpd"])
 
 
 def test_plan_collects_all_errors_at_once(snapshot):
@@ -181,7 +193,7 @@ def test_plan_collects_all_errors_at_once(snapshot):
     with pytest.raises(ProposalApplicationError) as excinfo:
         plan_approved_changes(snap, combined)
     assert "агент видел" in str(excinfo.value)
-    assert "не относятся" in str(excinfo.value)
+    assert "ни один из источников" in str(excinfo.value)
 
 
 def test_plan_collapses_duplicates_and_rejects_conflicts(snapshot):

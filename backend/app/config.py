@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     chat_api_key: SecretStr = SecretStr("")
     chat_credentials_configured: bool = False
     chat_max_turns: int = Field(default=8, ge=1, le=20)
-    chat_model_timeout_seconds: float = Field(default=45, gt=0, le=55)
+    chat_model_timeout_seconds: float = Field(default=45, gt=0, le=600)
     chat_max_conversation_bytes: int = Field(default=524288, ge=16384, le=1048576)
 
     @field_validator("chat_credentials_configured", mode="before")

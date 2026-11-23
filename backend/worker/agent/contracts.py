@@ -1,9 +1,10 @@
 """Typed inputs and outputs shared by the chat agent and its backend adapter."""
 
+import re
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from app.domain import Entity, RelationV2, SourceRefV2
 
@@ -108,7 +109,31 @@ class ChangeProposal(BaseModel):
     kind: Literal["change_proposal"]
     summary: str = Field(min_length=1)
     changes: list[ProposedAttributeChange] = Field(min_length=1)
-    unresolved_questions: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Только вопросы о недостающих данных, без ответа на которые правку нельзя "
+            "составить однозначно: какая сущность, какое значение, какой из вариантов. "
+            "Если правка определена полностью — пустой список. Не спрашивай здесь "
+            "подтверждение применения: предложение применяет пользователь кнопкой "
+            "«Применить план» в интерфейсе."
+        ),
+    )
+
+    @field_validator("unresolved_questions")
+    @classmethod
+    def keep_data_questions(cls, questions: list[str]) -> list[str]:
+        """The Apply button provides consent; keep questions that affect the edit."""
+        return [
+            question for question in questions
+            if not re.fullmatch(
+                r"(?:подтверждаете(?: ли вы| ли)?|согласны(?: ли вы| ли)?) "
+                r"(?:применение (?:этой |предложенной )?(?:правки|правок|изменений)|"
+                r"применить (?:эту |предложенную )?(?:правку|изменения))"
+                r"(?::\s*[^?;]*(?:→|->)[^?;]*)?\??",
+                " ".join(question.casefold().strip().split()),
+            )
+        ]
 
 
 ChatOutput = Answer | Clarification | ChangeProposal

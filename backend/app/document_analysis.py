@@ -209,6 +209,40 @@ def _competency_code_changes(documents, codes, selected_code):
     return changes
 
 
+def _competency_link_variants(finding, documents, issue_id):
+    evidence = finding["evidence"]
+    rp = evidence["document_target"]
+    plan = evidence["plan_targets"]
+    plan_codes = sorted({code for target in plan for code in target["expected_codes"]})
+    rp_codes = rp["expected_codes"]
+    original = {str(item["document_id"]): item["parsed"] for item in documents}
+    declared = {
+        item["code"] for document in original.values()
+        for item in document.get("competencies", [])
+    }
+    options = []
+    if not evidence["shared_discipline"] and set(plan_codes) <= declared:
+        options.append((f"Список из учебного плана: {', '.join(plan_codes)}", rp, plan_codes))
+    if len(plan) == 1 and evidence["plan_row_is_exclusive"] and set(rp_codes) <= declared:
+        options.append((f"Список из {evidence['document_label']}: {', '.join(rp_codes)}",
+                        plan[0], rp_codes))
+    if not options:
+        return [], ["Не удалось безопасно сопоставить связи с исходными строками"]
+    options.append(("Оставить расхождение в документах", rp, rp_codes))
+    variants = []
+    for label, target, codes in options:
+        changes = [{"op": "set_competency_links", **target, "codes": codes}]
+        try:
+            validate_document_mutation_variants(original, [changes])
+        except (DomainError, ValueError):
+            continue
+        variants.append({"id": str(uuid5(issue_id, digest(changes))),
+                         "label": label, "changes": changes})
+    return (variants, []) if len(variants) > 1 else (
+        [], ["Нет применимого варианта для согласования связей"]
+    )
+
+
 def analyze_documents(documents, job_id, *, config=None):
     """Собирает сырой результат валидатора до проекции в AnalysisV2."""
     config = config if config is not None else load_rules()
@@ -236,9 +270,14 @@ def analyze_documents(documents, job_id, *, config=None):
             issue_id = uuid5(UUID(str(job_id)),
                              f"{result['rule_id']}:{index}:{digest(finding)}")
             sources, limitations = _sources(finding, documents)
-            variants, variant_limits = _variants(
-                finding, sources, documents, issue_id
-            )
+            if finding["code"] == "competency_links_choice":
+                variants, variant_limits = _competency_link_variants(
+                    finding, documents, issue_id
+                )
+            else:
+                variants, variant_limits = _variants(
+                    finding, sources, documents, issue_id
+                )
             evidence = deepcopy(finding["evidence"])
             if limitations:
                 variants = []

@@ -236,9 +236,17 @@ class TestRpdParser(unittest.TestCase):
             expected,
         )
         self.assertNotIn("УК-1", {item.code for item in output.competencies})
-        self.assertFalse(any(
-            relation.src_entity == "competency" and relation.src_key == "УК-1"
-            for relation in output.relations
+        # Код без локальной формулировки не объявляет сущность, но строка
+        # таблицы ссылается на компетенцию: связи «имеет» и «включает»
+        # сохраняются, иначе результаты обучения теряют индикаторную цепочку.
+        has_relation = [
+            relation for relation in output.relations
+            if relation.src_entity == "competency" and relation.src_key == "УК-1"
+        ]
+        self.assertTrue(any(relation.kind == "имеет" for relation in has_relation))
+        self.assertTrue(any(
+            relation.kind == "включает" and relation.dst_entity == "learning_outcome"
+            for relation in has_relation
         ))
         self.assertTrue(any(
             issue.category == "manual_review"

@@ -22,7 +22,7 @@ from backend.contracts.document_v2.models import (
     SourceRef,
 )
 
-from .common import finalize_output, normalize, paragraph_indices
+from .common import finalize_output, normalize, normalize_competency_code, normalize_indicator_code, paragraph_indices
 from .results import split_competency
 
 
@@ -57,6 +57,7 @@ def _read_competency(output, text, ref, role):
         _issue(output, "unparsed_row", f"Не распознана компетенция: {text}", ref)
         return None
     code, formulation = entry
+    code = normalize_competency_code(code)
     if not formulation:
         _issue(output, "empty_cell", f"У компетенции {code} отсутствует формулировка", ref)
     competency = Competency(code=code, formulation=formulation, source_ref=ref)
@@ -74,6 +75,7 @@ def _read_indicator(output, text, ref, competency):
         _issue(output, "unparsed_row", f"Не распознан индикатор с компетенцией: {text}", ref)
         return None
     code, description = match.groups()
+    code = normalize_indicator_code(code)
     if not code.startswith(competency.code + "."):
         _issue(
             output, "unexpected_format",
@@ -93,6 +95,7 @@ def _read_indicator(output, text, ref, competency):
 
 def _read_outcome(output, text, ref, competency, indicator):
     prefix = OUTCOME_PREFIX.match(text)
+    prefix_code = normalize_indicator_code(prefix[1]) if prefix else None
     outcome = LearningOutcome(
         local_id=f"LO-{len(output.learning_outcomes) + 1:03}",
         text=text,
@@ -107,7 +110,7 @@ def _read_outcome(output, text, ref, competency, indicator):
             dst_entity="learning_outcome", dst_key=outcome.local_id,
             kind="включает", source_ref=ref,
         ))
-    if prefix is not None and indicator is not None and prefix[1] == indicator.code:
+    if prefix_code is not None and indicator is not None and prefix_code == indicator.code:
         output.indicator_outcome_links.append(IndicatorOutcomeLink(
             indicator_code=indicator.code, learning_outcome_id=outcome.local_id, source_ref=ref,
         ))

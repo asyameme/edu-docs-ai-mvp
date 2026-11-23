@@ -10,6 +10,7 @@ from .common import (
     heading_level,
     is_subsection,
     normalize,
+    normalize_universal_code,
     read_section,
 )
 from backend.contracts.document_v2.models import (
@@ -55,7 +56,7 @@ def split_competency(text):
     )
 
     if match:
-        return match.group(1), match.group(2) or ""
+        return normalize_universal_code(match.group(1)), match.group(2) or ""
 
     match = re.fullmatch(
         rf"(.+?)\s*\(({code_pattern})\)\.?",
@@ -63,7 +64,7 @@ def split_competency(text):
     )
 
     if match:
-        return match.group(2), match.group(1).strip()
+        return normalize_universal_code(match.group(2)), match.group(1).strip()
 
     return None
 
@@ -196,6 +197,88 @@ def extract_indicators(text, competency_code, source_ref):
     return indicators, issues
 
 
+def _trim_segment(text):
+    """Убрать разделители между сегментами мульти-результатной строки."""
+    return re.sub(
+        r"^[.:\s;,–—-]+|[.\s;,]+$",
+        "",
+        " ".join(text.split()),
+    ).strip()
+
+
+def _multi_result_segments(line, codes):
+    """Разбить строку из нескольких результатов на пары (коды, текст).
+
+    Поддержаны два оформления: код в начале сегмента («КОД — текст.
+    КОД — текст.», включая группы «КОД1, КОД2 — текст» и короткие коды
+    «У-2 — текст» с префиксом от предыдущего полного кода) и код
+    в скобках в конце сегмента («текст (КОД); текст (КОД).»). Если
+    разбиение неоднозначно, возвращается пустой список.
+    """
+    if codes[0].start() == 0:
+        tokens = [
+            (match.start(), match.end(), "full", match)
+            for match in codes
+        ]
+
+        for match in re.finditer(r"\b[ЗУВ3]-\d+\b", line):
+            if any(start <= match.start() < end for start, end, _, _ in tokens):
+                continue
+            if re.fullmatch(r"[,\s]*", line[:match.start()]) is not None:
+                continue
+            tokens.append((match.start(), match.end(), "short", match))
+
+        tokens.sort()
+        segments = []
+        index = 0
+
+        while index < len(tokens):
+            group = [tokens[index]]
+            end = tokens[index][1]
+            index += 1
+
+            while index < len(tokens):
+                between = line[end:tokens[index][0]]
+
+                if not re.fullmatch(r"[,\s]*", between):
+                    break
+                group.append(tokens[index])
+                end = tokens[index][1]
+                index += 1
+
+            text_end = tokens[index][0] if index < len(tokens) else len(line)
+            text = _trim_segment(line[end:text_end])
+
+            if not text:
+                return []
+            segments.append((group, text))
+
+        return segments
+
+    if all(
+        match.start() > 0
+        and line[match.start() - 1] == "("
+        and line[match.end():match.end() + 1] == ")"
+        for match in codes
+    ):
+        segments = []
+        cursor = 0
+        for match in codes:
+            text = _trim_segment(line[cursor:match.start() - 1])
+            cursor = match.end() + 1
+            if not text:
+                return []
+            segments.append((
+                [(match.start(), match.end(), "full", match)],
+                text,
+            ))
+        if not re.fullmatch(r"[;,.\s]*", line[cursor:]):
+            return []
+        return segments
+
+    return []
+
+
 def extract_learning_outcomes(text, source_ref, start_index=1):
     """Разобрать результаты обучения одной ячейки."""
     outcomes = []
@@ -210,6 +293,8 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
     }
     code_kinds = {
         "З": "знать",
+        # В кодах документов цифра 3 используется вместо похожей буквы З.
+        "3": "знать",
         "У": "уметь",
         "В": "владеть",
     }
@@ -226,9 +311,8 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
     prefix_pattern = re.compile(
         rf"^{code_pattern}[.:\s\u2013\u2014-]*(?P<text>.*)$"
     )
-    suffix_pattern = re.compile(
-        rf"^(?P<text>.+?)\s*\({code_pattern}\)[.;]?$"
-    )
+    outcome_code = re.compile(code_pattern)
+    suffix_pattern = re.compile(r"^(?P<text>.+?)\s*\((?P<codes>[^()]+)\)[.;]?$")
 
     def add_outcome(value, kind, code=None, message=None):
         value = " ".join(value.split())
@@ -274,7 +358,12 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
 
         heading = heading_pattern.match(line)
 
-        if heading:
+        # В «Уметь:» задан вид группы, а в «владеть навыками ... (код У-1)»
+        # глагол является частью самого результата.
+        if heading and (
+            not outcome_code.search(line)
+            or ":" in heading.group()
+        ):
             flush()
             current_kind = kinds[heading.group(1).casefold()]
             line = line[heading.end():].strip()
@@ -291,12 +380,49 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
 
         flush()
 
-        match = (
-            prefix_pattern.fullmatch(line)
-            or suffix_pattern.fullmatch(line)
-        )
+        if len(codes) >= 2 or (codes and len(short_codes) > len(codes)):
+            segments = _multi_result_segments(line, codes)
 
-        if len(codes) != 1 or len(short_codes) != 1 or match is None:
+            if segments:
+                prefix_code = None
+
+                for group, text in segments:
+                    for _, _, kind_token, token in group:
+                        if kind_token == "full":
+                            code = token.group("code")
+                            kind = code_kinds[token.group("kind")]
+                            prefix_code = code.rsplit(" ", 1)[0]
+                        else:
+                            code = f"{prefix_code} {token.group(0)}"
+                            kind = code_kinds[token.group(0)[0]]
+
+                        message = None
+
+                        if current_kind is not None and current_kind != kind:
+                            kind = None
+                            message = (
+                                "Вид результата в заголовке и коде "
+                                "различается; нужна проверка"
+                            )
+                        add_outcome(text, kind, code, message)
+
+                continue
+
+        prefix = prefix_pattern.fullmatch(line)
+        suffix = suffix_pattern.fullmatch(line)
+        if prefix and len(codes) == len(short_codes) == 1:
+            description = prefix.group("text")
+            matches = [prefix]
+        elif suffix:
+            description = suffix.group("text")
+            matches = [
+                outcome_code.fullmatch(token.strip())
+                for token in re.split(r"[,;]", suffix.group("codes"))
+            ]
+        else:
+            matches = []
+
+        if not matches or len(codes) != len(matches) or not all(matches):
             add_outcome(
                 raw_line.strip(),
                 None,
@@ -307,31 +433,16 @@ def extract_learning_outcomes(text, source_ref, start_index=1):
             )
             continue
 
-        kind = code_kinds.get(match.group("kind"))
-        body_heading = heading_pattern.match(match.group("text"))
-
-        if kind is None:
-            kind = (
-                kinds[body_heading.group(1).casefold()]
-                if body_heading
-                else current_kind
-            )
-
-        message = None
-
-        if current_kind is not None and current_kind != kind:
-            kind = None
-            message = (
-                "Вид результата в заголовке и коде различается; "
-                "нужна проверка"
-            )
-
-        add_outcome(
-            match.group("text"),
-            kind,
-            match.group("code"),
-            message,
-        )
+        for match in matches:
+            kind = code_kinds[match.group("kind")]
+            message = None
+            if current_kind is not None and current_kind != kind:
+                kind = None
+                message = (
+                    "Вид результата в заголовке и коде различается; "
+                    "нужна проверка"
+                )
+            add_outcome(description, kind, match.group("code"), message)
 
     flush()
 
@@ -385,6 +496,10 @@ def extract_results_into(output, document, file_name, is_heading):
     found_table = False
 
     #читаем содержимое найденного раздела
+    # Компетенции, упомянутые кодом без локальной формулировки: сущность не
+    # создаём, но связь «формирует» нужна — иначе граф считает, что РПД не
+    # формирует компетенцию, хотя строка таблицы её явно называет.
+    code_only_refs: dict[str, SourceRef] = {}
     for block in blocks[start + 1:]:
         if isinstance(block, Paragraph):
             level = heading_level(block)
@@ -620,6 +735,13 @@ def extract_results_into(output, document, file_name, is_heading):
                             ),
                             source_ref=ref,
                         ))
+                        if not known_formulations:
+                            # Строка ссылается на компетенцию кодом без локальной
+                            # формулировки (описание живет в других документах).
+                            # Код всё равно определяет принадлежность результатов
+                            # и индикаторов этой строки таблицы.
+                            row_codes.append(competency_code)
+                            code_only_refs.setdefault(competency_code, ref)
                         continue
 
                 if formulation and new_cell:
@@ -782,7 +904,38 @@ def extract_results_into(output, document, file_name, is_heading):
                 source_ref=competency.source_ref,
             ))
 
+        for code, ref in code_only_refs.items():
+            output.relations.append(Relation(
+                src_entity="discipline",
+                src_key=discipline.name,
+                dst_entity="competency",
+                dst_key=code,
+                kind="формирует",
+                source_ref=ref,
+            ))
+
+    _dedupe_relations(output)
     return output
+
+
+def _dedupe_relations(output):
+    """Убрать повторные одинаковые связи дисциплина → компетенция.
+
+    Компетенция может занимать несколько строк таблицы (по строке на индикатор);
+    каждая строка порождала свою связь «формирует», хотя это одна и та же связь.
+    """
+    seen = set()
+    kept = []
+    for relation in output.relations:
+        if relation.kind != "формирует" or relation.src_entity != "discipline":
+            kept.append(relation)
+            continue
+        key = (relation.src_key, relation.dst_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(relation)
+    output.relations = kept
 
 
 def extract_practice_competencies(output, document, file_name, is_heading):
@@ -869,4 +1022,5 @@ def extract_practice_competencies(output, document, file_name, is_heading):
             ),
             source_ref=blocks[0][1],
         ))
+    _dedupe_relations(output)
     return output

@@ -90,6 +90,12 @@ class ReviewActivities:
         result["artifacts"] = artifacts
         return artifacts
 
+    def _note(self, job_id, percent, stage):
+        try:
+            self.repo.note_progress(job_id, percent, stage)
+        except Exception:
+            activity.logger.exception("Не удалось записать прогресс задания")
+
     @activity.defn(name="review_execute_v1")
     def execute(self, request):
         job = self.repo.job_by_id(UUID(request["job_id"]))
@@ -97,6 +103,7 @@ class ReviewActivities:
             return job["report"]["outcome"]
         purpose = job["parameters"]["purpose"]
         is_local = job["parameters"].get("executor", "http") == "local"
+        self._note(job["id"], 10, "анализ документов")
         try:
             if is_local:
                 input_data = job["parameters"]["input"]
@@ -145,6 +152,7 @@ class ReviewActivities:
                         config=input_data["ruleset"]["config"],
                         ruleset=input_data["ruleset"],
                         rule_codes=job["parameters"].get("manual_rule_codes"),
+                        document_ids=job["parameters"].get("manual_document_ids"),
                     )
             else:
                 if not self.settings.analysis_url:
@@ -196,6 +204,7 @@ class ReviewActivities:
                                 raise ValueError("Analysis response exceeds configured limit")
                             chunks.append(chunk)
                         raw = json.loads(b"".join(chunks))
+            self._note(job["id"], 55, "проверка результатов анализа")
             artifacts = []
             if purpose == "prepare":
                 documents = job["parameters"]["input"]["documents"]
@@ -267,6 +276,7 @@ class ReviewActivities:
                     }
                     for item, artifact in zip(raw.get("artifacts", []), artifacts, strict=True)
                 ]
+            self._note(job["id"], 90, "сохранение версии")
             return self.repo.publish(job["id"], result, artifacts, raw_record, raw_hash)
         except httpx.TransportError as error:
             raise ApplicationError("Нет соединения с ML", type="AnalysisTemporary") from error

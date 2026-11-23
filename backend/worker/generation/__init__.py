@@ -1,6 +1,14 @@
 """Генерация выходных документов пакета программы."""
 
-from .docx_patch import DocxPatch, DocxPatchError, patch_docx_bytes, read_area_text
+from .docx_patch import (
+    DocxPatch,
+    DocxPatchError,
+    RowRemoval,
+    patch_docx_bytes,
+    read_area_text,
+    read_row_cells,
+    remove_table_rows,
+)
 from .generator import SourceDocx, generate_docx_package, generate_program_package
 from .matrix_xlsx import (
     DerivedMatrix,
@@ -17,18 +25,23 @@ from .package import (
     build_program_package,
 )
 from .patches import (
+    CONFLICT,
     FieldChange,
     FieldEvidence,
     GenerationMappingError,
     OriginalDocument,
     PlannedPatch,
     SourceEvidence,
+    UnresolvedPatch,
     build_generation_documents,
+    check_patch_applies,
     plan_patches,
     resolve_planned_patches,
+    with_document_changes,
 )
 
 __all__ = [
+    "CONFLICT",
     "DerivedMatrix",
     "DocxPatch",
     "DocxPatchError",
@@ -41,12 +54,15 @@ __all__ = [
     "MatrixRow",
     "OriginalDocument",
     "PlannedPatch",
+    "RowRemoval",
     "SourceDocx",
     "SourceEvidence",
+    "UnresolvedPatch",
     "build_docx_package",
     "build_generation_documents",
     "build_matrix_xlsx",
     "build_program_package",
+    "check_patch_applies",
     "derive_matrix",
     "generate_docx_package",
     "generate_program_package",
@@ -54,5 +70,8 @@ __all__ = [
     "plan_patches",
     "read_area_text",
     "read_matrix_xlsx",
+    "read_row_cells",
+    "remove_table_rows",
     "resolve_planned_patches",
+    "with_document_changes",
 ]

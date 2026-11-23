@@ -688,6 +688,7 @@ h1 {
   color: #252a30;
   font-size: 14px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .choice-source {
@@ -846,6 +847,34 @@ h1 {
   font-size: 10px;
   font-weight: 650;
   white-space: nowrap;
+}
+
+.level-only-decisions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-top: 14px;
+  border: 1px solid #e8ebef;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.level-only-decisions-hint {
+  flex: 1 1 320px;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.level-only-decisions-status {
+  flex-basis: 100%;
+  margin: 0;
+  color: #2f6f4f;
+  font-size: 11px;
 }
 
 .confirm-version {
@@ -1876,8 +1905,7 @@ h1 {
 }
 
 .choice-list {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
   min-width: 0;
   margin: 0;
@@ -1926,7 +1954,6 @@ h1 {
   color: #283b49;
   font-size: 9px;
   font-weight: 550;
-  white-space: nowrap;
 }
 
 .choice-source,
@@ -2026,6 +2053,7 @@ h1 {
   color: #4b5258;
   font-size: 9px;
   line-height: 15px;
+  white-space: pre-line;
 }
 
 .message-result-status {
@@ -2645,6 +2673,12 @@ h1 {
   border-top-color: #e8edf1;
 }
 
+/* Свёрнутый результат парсинга остаётся на странице сверки, чтобы
+   файловый список и ссылки на JSON не пропадали после загрузки сверки. */
+.parse-result-details > div[aria-label="Состояние серверной обработки"] {
+  padding: 4px 0 14px;
+}
+
 .chat-panel {
   height: min(660px, calc(100vh - 350px));
   min-height: 430px;
@@ -2733,6 +2767,8 @@ h1 {
   color: #3d4b5d;
   font-size: 13px;
   line-height: 1.65;
+  /* Ответы агента структурированы переносами строк: сохраняем их. */
+  white-space: pre-line;
 }
 
 .message-result-title {
@@ -3671,9 +3707,13 @@ textarea:focus-visible {
 }
 
 .generation-download-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   min-height: 39px;
   margin-top: 11px;
+  text-decoration: none;
   border: 1px solid #d4dfea;
   border-radius: 8px;
   background: #edf2f8;
@@ -3715,9 +3755,14 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
-.generation-report-links button:hover {
+.generation-report-links button:hover:not(:disabled) {
   border-color: #c9d5e2;
   background: #f7f9fb;
+}
+
+.generation-report-links button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .generation-empty-result {
@@ -3799,6 +3844,67 @@ textarea:focus-visible {
   border-top: 1px solid #edf0f3;
   color: #8792a0;
   font-size: 10px;
+}
+
+.generation-report-title {
+  margin: 4px 0 10px;
+  color: #52657d;
+  font-size: 12px;
+}
+
+.generation-report-title--warning {
+  color: #7a5a12;
+}
+
+.generation-report-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.generation-report-item {
+  padding: 9px 12px;
+  border: 1px solid #edf0f3;
+  border-radius: 8px;
+  color: #4f5d6c;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.generation-report-item--warning {
+  border-color: #f0dcb4;
+  background: #fdf8ec;
+}
+
+.generation-report-details {
+  margin-top: 14px;
+}
+
+.generation-report-details summary {
+  color: #52657d;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.generation-report-details .generation-report-list {
+  margin-top: 10px;
+}
+
+.generation-history-download {
+  color: #2797f5;
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.generation-history-download:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 980px) {
@@ -4056,7 +4162,6 @@ textarea:focus-visible {
   font-size: 13px;
   line-height: 1.5;
 }
-.choice-finding-group .choice-document-count { color: #64748b; font-size: 11px; }
 .choice-sources { margin: 5px 0 2px 30px; color: #526274; font-size: 11px; }
 .choice-sources summary { width: fit-content; cursor: pointer; color: #426581; }
 .choice-sources ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 16px; }
@@ -4155,12 +4260,6 @@ textarea:focus-visible {
 .competency-empty-state, .competency-toolbar-note { font-size:13px; background:#f4f7fa; color:#475569; border-radius:10px; padding:14px; margin:4px 0 14px; }
 .competency-diff-word { background:#ffebad; color:#4b3310; border-radius:3px; padding:1px 2px; }
 .competency-comparison-hint { margin:10px 0 0; font-size:11px; color:#697b8f; }
-.competency-decision-preview { padding:14px; border:1px solid #a6bdd1; border-radius:10px; background:#f1f7fc; margin:12px 0; overflow-wrap:anywhere; }
-.competency-decision-preview strong { color:#1e4d71; font-size:13px; }
-.competency-decision-preview p { margin:8px 0 0; font-size:13px; white-space:pre-wrap; }
-.competency-decision-preview p span { font-weight:700; }
-.competency-decision-preview small { color:#64748b; font-size:11px; }
-.competency-decision-preview .competency-preview-notice { font-size:11px; color:#566d81; }
 .competency-empty-issues { font-size:13px; color:#64748b; padding:10px; list-style:none; }
 .validation-stage-card { padding:16px; margin:12px 0 16px; border:1px solid #cbd9e8; border-radius:12px; background:#f7fafd; }
 .validation-stage-card--complete { border-color:#cfe4d4; background:#f8fcf8; }
@@ -4311,6 +4410,124 @@ textarea:focus-visible {
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* Выбор одного документа РПД для точечной проверки R-11. */
+.optional-rule-document-scope {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px dashed #e1e7ee;
+}
+
+.optional-rule-document-scope label {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  color: #6f829a;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.optional-rule-document-scope select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #d5dce4;
+  border-radius: 8px;
+  background: #fff;
+  color: #263f60;
+  font-size: 12px;
+}
+
+/* Краткие пояснения модели к замечаниям R-11: вердикт + причина одним взглядом. */
+.r11-explanations {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.r11-explanations li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid #e1e7ee;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.r11-verdict {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.r11-verdict--gap { background: #fde8e8; color: #8f2424; }
+.r11-verdict--uncertain { background: #fdf3e0; color: #8a5a12; }
+.r11-verdict--supported { background: #e7f4e8; color: #27653a; }
+.r11-verdict--invalid, .r11-verdict--unknown { background: #e8ebef; color: #4b5563; }
+
+.r11-explanations strong {
+  color: #263f60;
+  font-size: 12px;
+}
+
+.r11-explanations p {
+  margin: 4px 0 0;
+  color: #3f4952;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.r11-outcome-text { margin-top: 6px; }
+
+.r11-outcome-text summary {
+  color: #6f829a;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.r11-outcome-text p {
+  color: #718093;
+}
+
+/* Контекст сравнения: цепочка оценивания и темы, которые рассматривала модель. */
+.r11-context { margin-top: 6px; }
+
+.r11-context-label {
+  display: block;
+  color: #6f829a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.r11-context ul {
+  margin: 3px 0 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+}
+
+.r11-context li {
+  color: #4b5563;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.r11-context li em {
+  color: #263f60;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.r11-context .r11-tool { color: #718093; }
 
 .optional-rule-check-card .secondary-button {
   min-height: 36px;

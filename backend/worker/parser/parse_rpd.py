@@ -182,7 +182,7 @@ def parse_rpd(
             "однозначно распознанную РПД"
         )
 
-    disciplines, discipline_issues = build_disciplines(
+    disciplines, semester_workload, discipline_issues = build_disciplines(
         document,
         file_path.name,
         title_parts,
@@ -208,10 +208,11 @@ def parse_rpd(
         meta=RPDMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpd_docx_v6",
+            parser_config="rpd_docx_v8",
             program_id=program_id,
         ),
         disciplines=disciplines,
+        semester_workload=semester_workload,
     )
     read_title_details(document, title_blocks, output)
 

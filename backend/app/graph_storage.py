@@ -159,13 +159,48 @@ def load_graph(cur, state_id, review=None):
     return row["snapshot"]
 
 
+_BATCH = 2000
+
+
+def _chunks(items):
+    for start in range(0, len(items), _BATCH):
+        yield items[start : start + _BATCH]
+
+
+def _existing_by_id(cur, sql, ids, columns):
+    """Существующие строки по ключу: запрос на пакет вместо запроса на строку.
+
+    Первый столбец — ключ; в саму строку он не входит, чтобы сверка с новыми
+    значениями сравнивала только содержательные поля.
+    """
+    found = {}
+    for chunk in _chunks([UUID(str(value)) for value in ids]):
+        for row in cur.execute(sql, (chunk,)).fetchall():
+            record = row if isinstance(row, dict) else dict(zip(columns, row, strict=True))
+            found[str(record.pop(columns[0]))] = record
+    return found
+
+
+def _insert_many(cur, sql, rows):
+    """Построчная запись конвейером: полный граф — это сотни тысяч строк.
+
+    Каждая строка по-прежнему проходит свои триггеры и внешние ключи; меняется
+    только число обменов с сервером — один на пакет вместо одного на строку.
+    """
+    for chunk in _chunks(rows):
+        cur.executemany(sql, chunk)
+
+
 def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, members=None):
-    data = (
-        snapshot.model_dump(mode="json") if hasattr(snapshot, "model_dump") else deepcopy(snapshot)
-    )
+    if isinstance(snapshot, SnapshotV2):
+        # Экземпляр модели уже прошёл проверку. Повторная валидация снимка с
+        # десятками тысяч свидетельств стоит секунды и результата не меняет.
+        data = snapshot.model_dump(mode="json")
+    else:
+        data = deepcopy(snapshot)
+        if data.get("schema_version", 1) == 2:
+            data = SnapshotV2.model_validate(data).model_dump(mode="json")
     schema = data.get("schema_version", 1)
-    if schema == 2:
-        data = SnapshotV2.model_validate(data).model_dump(mode="json")
     metadata = deepcopy(data.get("metadata", {}))
     if "__parsed_documents" in metadata:
         raise DomainError(422, "Служебное поле metadata зарезервировано")
@@ -204,6 +239,7 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
         (program_id, graph_hash),
     ).fetchall()
     expected = {k: v for k, v in data.items() if k != "review"}
+    expected_digest = digest(expected) if previous else None
     for row in previous:
         candidate = load_graph(cur, row["id"])
         selected_members = cur.execute(
@@ -226,7 +262,7 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
             } != fallback:
                 continue
         if (
-            digest({k: v for k, v in candidate.items() if k != "review"}) == digest(expected)
+            digest({k: v for k, v in candidate.items() if k != "review"}) == expected_digest
             and producer is None
         ):
             return row["id"]
@@ -301,90 +337,123 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 position,
             ),
         )
-    for position, ref in enumerate(data["source_refs"]):
-        existing = cur.execute(
-            "SELECT document_id,artifact_id,section,locator,artifact_locator "
-            "FROM source_refs WHERE id=%s",
-            (ref["id"],),
-        ).fetchone()
-        values = {
-            key: ref.get(key)
-            for key in ("document_id", "artifact_id", "section", "locator", "artifact_locator")
-        }
-        if existing:
-            if digest(
-                {k: str(v) if isinstance(v, UUID) else v for k, v in existing.items()}
-            ) != digest(values):
-                raise DomainError(422, "Правка источника требует нового ID")
-        else:
-            cur.execute(
-                "INSERT INTO "
-                "source_refs(id,program_id,document_id,artifact_id,section,locator,"
-                "artifact_locator) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    ref["id"],
-                    program_id,
-                    ref["document_id"],
-                    ref.get("artifact_id"),
-                    ref.get("section"),
-                    ref["locator"],
-                    ref.get("artifact_locator"),
-                ),
+    refs = data["source_refs"]
+    ref_columns = ("id", "document_id", "artifact_id", "section", "locator", "artifact_locator")
+    stored_refs = _existing_by_id(
+        cur,
+        "SELECT " + ",".join(ref_columns) + " FROM source_refs WHERE id = ANY(%s)",
+        [ref["id"] for ref in refs],
+        ref_columns,
+    )
+    for ref in refs:
+        values = {key: ref.get(key) for key in ref_columns[1:]}
+        existing = stored_refs.get(str(ref["id"]))
+        if existing is not None and digest(
+            {k: str(v) if isinstance(v, UUID) else v for k, v in existing.items()}
+        ) != digest(values):
+            raise DomainError(422, "Правка источника требует нового ID")
+    _insert_many(
+        cur,
+        "INSERT INTO source_refs(id,program_id,document_id,artifact_id,section,locator,"
+        "artifact_locator) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+        [
+            (
+                ref["id"],
+                program_id,
+                ref["document_id"],
+                ref.get("artifact_id"),
+                ref.get("section"),
+                ref["locator"],
+                ref.get("artifact_locator"),
             )
-        cur.execute(
-            "INSERT INTO graph_sources VALUES(%s,%s,%s,%s,%s)",
-            (program_id, state, ref["id"], ref["document_id"], position),
-        )
+            for ref in refs
+            if str(ref["id"]) not in stored_refs
+        ],
+    )
+    _insert_many(
+        cur,
+        "INSERT INTO graph_sources VALUES(%s,%s,%s,%s,%s)",
+        [
+            (program_id, state, ref["id"], ref["document_id"], position)
+            for position, ref in enumerate(refs)
+        ],
+    )
     for kind, items in (("entity", data["entities"]), ("relation", data["relations"])):
-        for position, item in enumerate(items):
-            rev = uuid5(UUID(str(program_id)), kind + ":" + digest(item))
-            table = "entity_revisions" if kind == "entity" else "relation_revisions"
-            exists = cur.execute(f"SELECT 1 FROM {table} WHERE revision_id=%s", (rev,)).fetchone()
-            if not exists:
-                if kind == "entity":
-                    cur.execute(
-                        "INSERT INTO "
-                        "entity_revisions(revision_id,program_id,entity_id,kind,attributes) "
-                        "VALUES(%s,%s,%s,%s,%s)",
-                        (rev, program_id, item["id"], item["kind"], Jsonb(item["attributes"])),
+        revisions = [
+            (item, uuid5(UUID(str(program_id)), kind + ":" + digest(item))) for item in items
+        ]
+        table = "entity_revisions" if kind == "entity" else "relation_revisions"
+        known = _existing_by_id(
+            cur,
+            f"SELECT revision_id FROM {table} WHERE revision_id = ANY(%s)",
+            [rev for _, rev in revisions],
+            ("revision_id",),
+        )
+        fresh, seen = [], set()
+        for item, rev in revisions:
+            if str(rev) in known or str(rev) in seen:
+                continue
+            seen.add(str(rev))
+            fresh.append((item, rev))
+        if kind == "entity":
+            _insert_many(
+                cur,
+                "INSERT INTO entity_revisions(revision_id,program_id,entity_id,kind,attributes) "
+                "VALUES(%s,%s,%s,%s,%s)",
+                [
+                    (rev, program_id, item["id"], item["kind"], Jsonb(item["attributes"]))
+                    for item, rev in fresh
+                ],
+            )
+        else:
+            _insert_many(
+                cur,
+                "INSERT INTO relation_revisions(revision_id,program_id,relation_id,"
+                "source_entity_id,target_entity_id,type,confidence,attributes) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (
+                        rev,
+                        program_id,
+                        item["id"],
+                        item["source_id"],
+                        item["target_id"],
+                        item["type"],
+                        item.get("confidence"),
+                        Jsonb(item.get("attributes", {})),
                     )
-                else:
-                    cur.execute(
-                        "INSERT INTO "
-                        "relation_revisions(revision_id,program_id,relation_id,source_entity_id,"
-                        "target_entity_id,type,confidence,attributes) "
-                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                        (
-                            rev,
-                            program_id,
-                            item["id"],
-                            item["source_id"],
-                            item["target_id"],
-                            item["type"],
-                            item.get("confidence"),
-                            Jsonb(item.get("attributes", {})),
-                        ),
-                    )
-                for order, ref_id in enumerate(item["source_ref_ids"]):
-                    cur.execute(
-                        "INSERT INTO revision_sources VALUES(%s,%s,%s,%s,%s)",
-                        (
-                            program_id,
-                            rev if kind == "entity" else None,
-                            rev if kind == "relation" else None,
-                            ref_id,
-                            order,
-                        ),
-                    )
-            if kind == "entity":
-                cur.execute(
-                    "INSERT INTO graph_entities VALUES(%s,%s,%s,%s,%s)",
-                    (program_id, state, item["id"], rev, position),
+                    for item, rev in fresh
+                ],
+            )
+        _insert_many(
+            cur,
+            "INSERT INTO revision_sources VALUES(%s,%s,%s,%s,%s)",
+            [
+                (
+                    program_id,
+                    rev if kind == "entity" else None,
+                    rev if kind == "relation" else None,
+                    ref_id,
+                    order,
                 )
-            else:
-                cur.execute(
-                    "INSERT INTO graph_relations VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                for item, rev in fresh
+                for order, ref_id in enumerate(item["source_ref_ids"])
+            ],
+        )
+        if kind == "entity":
+            _insert_many(
+                cur,
+                "INSERT INTO graph_entities VALUES(%s,%s,%s,%s,%s)",
+                [
+                    (program_id, state, item["id"], rev, position)
+                    for position, (item, rev) in enumerate(revisions)
+                ],
+            )
+        else:
+            _insert_many(
+                cur,
+                "INSERT INTO graph_relations VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                [
                     (
                         program_id,
                         state,
@@ -393,17 +462,30 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                         item["source_id"],
                         item["target_id"],
                         position,
-                    ),
-                )
-    for position, link in enumerate(data.get("source_links", [])):
-        fact_id = uuid5(UUID(str(program_id)), "source-link-fact:" + digest(link))
-        entity = link["target_id"] if link["target_kind"] == "entity" else None
-        relation = link["target_id"] if link["target_kind"] == "relation" else None
-        previous = cur.execute(
-            "SELECT entity_id,relation_id,source_ref_id,field_path,observed_value "
-            "FROM source_links WHERE id=%s",
-            (fact_id,),
-        ).fetchone()
+                    )
+                    for position, (item, rev) in enumerate(revisions)
+                ],
+            )
+    links = data.get("source_links", [])
+    facts = [
+        (
+            link,
+            uuid5(UUID(str(program_id)), "source-link-fact:" + digest(link)),
+            link["target_id"] if link["target_kind"] == "entity" else None,
+            link["target_id"] if link["target_kind"] == "relation" else None,
+        )
+        for link in links
+    ]
+    link_columns = (
+        "id", "entity_id", "relation_id", "source_ref_id", "field_path", "observed_value"
+    )
+    stored_links = _existing_by_id(
+        cur,
+        "SELECT " + ",".join(link_columns) + " FROM source_links WHERE id = ANY(%s)",
+        [fact_id for _, fact_id, _, _ in facts],
+        link_columns,
+    )
+    for link, fact_id, entity, relation in facts:
         values = dict(
             entity_id=entity,
             relation_id=relation,
@@ -411,15 +493,16 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
             field_path=link["field_path"],
             observed_value=link["observed_value"],
         )
-        if previous and digest(
+        previous = stored_links.get(str(fact_id))
+        if previous is not None and digest(
             {k: str(v) if isinstance(v, UUID) else v for k, v in previous.items()}
         ) != digest(values):
             raise DomainError(422, "Правка свидетельства требует нового ID")
-        cur.execute(
-            "INSERT INTO "
-            "source_links(id,program_id,entity_id,relation_id,source_ref_id,field_path,"
-            "observed_value) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING",
+    _insert_many(
+        cur,
+        "INSERT INTO source_links(id,program_id,entity_id,relation_id,source_ref_id,field_path,"
+        "observed_value) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING",
+        [
             (
                 fact_id,
                 program_id,
@@ -428,10 +511,14 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 link["source_ref_id"],
                 link["field_path"],
                 Jsonb(link["observed_value"]),
-            ),
-        )
-        cur.execute(
-            "INSERT INTO graph_source_links VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            )
+            for link, fact_id, entity, relation in facts
+        ],
+    )
+    _insert_many(
+        cur,
+        "INSERT INTO graph_source_links VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+        [
             (
                 program_id,
                 state,
@@ -441,8 +528,10 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 link["source_ref_id"],
                 position,
                 link["id"],
-            ),
-        )
+            )
+            for position, (link, fact_id, entity, relation) in enumerate(facts)
+        ],
+    )
     assembled = load_graph(cur, state, data.get("review"))
     if digest(assembled) != digest(data):
         raise ValueError("Граф не восстанавливает исходный контракт без потерь")
@@ -517,12 +606,14 @@ def journal(cur, program_id, version_id, before, after, *, actor_type="system", 
             after.get(key),
             "/" + key,
         )
-    for position, (kind, identity, path, action, old, new) in enumerate(changes):
-        cur.execute(
-            "INSERT INTO "
-            "change_log(id,program_id,version_id,position,target_kind,target_id,field_path,"
-            "action,old_value,new_value,actor_type,actor_id) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+    # Первая сборка полного графа добавляет в журнал строку на каждую сущность
+    # и связь — это тысячи записей, поэтому журнал пишется тем же конвейером.
+    _insert_many(
+        cur,
+        "INSERT INTO change_log(id,program_id,version_id,position,target_kind,target_id,"
+        "field_path,action,old_value,new_value,actor_type,actor_id) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        [
             (
                 uuid4(),
                 program_id,
@@ -536,5 +627,7 @@ def journal(cur, program_id, version_id, before, after, *, actor_type="system", 
                 new,
                 actor_type,
                 actor_id,
-            ),
-        )
+            )
+            for position, (kind, identity, path, action, old, new) in enumerate(changes)
+        ],
+    )

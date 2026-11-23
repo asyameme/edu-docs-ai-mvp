@@ -43,9 +43,11 @@ class TestProgramDocuments(unittest.TestCase):
             ["MLOps / Data Scientist", "Руководитель группы разработки"],
         )
         counts = Counter(item.code for item in ckmv.competencies)
-        self.assertEqual(len(counts), 29)
-        self.assertEqual(counts["ПКП-9-ППК-ДА2"], 2)
-        self.assertEqual(counts["ПКП-10-ППК-ДА3"], 2)
+        # Порядковый номер ЦКМВ убирается из кода (ПКП-9-ППК-ДА2 -> ПКП-ППК-ДА2),
+        # поэтому повторы схлопываются в один код с тем же числом записей.
+        self.assertEqual(len(counts), 27)
+        self.assertEqual(counts["ПКП-ППК-ДА2"], 2)
+        self.assertEqual(counts["ПКП-ППК-ДА3"], 2)
         self.assertEqual(len(ckmv.indicators), 85)
         self.assertEqual(len(ckmv.learning_outcomes), 409)
         self.assertEqual(len(ckmv.indicator_outcome_links), 409)
@@ -53,7 +55,7 @@ class TestProgramDocuments(unittest.TestCase):
         roles = {role.local_id: role.name for role in ckmv.professional_roles}
         links = {(roles[item.role_id], item.competency_code) for item in ckmv.role_competency_links}
         self.assertIn(("MLOps / Data Scientist", "ПКП-МО-1"), links)
-        self.assertIn(("Руководитель группы разработки", "ПКП-23-РГ-4"), links)
+        self.assertIn(("Руководитель группы разработки", "ПКП-РГ-4"), links)
         self.assertTrue(all(not code.startswith("УНК-") for _, code in links))
 
     def test_two_outcomes_in_one_cell_keep_separate_sources(self):
@@ -69,7 +71,7 @@ class TestProgramDocuments(unittest.TestCase):
         ids = {item.local_id for item in outcomes}
         self.assertEqual(
             [link.indicator_code for link in self.ckmv.indicator_outcome_links if link.learning_outcome_id in ids],
-            ["ПКП-2-ППК-Р2.3", "ПКП-2-ППК-Р2.3"],
+            ["ПКП-ППК-Р2.3", "ПКП-ППК-Р2.3"],
         )
 
     def test_deleted_block_and_changed_outcome_codes_remain_visible(self):
@@ -85,10 +87,10 @@ class TestProgramDocuments(unittest.TestCase):
     def test_changed_parent_code_remains_visible(self):
         output = parse_ckmv(ROOT / "tests/stage_1/case_7/ЦКМВ.docx")
         codes = {item.code for item in output.competencies}
-        self.assertIn("ПКП-23-РГ-3", codes)
-        self.assertNotIn("ПКП-23-РГ-4", codes)
-        indicator = next(item for item in output.indicators if item.code == "ПКП-23-РГ-4.1")
-        self.assertEqual(indicator.competency_code, "ПКП-23-РГ-3")
+        self.assertIn("ПКП-РГ-3", codes)
+        self.assertNotIn("ПКП-РГ-4", codes)
+        indicator = next(item for item in output.indicators if item.code == "ПКП-РГ-4.1")
+        self.assertEqual(indicator.competency_code, "ПКП-РГ-3")
         self.assertTrue(any(
             issue.category == "unexpected_format" and issue.source_ref.row == indicator.source_ref.row
             for issue in output.parse_issues

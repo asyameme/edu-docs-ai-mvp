@@ -15,6 +15,49 @@ def normalize(text):
     return " ".join(text.casefold().split())
 
 
+def normalize_competency_code(code: str) -> str:
+    """Убрать порядковый номер ЦКМВ/характеристики из кода компетенции.
+
+    ЦКМВ и характеристика нумеруют компетенции сквозным порядком и вставляют
+    номер в код (``ПКП-17-ППК-ОС4``), а учебный план и РПД используют код без
+    него (``ПКП-ППК-ОС4``). Номер убирается только когда он стоит отдельным
+    сегментом сразу после префикса и за ним идёт буквенный сегмент, поэтому
+    обычные коды вида ``УК-1`` или ``ПКП-МО-1`` не меняются.
+    """
+    parts = code.split("-")
+    if (
+        len(parts) >= 3
+        and parts[1].isdigit()
+        and parts[2][:1].isalpha()
+        and parts[2][:1].isupper()
+    ):
+        return _normalize_universal_code("-".join(parts[:1] + parts[2:]))
+    return _normalize_universal_code(code)
+
+
+def _normalize_universal_code(code: str) -> str:
+    """Выровнять код универсальной компетенции: УНК-3 и УНК-03 — один код.
+
+    Учебный план и РПД пишут ``ПКП-УНК-03``, ЦКМВ — ``УНК-03``, отдельные РПД —
+    ``ПКП-УНК-3``. Это одна и та же компетенция, поэтому код приводится к
+    ``ПКП-УНК-NN`` с выровненным двузначным номером.
+    """
+    match = re.fullmatch(r"(?:ПКП-)?УНК-(\d{1,2})", code)
+    if match is None:
+        return code
+    return f"ПКП-УНК-{int(match.group(1)):02d}"
+
+
+normalize_universal_code = _normalize_universal_code
+
+
+def normalize_indicator_code(code: str) -> str:
+    """Нормализовать код индикатора, сохранив числовые суффиксы."""
+    base, *suffixes = code.split(".")
+    normalized = normalize_competency_code(base)
+    return ".".join([normalized, *suffixes])
+
+
 def heading_level(paragraph):
     """Определить уровень заголовка по номеру."""
     text = paragraph.text.strip()
@@ -122,6 +165,28 @@ def finalize_output(output, document):
                 candidates = headings[ref.section]
                 if len(candidates) == 1:
                     ref.paragraph_index = indices[candidates[0]]
+
+    seen_issues = set()
+    unique_issues = []
+
+    for issue in output.parse_issues:
+        ref = issue.source_ref
+        key = (
+            issue.message,
+            issue.severity,
+            ref.file if ref else None,
+            ref.table if ref else None,
+            ref.row if ref else None,
+            ref.col if ref else None,
+            ref.paragraph_index if ref else None,
+        )
+
+        if key in seen_issues:
+            continue
+        seen_issues.add(key)
+        unique_issues.append(issue)
+
+    output.parse_issues = unique_issues
     return type(output).model_validate(output.model_dump())
 
 
@@ -214,11 +279,20 @@ def read_section(
             if (
                 keep_numbered_items
                 and current_level == 1
-                and not normalize(block.text).startswith("раздел ")
-                and not re.fullmatch(
-                    r"(?:heading|заголовок)\s*\d+",
-                    block.style.name,
-                    re.IGNORECASE,
+                and (
+                    (
+                        not normalize(block.text).startswith("раздел ")
+                        and not re.fullmatch(
+                            r"(?:heading|заголовок)\s*\d+",
+                            block.style.name,
+                            re.IGNORECASE,
+                        )
+                    )
+                    or re.fullmatch(
+                        r"(?:задание|задача|вопрос|билет)\s*№?\s*\d+\s*[.):]?",
+                        normalize(block.text),
+                        re.IGNORECASE,
+                    )
                 )
             ):
                 current_level = None

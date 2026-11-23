@@ -23,6 +23,7 @@ from app.review_contract import (
     CheckCreate,
     CheckResult,
     ConfirmCreate,
+    DecisionBatchCreate,
     DecisionCreate,
     ReviewCreate,
 )
@@ -55,7 +56,9 @@ async def job_state(repo, client, program_id, job_id):
         "input_version_id": row["input_version_id"],
         "output_version_id": row["output_version_id"],
         "status": row["report"].get("outcome", "pending"),
-        "progress": 100 if "outcome" in row["report"] else 0,
+        "progress": 100
+        if "outcome" in row["report"]
+        else int(row["report"].get("progress_percent") or 0),
         "message": row["report"].get("message"),
     }
     if "outcome" not in row["report"]:
@@ -84,7 +87,11 @@ async def job_state(repo, client, program_id, job_id):
                     )
                 else:
                     result["status"] = state["status"]
-                result["progress"] = state["progress"]
+                # Контрольные точки activity точнее workflow-заглушки (5/100).
+                result["progress"] = max(
+                    int(state["progress"]),
+                    int(row["report"].get("progress_percent") or 0),
+                )
         except RPCError as error:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise DomainError(503, "Текущий прогресс анализа временно недоступен") from error
@@ -192,6 +199,17 @@ def decide(
     repo: RepoDep,
 ) -> VersionRead:
     return ReviewRepository(repo.pool).decide(program_id, review_id, operation_key, body)
+
+
+@router.post("/reviews/{review_id}/decisions/batch", status_code=201)
+def decide_batch(
+    program_id: UUID,
+    review_id: UUID,
+    body: DecisionBatchCreate,
+    operation_key: OperationKey,
+    repo: RepoDep,
+) -> VersionRead:
+    return ReviewRepository(repo.pool).decide_many(program_id, review_id, operation_key, body)
 
 
 @router.post("/reviews/{review_id}/checks", status_code=202)

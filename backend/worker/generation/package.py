@@ -79,7 +79,9 @@ def _validate_xlsx(document: GeneratedXlsx) -> None:
         raise GenerationPackageError(f"{document.file_name}: файл не является корректным XLSX") from exc
 
 
-def build_program_package(documents: Sequence[GeneratedPackageFile]) -> bytes:
+def build_program_package(
+    documents: Sequence[GeneratedPackageFile], *, manual_notes: Sequence[str] = ()
+) -> bytes:
     """Return a ZIP archive containing generated DOCX and XLSX documents."""
 
     if not documents:
@@ -102,6 +104,15 @@ def build_program_package(documents: Sequence[GeneratedPackageFile]) -> bytes:
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as package:
         for document in documents:
             package.writestr(document.file_name, document.content)
+        if manual_notes:
+            report = (
+                "Правки, которые нужно внести вручную\n\n"
+                "Матрица компетенций построена по согласованному графу. "
+                "Перечисленные ниже изменения остались в исходных документах без правки.\n\n"
+                + "\n".join(f"• {note}" for note in manual_notes)
+                + "\n"
+            )
+            package.writestr("Отчёт о сборке.txt", report.encode("utf-8-sig"))
     return output.getvalue()
 
 

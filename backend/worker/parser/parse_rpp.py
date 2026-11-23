@@ -134,7 +134,7 @@ def parse_rpp(file_path, *, program_id: str | None = None) -> RPPOutput:
         meta=RPPMeta(
             file_name=file_path.name,
             file_hash=sha256(raw).hexdigest(),
-            parser_config="rpp_docx_v6",
+            parser_config="rpp_docx_v7",
             program_id=program_id,
         ),
         disciplines=[discipline],
