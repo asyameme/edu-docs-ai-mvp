@@ -27,12 +27,15 @@ def pointer_parts(pointer):
 
 def content_hash(snapshot):
     data = (
-        snapshot.model_dump(mode="json") if isinstance(snapshot, SnapshotV2) else deepcopy(snapshot)
+        snapshot.model_dump(mode="json") if isinstance(snapshot, SnapshotV2) else dict(snapshot)
     )
     data.pop("review", None)
     refs = {ref["id"]: {k: v for k, v in ref.items() if k != "id"} for ref in data["source_refs"]}
-    for member in [*data["entities"], *data["relations"]]:
-        member["source_ref_ids"] = [refs[key] for key in member["source_ref_ids"]]
+    for field in ("entities", "relations"):
+        data[field] = [
+            {**member, "source_ref_ids": [refs[key] for key in member["source_ref_ids"]]}
+            for member in data[field]
+        ]
     data["source_refs"] = list(refs.values())
     data["source_links"] = [
         {

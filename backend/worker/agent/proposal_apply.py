@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -239,8 +240,17 @@ def plan_approved_changes(snapshot: SnapshotV2, proposal: ChangeProposal) -> lis
 def apply_change(snapshot: SnapshotV2, change: ApprovedChange) -> SnapshotV2:
     """Новый снимок с одной применённой правкой; исходный снимок не меняется."""
 
-    updated = snapshot.model_copy(deep=True)
-    attributes = _resolve_target(updated, change.target_kind, change.target_id)
+    field = "entities" if change.target_kind == "entity" else "relations"
+    members = list(getattr(snapshot, field))
+    target_index = next(
+        (index for index, item in enumerate(members) if item.id == change.target_id), None
+    )
+    if target_index is None:
+        raise ProposalApplicationError(
+            f"Цель правки ({change.target_kind} {change.target_id}) отсутствует в выбранной версии"
+        )
+    target = members[target_index]
+    attributes = deepcopy(target.attributes)
     tokens = _pointer_tokens(change.field_path)[1:]
     value: object = attributes
     for token in tokens[:-1]:
@@ -250,7 +260,8 @@ def apply_change(snapshot: SnapshotV2, change: ApprovedChange) -> SnapshotV2:
         value[int(last)] = change.new_value
     else:
         value[last] = change.new_value
-    return updated
+    members[target_index] = target.model_copy(update={"attributes": attributes})
+    return snapshot.model_copy(update={field: members})
 
 
 def _evidence_with_unit(snapshot: SnapshotV2, change) -> list[FieldEvidence]:

@@ -16,4 +16,9 @@ GRANT DELETE ON graph_states,graph_entities,graph_relations,graph_documents,
     graph_sources,graph_source_links TO :"runtime_user";
 GRANT SELECT,INSERT ON chat_sessions,chat_turns TO :"runtime_user";
 GRANT UPDATE ON chat_sessions,chat_turns TO :"runtime_user";
+GRANT SELECT,INSERT ON graph_document_selections,revision_evidence_sets,graph_evidence_orders,
+    graph_state_contents,sealed_entity_revisions,sealed_relation_revisions TO :"runtime_user";
+GRANT SELECT,INSERT ON graph_snapshot_cache,graph_version_snapshots TO :"runtime_user";
+GRANT SELECT,INSERT,UPDATE,DELETE ON graph_entities_legacy,graph_relations_legacy,
+    graph_documents_legacy,graph_sources_legacy,graph_source_links_legacy TO :"runtime_user";
 COMMIT;

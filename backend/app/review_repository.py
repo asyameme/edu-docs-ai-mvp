@@ -3,6 +3,7 @@
 import json
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import UUID, uuid4, uuid5
 
 from psycopg.rows import dict_row
@@ -10,9 +11,9 @@ from psycopg.types.json import Jsonb
 
 from app.config import get_settings
 from app.document_reconciliation import apply_document_mutations
-from app.domain import SnapshotV2
+from app.domain import ReviewConfirmation, ReviewDecision, SnapshotV2
 from app.errors import DomainError
-from app.graph_storage import hydrate_job, pack_tree
+from app.graph_storage import canonical_bytes, hydrate_job, pack_tree
 from app.repository import Repository, limit_lock_wait
 from app.review_contract import CheckResult, DecisionBatchCreate
 from app.review_logic import (
@@ -32,6 +33,14 @@ from app.review_storage import insert_issues, insert_version, previous_version
 
 def attach_document_artifacts(snapshot_data, artifacts):
     by_document = {str(item["document_id"]): str(item["id"]) for item in artifacts}
+    if isinstance(snapshot_data, SnapshotV2):
+        refs = [
+            item.model_copy(update={"artifact_id": UUID(by_document[str(item.document_id)]),
+                                    "artifact_locator": "document"})
+            if str(item.document_id) in by_document else item
+            for item in snapshot_data.source_refs
+        ]
+        return snapshot_data.model_copy(update={"source_refs": refs})
     for source in snapshot_data["source_refs"]:
         artifact_id = by_document.get(str(source["document_id"]))
         if artifact_id:
@@ -50,6 +59,50 @@ def graph_build_issues(issues):
         for item in issues
         if item.get("category") == "unresolved_relation"
     ]
+
+
+def pack_check_documents(cur, program_id, documents):
+    """Заменить разборы ссылками одним поиском артефактов на весь пакет."""
+    hashes = [
+        sha256(canonical_bytes(item["parsed"])).hexdigest()
+        if isinstance(item.get("parsed"), dict)
+        and set(item["parsed"]) != {"__parsed_artifact"}
+        else None
+        for item in documents
+    ]
+    wanted = [
+        (UUID(str(item["document_id"])), checksum)
+        for item, checksum in zip(documents, hashes, strict=True)
+        if checksum is not None
+    ]
+    if not wanted:
+        return documents
+    rows = cur.execute(
+        """WITH requested AS (
+               SELECT * FROM unnest(%s::uuid[],%s::text[]) AS x(document_id,sha256)
+           )
+           SELECT DISTINCT ON (r.document_id,r.sha256)
+               r.document_id,r.sha256,a.id
+           FROM requested r JOIN document_artifacts a
+             ON a.program_id=%s AND a.document_id=r.document_id
+             AND a.sha256=r.sha256 AND a.kind='parsed_json'
+           ORDER BY r.document_id,r.sha256,a.created_at DESC,a.id""",
+        ([item[0] for item in wanted], [item[1] for item in wanted], program_id),
+    ).fetchall()
+    artifacts = {
+        (str(row["document_id"]), row["sha256"]): str(row["id"])
+        for row in rows
+    }
+    packed = []
+    for item, checksum in zip(documents, hashes, strict=True):
+        if checksum is None:
+            packed.append(item)
+            continue
+        artifact_id = artifacts.get((str(item["document_id"]), checksum))
+        if artifact_id is None:
+            raise DomainError(422, "Вход проверки не связан с сохранённым разбором")
+        packed.append({**item, "parsed": {"__parsed_artifact": artifact_id}})
+    return packed
 
 
 class ReviewRepository:
@@ -109,6 +162,8 @@ class ReviewRepository:
         self, program_id, key, body, *, purpose="prepare", review_id=None,
         allow_historical=False,
         connection=None,
+        snapshot_override=None,
+        review_override=None,
     ):
         request = body.model_dump(mode="json", exclude_none=True)
         fingerprint = digest({"operation": purpose, "review_id": str(review_id), "body": request})
@@ -163,7 +218,9 @@ class ReviewRepository:
                             raise DomainError(409, "Сначала завершите согласование текущего пакета")
                         required = {
                             item["id"]
-                            for item in previous_review["report"].get("result", {}).get("issues", [])
+                            for item in previous_review["report"]
+                            .get("result", {})
+                            .get("issues", [])
                             if item.get("requires_decision")
                         }
                         decided = {
@@ -223,14 +280,42 @@ class ReviewRepository:
                     parameters["implementation_revision"] = validation_implementation_revision()
                 version_id = current
             else:
-                review = self.require_review(cur, program_id, review_id)
+                review = review_override or self.require_review(cur, program_id, review_id)
+                if (
+                    str(review["id"]) != str(review_id)
+                    or str(review["program_id"]) != str(program_id)
+                ):
+                    raise DomainError(404, "Проверка из другой подготовки")
                 executor = review["parameters"].get("executor", "http")
                 parameters["executor"] = executor
                 if body.version_id != current and not allow_historical:
                     raise DomainError(409, "Проверять нужно текущую версию")
-                snapshot = self.checked_snapshot(
-                    self.version(cur, program_id, body.version_id), review_id
+                stored_version = Repository.require(
+                    cur.execute(
+                        "SELECT graph_state_id,review FROM program_versions "
+                        "WHERE program_id=%s AND id=%s",
+                        (program_id, body.version_id),
+                    ).fetchone()
                 )
+                if snapshot_override is None:
+                    snapshot = self.checked_snapshot(
+                        self.version(cur, program_id, body.version_id), review_id
+                    )
+                else:
+                    snapshot = snapshot_override
+                    if (
+                        snapshot.review is None
+                        or snapshot.review.review_id != review_id
+                    ):
+                        raise DomainError(404, "Версия не принадлежит этой подготовке")
+                    if not snapshot.review.graph_ready:
+                        raise DomainError(
+                            409, "Граф ещё не собран из выбранных значений документов"
+                        )
+                    if snapshot.review.confirmation:
+                        raise DomainError(409, "Подтверждённую версию нельзя проверять повторно")
+                if stored_version["graph_state_id"] is None:
+                    raise DomainError(409, "У проверяемой версии нет сохранённого графа")
                 source_documents = review["parameters"]["input"]["documents"]
                 ruleset = review["report"]["result"]["ruleset"]
                 if executor == "local":
@@ -288,7 +373,9 @@ class ReviewRepository:
                             "Выбор документа допустим только для ручной проверки R-11",
                         )
                     known = {
-                        str(item["document_id"]): (item.get("parsed") or {}).get("meta", {}).get("doc_type")
+                        str(item["document_id"]): (item.get("parsed") or {})
+                        .get("meta", {})
+                        .get("doc_type")
                         for item in source_documents
                     }
                     unknown = [str(value) for value in document_ids if str(value) not in known]
@@ -302,12 +389,18 @@ class ReviewRepository:
                             "Проверка по документу доступна только для РПД этого пакета",
                         )
                     parameters["manual_document_ids"] = [str(value) for value in document_ids]
+                # Снимок уже запечатан в версии. Передаём ссылку на состояние,
+                # чтобы pack_tree не собирал весь граф повторно в той же транзакции.
+                snapshot_reference = {
+                    "__graph_state": str(stored_version["graph_state_id"]),
+                    "review": stored_version["review"],
+                }
                 parameters.update(
                     content_hash=content_hash(snapshot),
                     ruleset=ruleset,
                     project_check_documents=(review["parameters"].get("schema_version") == 2),
                     input={
-                        "snapshot": snapshot.model_dump(mode="json"),
+                        "snapshot": snapshot_reference,
                         "ruleset": ruleset,
                         **({"rule_codes": list(rule_codes)} if rule_codes is not None else {}),
                         **({"document_ids": [str(value) for value in document_ids]}
@@ -319,11 +412,16 @@ class ReviewRepository:
                 )
                 version_id = body.version_id
             job_id = uuid4()
-            size = len(json.dumps(parameters, ensure_ascii=False, allow_nan=False).encode())
             # Local checks are stored as packed rows and Temporal carries only the
             # job ID. The JSON request limit applies only to the external analyzer.
-            if executor != "local" and size > self.settings.analysis_max_request_bytes:
-                raise DomainError(413, "Вход анализа превышает настроенный предел JSON")
+            if executor != "local":
+                size = len(json.dumps(parameters, ensure_ascii=False, allow_nan=False).encode())
+                if size > self.settings.analysis_max_request_bytes:
+                    raise DomainError(413, "Вход анализа превышает настроенный предел JSON")
+            if purpose == "check":
+                parameters["input"]["documents"] = pack_check_documents(
+                    cur, program_id, parameters["input"]["documents"]
+                )
             if purpose == "prepare":
                 parameters["review_id"] = str(job_id)
             cur.execute(
@@ -479,6 +577,12 @@ class ReviewRepository:
                         for item in job["parameters"]["input"]["documents"]
                     }
                     if decisions_pending:
+                        from app.graph_composition import warm_local_review
+
+                        # Локальные исходные наблюдения неизменяемы; общий состав
+                        # готовится в фоновой activity, до первого ответа пользователя.
+                        if not result.get("artifacts"):
+                            warm_local_review(cur, program_id, job, original_documents, output_id)
                         graph_data = {
                             "schema_version": 2,
                             "metadata": {},
@@ -680,28 +784,31 @@ class ReviewRepository:
                     ]
                     graph_data, build_issues = to_snapshot_v2(
                         program_id, files, original_files=documents,
-                        relation_origins=relation_origins,
+                        relation_origins=relation_origins, return_model=True,
                     )
                     build_errors = graph_build_issues(build_issues)
                     if build_errors:
                         graph_ready = False
                         graph_data = snapshot
                     else:
-                        attach_document_artifacts(
+                        graph_data = attach_document_artifacts(
                             graph_data, review["report"]["result"].get("artifacts", [])
                         )
                 else:
                     graph_data = snapshot
-                state = (
-                    graph_data.model_dump(mode="json")
-                    if isinstance(graph_data, SnapshotV2)
-                    else SnapshotV2.model_validate(graph_data).model_dump(mode="json")
-                )
-                if state["review"] is None:
-                    state["review"] = snapshot.review.model_dump(mode="json")
-                state["review"]["graph_ready"] = graph_ready
-                state["review"]["decisions"] = choices
-                next_snapshot = SnapshotV2.model_validate(state)
+                if isinstance(graph_data, SnapshotV2):
+                    review_state = snapshot.review.model_copy(update={
+                        "graph_ready": graph_ready,
+                        "decisions": [ReviewDecision.model_validate(item) for item in choices],
+                    })
+                    next_snapshot = graph_data.model_copy(update={"review": review_state})
+                else:
+                    state = SnapshotV2.model_validate(graph_data).model_dump(mode="json")
+                    if state["review"] is None:
+                        state["review"] = snapshot.review.model_dump(mode="json")
+                    state["review"]["graph_ready"] = graph_ready
+                    state["review"]["decisions"] = choices
+                    next_snapshot = SnapshotV2.model_validate(state)
                 version = insert_version(
                     cur,
                     program_id,
@@ -712,6 +819,7 @@ class ReviewRepository:
                     fingerprint=fingerprint,
                     actor_type="user",
                     actor_id=body.signature,
+                    before_snapshot=snapshot,
                 )
                 review_result = review["report"].get("result", {})
                 review_result["graph_ready"] = graph_ready
@@ -756,6 +864,7 @@ class ReviewRepository:
                 fingerprint=fingerprint,
                 actor_type="user",
                 actor_id=body.signature,
+                before_snapshot=snapshot,
             )
 
     def decide_many(self, program_id, review_id, key, body: DecisionBatchCreate):
@@ -871,30 +980,32 @@ class ReviewRepository:
                     files,
                     original_files=documents,
                     relation_origins=relation_origins,
+                    return_model=True,
                 )
                 build_errors = graph_build_issues(build_issues)
                 if build_errors:
                     graph_ready = False
                     graph_data = snapshot
                 else:
-                    attach_document_artifacts(
+                    graph_data = attach_document_artifacts(
                         graph_data, review["report"]["result"].get("artifacts", [])
                     )
             else:
                 graph_data = snapshot
 
-            state = (
-                graph_data.model_dump(mode="json")
-                if isinstance(graph_data, SnapshotV2)
-                else SnapshotV2.model_validate(graph_data).model_dump(mode="json")
-            )
-            # Собранный граф не несёт контекста подготовки: как и в decide, берём его
-            # из прежней версии, иначе последний пакетный выбор падает до записи.
-            if state["review"] is None:
-                state["review"] = snapshot.review.model_dump(mode="json")
-            state["review"]["graph_ready"] = graph_ready
-            state["review"]["decisions"] = choices
-            next_snapshot = SnapshotV2.model_validate(state)
+            if isinstance(graph_data, SnapshotV2):
+                review_state = snapshot.review.model_copy(update={
+                    "graph_ready": graph_ready,
+                    "decisions": [ReviewDecision.model_validate(item) for item in choices],
+                })
+                next_snapshot = graph_data.model_copy(update={"review": review_state})
+            else:
+                state = SnapshotV2.model_validate(graph_data).model_dump(mode="json")
+                if state["review"] is None:
+                    state["review"] = snapshot.review.model_dump(mode="json")
+                state["review"]["graph_ready"] = graph_ready
+                state["review"]["decisions"] = choices
+                next_snapshot = SnapshotV2.model_validate(state)
             version = insert_version(
                 cur,
                 program_id,
@@ -905,6 +1016,7 @@ class ReviewRepository:
                 fingerprint=fingerprint,
                 actor_type="user",
                 actor_id=body.signature,
+                before_snapshot=snapshot,
             )
             review_result = review["report"].get("result", {})
             review_result["graph_ready"] = graph_ready
@@ -957,8 +1069,10 @@ class ReviewRepository:
                 or checked["parameters"].get("manual_rule_codes") is not None
                 or checked["input_version_id"] != current
                 or checked["report"].get("outcome") != "completed"
-                or checked["parameters"].get("content_hash") != content_hash(snapshot)
             ):
+                raise DomainError(409, "Нужна завершённая проверка точной текущей версии")
+            checked_snapshot_hash = content_hash(snapshot)
+            if checked["parameters"].get("content_hash") != checked_snapshot_hash:
                 raise DomainError(409, "Нужна завершённая проверка точной текущей версии")
             result = CheckResult.model_validate(
                 project_legacy_review_result(checked["report"]["result"])
@@ -983,19 +1097,22 @@ class ReviewRepository:
             accepted = set(body.accepted_warning_ids)
             if accepted != warnings or len(accepted) != len(body.accepted_warning_ids):
                 raise DomainError(409, "Нужно явно принять актуальные предупреждения")
-            hash_before = content_hash(snapshot)
-            state = snapshot.model_dump(mode="json")
-            state["review"]["confirmation"] = {
-                "checked_version_id": str(current),
-                "check_job_id": str(body.check_job_id),
-                "content_hash": hash_before,
-                "accepted_warning_ids": [str(v) for v in body.accepted_warning_ids],
-                "confirmed_at": datetime.now(UTC).isoformat(),
-                "author": body.signature,
-            }
-            snapshot = SnapshotV2.model_validate(state)
+            hash_before = checked_snapshot_hash
+            before_snapshot = snapshot
+            confirmation = ReviewConfirmation(
+                checked_version_id=current,
+                check_job_id=body.check_job_id,
+                content_hash=hash_before,
+                accepted_warning_ids=body.accepted_warning_ids,
+                confirmed_at=datetime.now(UTC),
+                author=body.signature,
+            )
+            review_state = snapshot.review.model_copy(update={"confirmation": confirmation})
+            # Меняется только состояние подтверждения; неизменённый граф разделяется с
+            # прежней моделью, поэтому его повторно валидировать и хэшировать не требуется.
+            snapshot = snapshot.model_copy(update={"review": review_state})
             version_id = uuid4()
-            if content_hash(snapshot) != hash_before:
+            if snapshot.review.confirmation.content_hash != hash_before:
                 raise DomainError(409, "Содержимое не совпадает с проверенным")
             return insert_version(
                 cur,
@@ -1007,6 +1124,8 @@ class ReviewRepository:
                 fingerprint=fingerprint,
                 actor_type="user",
                 actor_id=body.signature,
+                reuse_parent_graph=True,
+                before_snapshot=before_snapshot,
             )
 
     def details(self, program_id, version_id, limit, offset):

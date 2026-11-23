@@ -4,6 +4,7 @@ import copy
 import os
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
+from tempfile import TemporaryFile
 from uuid import uuid4
 
 import httpx
@@ -204,12 +205,19 @@ def test_document_roundtrip_same_names_and_source_refs(http, program):
     [
         ("empty.pdf", b"", 422),
         ("unsupported.exe", b"arbitrary", 415),
-        ("oversized.pdf", b"x" * (50 * 1024 * 1024 + 1), 413),
+        ("oversized.pdf", None, 413),
     ],
     ids=["empty", "unsupported", "oversized"],
 )
 def test_invalid_uploads_do_not_create_documents(http, program, filename, content, status):
-    response = http.post(url(program) + "/documents", files={"file": (filename, content)})
+    if content is None:
+        with TemporaryFile() as oversized:
+            oversized.truncate(int(os.getenv("MAX_UPLOAD_BYTES", 50 * 1024 * 1024)) + 1)
+            response = http.post(
+                url(program) + "/documents", files={"file": (filename, oversized)}, timeout=120
+            )
+    else:
+        response = http.post(url(program) + "/documents", files={"file": (filename, content)})
     assert response.status_code == status, response.text
     assert http.get(url(program) + "/documents").json() == []
 

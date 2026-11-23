@@ -202,6 +202,8 @@ class SnapshotV2(SnapshotData):
         }
         refs = {item.id for item in self.source_refs}
         identities, locations = set(), set()
+        target_values = {}
+        field_tokens = {}
         for link in self.source_links:
             key = (link.target_kind, link.target_id, link.field_path, link.source_ref_id)
             if link.id in identities or key in locations:
@@ -219,9 +221,16 @@ class SnapshotV2(SnapshotData):
             if link.field_path != "$":
                 if not link.field_path.startswith("/") or re.search(r"~(?![01])", link.field_path):
                     raise ValueError("Field location must be a JSON Pointer or $")
-                value = target.model_dump(mode="json")
-                for part in link.field_path[1:].split("/"):
-                    part = part.replace("~1", "/").replace("~0", "~")
+                target_key = (link.target_kind, link.target_id)
+                if target_key not in target_values:
+                    target_values[target_key] = target.model_dump(mode="json")
+                if link.field_path not in field_tokens:
+                    field_tokens[link.field_path] = [
+                        part.replace("~1", "/").replace("~0", "~")
+                        for part in link.field_path[1:].split("/")
+                    ]
+                value = target_values[target_key]
+                for part in field_tokens[link.field_path]:
                     try:
                         if isinstance(value, list):
                             if not part.isascii() or not part.isdigit():

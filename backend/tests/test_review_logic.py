@@ -64,6 +64,45 @@ def change(state, value):
     }
 
 
+@pytest.mark.parametrize("value", [None, False, 0, 0.0, {"nested": [1, "ё", True]}])
+def test_content_hash_preserves_legacy_encoding_and_input(value):
+    from app.review_logic import digest
+
+    state = sample().model_dump(mode="json")
+    state["entities"][0]["attributes"]["extra"] = value
+    original = deepcopy(state)
+    legacy = deepcopy(state)
+    legacy.pop("review", None)
+    refs = {
+        ref["id"]: {key: item for key, item in ref.items() if key != "id"}
+        for ref in legacy["source_refs"]
+    }
+    for member in legacy["entities"] + legacy["relations"]:
+        member["source_ref_ids"] = [refs[key] for key in member["source_ref_ids"]]
+    legacy["source_refs"] = list(refs.values())
+    legacy["source_links"] = [
+        {**{key: item for key, item in link.items() if key not in {"id", "source_ref_id"}},
+         "source": refs[link["source_ref_id"]]}
+        for link in legacy["source_links"]
+    ]
+    assert content_hash(state) == digest(legacy)
+    assert state == original
+
+
+def test_journal_reuses_only_identical_parts_and_preserves_prior_values():
+    from app.review_storage import journal_before_snapshot
+
+    before = sample()
+    changed_entity = before.entities[0].model_copy(update={"attributes": {"hours": 72}})
+    after = before.model_copy(update={"entities": [changed_entity]})
+    state = after.model_dump(mode="json")
+    previous = journal_before_snapshot(before, after, state)
+    assert previous == before.model_dump(mode="json")
+    assert previous["entities"][0]["attributes"]["hours"] == 108
+    assert state["entities"][0]["attributes"]["hours"] == 72
+    assert previous["source_links"] is state["source_links"]
+
+
 def test_copying_sources_changes_identity_but_preserves_checked_content():
     original = sample()
     saved = original.model_dump(mode="json")

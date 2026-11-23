@@ -232,7 +232,7 @@ class DocumentBuilder:
             )
 
 
-def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=None):
+def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=None, return_model=False):
     builder, parsed_documents, codes = DocumentBuilder(program_id), {}, {}
     normalized_documents = {}
     store_selected_json = original_files is None
@@ -439,4 +439,4 @@ def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=N
             "metadata": metadata,
         }
     )
-    return snapshot.model_dump(mode="json"), builder.issues
+    return (snapshot if return_model else snapshot.model_dump(mode="json")), builder.issues

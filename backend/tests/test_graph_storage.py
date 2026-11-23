@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.domain import Entity, RelationV2, SnapshotV2
+from app.graph_storage import journal
 from app.repository import Repository
 
 pytestmark = pytest.mark.skipif(
@@ -126,17 +127,41 @@ def test_entity_order_change_is_written_to_journal():
         )
 
 
-def test_real_parser_artifacts_and_pinned_generation_after_import_retry():
-    import hashlib
+def test_first_graph_journals_complete_source_arrays():
+    with ConnectionPool(os.environ["GRAPH_TEST_DSN"]) as pool:
+        repo = Repository(pool)
+        program = repo.create_program("Полные массивы журнала")
+        document_id, entity_id, ref_id = uuid4(), uuid4(), uuid4()
+        refs = [{"id": str(ref_id), "document_id": str(document_id), "locator": "page:1"}]
+        links = [{
+            "id": str(uuid4()), "target_kind": "entity", "target_id": str(entity_id),
+            "field_path": "/attributes/name", "source_ref_id": str(ref_id),
+            "observed_value": {"value": "Название"},
+        }]
+        before = {"metadata": {}, "document_ids": [], "entities": [], "relations": [],
+                  "source_refs": [], "source_links": [], "review": None}
+        after = {**before, "document_ids": [str(document_id)],
+                 "source_refs": refs, "source_links": links}
+        with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            journal(cur, program["id"], program["current_version_id"], before, after)
+            rows = cur.execute(
+                "SELECT field_path,new_value FROM change_log WHERE version_id=%s "
+                "AND field_path IN ('/source_refs','/source_links')",
+                (program["current_version_id"],),
+            ).fetchall()
+        assert {row["field_path"]: row["new_value"] for row in rows} == {
+            "/source_refs": refs, "/source_links": links,
+        }
+
+
+def test_real_parser_artifacts_and_pinned_graph_after_import_retry():
     import io
     from pathlib import Path
-    from zipfile import ZipFile
 
     from starlette.datastructures import UploadFile
 
     from app.config import Settings
-    from app.generation_activities import GenerationActivities
-    from app.generation_repository import GenerationRepository
+    from app.document_adapter import to_snapshot_v2
     from app.graph_storage import artifact_output
     from app.import_activities import ImportActivities
     from app.import_repository import ImportRepository
@@ -161,30 +186,22 @@ def test_real_parser_artifacts_and_pinned_generation_after_import_retry():
         activities.finish(request)
         parsed = imports.job(job, include_output=True)
         assert parsed["status"] in {"completed", "partial"}
-        assert parsed["snapshot"]["entities"]
+        assert parsed["snapshot"] is None
+        files = [{"document_id": document, "output": parsed["files"][0]["output"]}]
+        graph, _ = to_snapshot_v2(program["id"], files, original_files=files)
+        assert graph["entities"]
         version = repo.save(
             program["id"],
             program["current_version_id"],
             uuid4().hex,
-            SnapshotV2.model_validate(parsed["snapshot"]),
+            SnapshotV2.model_validate(graph),
         )
-        assert version["snapshot"] == parsed["snapshot"]
-        generation = GenerationRepository(pool)
-        generated = generation.create(program["id"], None, job, uuid4().hex)
-        before = generation.input(generated)[0].model_dump(mode="json")
+        assert version["snapshot"] == graph
         imports.retry(program["id"], job, parsed["_workflow_id"])
-        # Повтор создаёт новый результат импорта, уже принятая генерация читает прежний граф.
+        # Повтор импорта не меняет уже сохранённую версию исходного графа.
         second = {**request, "attempt": 2}
         activities.finish(second)
-        assert generation.input(generated)[0].model_dump(mode="json") == before
-        assert GenerationActivities(pool).build({"job_id": str(generated)}) == "completed"
-        package = generation.package(program["id"], generated)
-        with ZipFile(io.BytesIO(bytes(package["content"]))) as archive:
-            names = [name for name in archive.namelist() if name.endswith(".docx")]
-            assert len(names) == 1
-            assert (
-                hashlib.sha256(archive.read(names[0])).digest() == hashlib.sha256(content).digest()
-            )
+        assert repo.version(program["id"], version["id"])["snapshot"] == graph
         with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
                 "SELECT report,parameters FROM processing_jobs WHERE id=%s", (job,)
@@ -202,18 +219,6 @@ def test_real_parser_artifacts_and_pinned_generation_after_import_retry():
                     "(SELECT graph_state_id FROM program_versions WHERE id=%s)",
                     (version["id"],),
                 ).fetchone()["metadata"]
-            )
-            assert (
-                "snapshot"
-                not in cur.execute(
-                    "SELECT parameters FROM processing_jobs WHERE id=%s", (generated,)
-                ).fetchone()["parameters"]
-            )
-            assert (
-                "started_at"
-                not in cur.execute(
-                    "SELECT report FROM processing_jobs WHERE id=%s", (generated,)
-                ).fetchone()["report"]
             )
 
 

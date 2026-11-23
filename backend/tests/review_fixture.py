@@ -15,7 +15,11 @@ calls = {}
 RULESET = {
     "id": "artificial-backend-review",
     "revision": "1",
-    "config": {"artificial": True},
+    "config": {
+        "artificial": True,
+        "rules": [{"id": "hours", "revision": "1", "status": "ready",
+                   "phases": ["graph_validation"], "required_for_confirmation": True}],
+    },
     "required_rules": ["hours"],
     "required_document_types": ["RPD"],
 }
