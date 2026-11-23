@@ -289,6 +289,32 @@ class DecisionCreate(Contract):
         return value
 
 
+class DecisionSelection(Contract):
+    conflict_id: UUID
+    variant_id: UUID
+
+
+class DecisionBatchCreate(Contract):
+    expected_version_id: UUID
+    selections: list[DecisionSelection] = Field(min_length=1, max_length=500)
+    signature: str = Field(min_length=1, max_length=120)
+
+    @field_validator("signature")
+    @classmethod
+    def normalize_signature(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Подпись не должна быть пустой")
+        return value
+
+    @model_validator(mode="after")
+    def conflict_ids_are_unique(self) -> Self:
+        ids = [item.conflict_id for item in self.selections]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Расхождения в пакетном выборе не должны повторяться")
+        return self
+
+
 class CheckCreate(Contract):
     version_id: UUID
     rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)

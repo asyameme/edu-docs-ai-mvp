@@ -23,6 +23,7 @@ from app.review_contract import (
     CheckCreate,
     CheckResult,
     ConfirmCreate,
+    DecisionBatchCreate,
     DecisionCreate,
     ReviewCreate,
 )
@@ -198,6 +199,17 @@ def decide(
     repo: RepoDep,
 ) -> VersionRead:
     return ReviewRepository(repo.pool).decide(program_id, review_id, operation_key, body)
+
+
+@router.post("/reviews/{review_id}/decisions/batch", status_code=201)
+def decide_batch(
+    program_id: UUID,
+    review_id: UUID,
+    body: DecisionBatchCreate,
+    operation_key: OperationKey,
+    repo: RepoDep,
+) -> VersionRead:
+    return ReviewRepository(repo.pool).decide_many(program_id, review_id, operation_key, body)
 
 
 @router.post("/reviews/{review_id}/checks", status_code=202)

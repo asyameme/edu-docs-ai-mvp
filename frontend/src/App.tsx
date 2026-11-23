@@ -1975,6 +1975,7 @@ function App() {
                           onClick={() => {
                             setLevelAutoNotice(null);
                             void processing.decideLevelOnlyVariants().then((applied) => {
+                                if (applied === null) return;
                               setLevelAutoNotice(applied > 0
                                 ? `Автоматически выбрано формулировок с указанием уровня: ${applied}.`
                                 : "Вопросов, где варианты различаются только уровнем, не найдено.");

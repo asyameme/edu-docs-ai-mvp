@@ -43,6 +43,12 @@ export type VersionRead = {
   snapshot: ReviewSnapshot;
 };
 
+export type DecisionBatchRequest = {
+  expected_version_id: string;
+  selections: Array<{ conflict_id: string; variant_id: string }>;
+  signature: string;
+};
+
 export type ReviewJob = {
   id: string;
   review_id: string;

@@ -5,6 +5,7 @@ import {
   loadSession,
   saveSession,
   type CheckJob,
+  type DecisionBatchRequest,
   type ImportJob,
   type ImportSession,
   type OptionalRuleCode,
@@ -792,9 +793,9 @@ export function useImportJob() {
     return LEVEL_NOTE.test(variantLabelText(label));
   }
 
-  async function decideLevelOnlyVariants(): Promise<number> {
+  async function decideLevelOnlyVariants(): Promise<number | null> {
     const current = sessionRef.current;
-    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return 0;
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return null;
     const details = reviewDetails;
     if (!details) return 0;
 
@@ -811,10 +812,71 @@ export function useImportJob() {
       targets.push({ conflictId: issue.id, variantId: withLevel[0].id });
     }
 
-    for (const target of targets) {
-      await decide(target.conflictId, target.variantId);
+    if (targets.length === 0) return 0;
+    const signature = signatureForProgram(signatureRef.current, current.programId);
+    if (!signature) {
+      setNotice("Укажите подпись для этой программы кнопкой над программой.");
+      return null;
     }
-    return targets.length;
+
+    reviewBusyRef.current = true;
+    setReviewBusy(true);
+    try {
+      const request: DecisionBatchRequest = {
+        expected_version_id: current.versionId,
+        selections: targets.map(({ conflictId, variantId }) => ({
+          conflict_id: conflictId,
+          variant_id: variantId,
+        })),
+        signature,
+      };
+      const version = await api<VersionRead>(
+        `/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions/batch`,
+        {
+          method: "POST",
+          headers: operationHeaders(),
+          body: JSON.stringify(request),
+        },
+      );
+      updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
+      setCheckJob(null);
+      const selectedByConflictId = new Map<string, string>();
+      for (const { conflictId, variantId } of targets) {
+        selectedByConflictId.set(conflictId, variantId);
+      }
+      setReviewDetails((latest) => latest && ({
+        ...latest,
+        version: {
+          ...latest.version,
+          id: version.id,
+          number: version.number,
+          snapshot: {
+            ...version.snapshot,
+            source_refs: version.snapshot.source_refs.length
+              ? version.snapshot.source_refs
+              : latest.version.snapshot.source_refs,
+          },
+        },
+        issues: latest.issues.map((issue) => {
+          const variantId = selectedByConflictId.get(issue.id);
+          return variantId
+            ? { ...issue, decision: { variant_id: variantId, author: signature } }
+            : issue;
+        }),
+        confirmed: false,
+        confirmation: null,
+        check_job_id: null,
+        check_report: null,
+      }));
+      setNotice("");
+      return targets.length;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось сохранить выбранные формулировки");
+      return null;
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewBusy(false);
+    }
   }
 
   async function acceptChatProposal(sessionId: string, turnId: string, expectedVersionId: string) {

@@ -14,7 +14,7 @@ from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.graph_storage import hydrate_job, pack_tree
 from app.repository import Repository
-from app.review_contract import CheckResult
+from app.review_contract import CheckResult, DecisionBatchCreate
 from app.review_logic import (
     apply_changes,
     changes_in_base_sources,
@@ -743,6 +743,159 @@ class ReviewRepository:
                 actor_type="user",
                 actor_id=body.signature,
             )
+
+    def decide_many(self, program_id, review_id, key, body: DecisionBatchCreate):
+        fingerprint = digest(
+            {
+                "operation": "decision_batch",
+                "review_id": str(review_id),
+                "body": body.model_dump(mode="json"),
+            }
+        )
+        with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
+            current = self.lock(cur, program_id)
+            previous = previous_version(cur, program_id, key, fingerprint)
+            if previous:
+                return previous
+            review = self.require_review(cur, program_id, review_id)
+            if review["parameters"].get("schema_version") != 2:
+                raise DomainError(422, "Пакетный выбор доступен для сверки V2")
+            if current != body.expected_version_id:
+                raise DomainError(409, "Текущая версия изменилась")
+            snapshot = self.checked_snapshot(
+                self.version(cur, program_id, current), review_id, require_graph=False
+            )
+            if any(
+                change.get("op") not in {"set_document_value", "set_competency_links"}
+                for decision in snapshot.review.decisions
+                for change in decision.changes
+            ):
+                raise DomainError(
+                    409, "После правок графа нельзя пересобирать его предграфовым выбором"
+                )
+
+            conflict_ids = [item.conflict_id for item in body.selections]
+            rows = cur.execute(
+                "SELECT id,job_id,version_id,details FROM validation_issues "
+                "WHERE program_id=%s AND id=ANY(%s)",
+                (program_id, conflict_ids),
+            ).fetchall()
+            issues = {str(row["id"]): row for row in rows}
+            if len(issues) != len(conflict_ids):
+                raise DomainError(404, "Одно или несколько расхождений не найдены")
+
+            choices = [
+                item.model_dump(mode="json") for item in snapshot.review.decisions
+            ]
+            existing_choices = {
+                str(item.conflict_id): item for item in snapshot.review.decisions
+            }
+            new_choices = []
+            for selection in body.selections:
+                conflict_id = str(selection.conflict_id)
+                issue = issues[conflict_id]
+                if issue["job_id"] != review_id:
+                    raise DomainError(409, "Пакетный выбор должен относиться к текущей сверке")
+                existing = existing_choices.get(conflict_id)
+                if existing:
+                    if existing.variant_id != selection.variant_id:
+                        raise DomainError(409, "Для расхождения уже сохранён другой вариант")
+                    continue
+
+                details = issue["details"]
+                variant = next(
+                    (
+                        item for item in details["variants"]
+                        if item["id"] == str(selection.variant_id)
+                    ),
+                    None,
+                )
+                if not details["requires_decision"] or variant is None:
+                    raise DomainError(422, "Выберите предложенный вариант для каждого расхождения")
+                new_choices.append((selection, variant))
+
+            if not new_choices:
+                return self.version(cur, program_id, current)
+
+            now = datetime.now(UTC).isoformat()
+            for selection, variant in new_choices:
+                choices.append(
+                    {
+                        "conflict_id": str(selection.conflict_id),
+                        "variant_id": str(selection.variant_id),
+                        "check_job_id": str(review_id),
+                        "changes": variant["changes"],
+                        "decided_at": now,
+                        "author": body.signature,
+                    }
+                )
+
+            documents = review["parameters"]["input"]["documents"]
+            original = {item["document_id"]: item["parsed"] for item in documents}
+            changes = [change for choice in choices for change in choice["changes"]]
+            relation_origins = {}
+            selected_documents = apply_document_mutations(
+                original, changes, relation_origins=relation_origins
+            )
+            required = {
+                item["id"]
+                for item in review["report"]["result"]["issues"]
+                if item["requires_decision"]
+            }
+            decided = {str(item["conflict_id"]) for item in choices}
+            graph_ready = required.issubset(decided)
+            build_errors = []
+            if graph_ready:
+                from app.document_adapter import to_snapshot_v2
+
+                files = [
+                    {"document_id": identity, "output": value}
+                    for identity, value in selected_documents.items()
+                ]
+                graph_data, build_issues = to_snapshot_v2(
+                    program_id,
+                    files,
+                    original_files=documents,
+                    relation_origins=relation_origins,
+                )
+                build_errors = graph_build_issues(build_issues)
+                if build_errors:
+                    graph_ready = False
+                    graph_data = snapshot
+                else:
+                    attach_document_artifacts(
+                        graph_data, review["report"]["result"].get("artifacts", [])
+                    )
+            else:
+                graph_data = snapshot
+
+            state = (
+                graph_data.model_dump(mode="json")
+                if isinstance(graph_data, SnapshotV2)
+                else SnapshotV2.model_validate(graph_data).model_dump(mode="json")
+            )
+            state["review"]["graph_ready"] = graph_ready
+            state["review"]["decisions"] = choices
+            next_snapshot = SnapshotV2.model_validate(state)
+            version = insert_version(
+                cur,
+                program_id,
+                current,
+                uuid4(),
+                next_snapshot,
+                key=key,
+                fingerprint=fingerprint,
+                actor_type="user",
+                actor_id=body.signature,
+            )
+            review_result = review["report"].get("result", {})
+            review_result["graph_ready"] = graph_ready
+            review_result["graph_build_issues"] = build_errors
+            cur.execute(
+                "UPDATE processing_jobs SET report=%s WHERE id=%s",
+                (Jsonb(pack_tree(cur, program_id, review["report"])), review_id),
+            )
+            return version
 
     @staticmethod
     def job_with_cursor(cur, program_id, job_id):
