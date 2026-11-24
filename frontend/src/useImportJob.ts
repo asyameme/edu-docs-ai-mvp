@@ -36,6 +36,8 @@ export function useImportJob() {
   const busyRef = useRef(false);
   const reviewBusyRef = useRef(false);
   const signatureRef = useRef<ProgramSignature | null>(null);
+  const signatureSavingRef = useRef(false);
+  const [signatureSaving, setSignatureSaving] = useState(false);
   const [signature, setSignature] = useState<ProgramSignature | null>(null);
   const [session, setSession] = useState(initial.current);
   const [program, setProgram] = useState<ProgramRead | null>(null);
@@ -63,6 +65,13 @@ export function useImportJob() {
     saveSession(next);
   }, []);
 
+  const openProgramState = useCallback((next: ProgramRead) => {
+    const restored = next.signature ? { programId: next.id, value: next.signature } : null;
+    signatureRef.current = restored;
+    setSignature(restored);
+    setProgram(next);
+  }, []);
+
   // Программа из сохранённой сессии исчезла (например, БД пересоздали):
   // молча возвращаем страницу к начальному экрану загрузки.
   const resetStaleSession = useCallback(() => {
@@ -81,7 +90,7 @@ export function useImportJob() {
 
   const applyProgramState = useCallback((latest: ProgramRead, analysisVersionId?: string | null) => {
     if (sessionRef.current.programId !== latest.id) return;
-    setProgram(latest);
+    openProgramState(latest);
 
     const current = sessionRef.current;
     const patch: Partial<ImportSession> = {};
@@ -95,9 +104,10 @@ export function useImportJob() {
       patch.analysisVersionId = analysisVersionId;
     }
     if (Object.keys(patch).length > 0) updateSession(patch);
-  }, [updateSession]);
+  }, [updateSession, openProgramState]);
 
-  const saveSignature = useCallback((value: string) => {
+  const saveSignature = useCallback(async (value: string) => {
+    if (signatureSavingRef.current) return false;
     const programId = sessionRef.current.programId;
     const normalized = value.trim();
     if (!program || program.id !== programId) return false;
@@ -105,11 +115,31 @@ export function useImportJob() {
       setNotice("Введите имя для подписи длиной от 1 до 120 символов.");
       return false;
     }
-    const next = { programId, value: normalized };
-    signatureRef.current = next;
-    setSignature(next);
-    setNotice("");
-    return true;
+    signatureSavingRef.current = true;
+    setSignatureSaving(true);
+    try {
+      const saved = await api<ProgramRead>(`/api/v1/programs/${programId}/signature`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: normalized }),
+      });
+      if (sessionRef.current.programId !== programId) return false;
+      const next = saved.signature ? { programId, value: saved.signature } : null;
+      signatureRef.current = next;
+      setSignature(next);
+      setProgram((current) => current?.id === programId
+        ? { ...current, signature: saved.signature } : current);
+      setNotice("");
+      return true;
+    } catch (error) {
+      if (sessionRef.current.programId === programId) {
+        setNotice(error instanceof Error ? error.message : "Не удалось сохранить подпись");
+      }
+      return false;
+    } finally {
+      signatureSavingRef.current = false;
+      setSignatureSaving(false);
+    }
   }, [program]);
 
   const loadReviewDetails = useCallback((versionId: string, programId = sessionRef.current.programId) => {
@@ -198,7 +228,7 @@ export function useImportJob() {
         sessionRef.current = restoredSession;
         setSession(restoredSession);
         saveSession(restoredSession);
-        setProgram(restoredProgram);
+        openProgramState(restoredProgram);
         setJob(restoredJob);
         setReviewJob(restoredReviewJob);
         setCheckJob(null);
@@ -677,7 +707,7 @@ export function useImportJob() {
         target = programRead.id;
       }
       if (!programRead) throw new Error("Не удалось создать программу");
-      setProgram(programRead);
+      openProgramState(programRead);
       const nextSession: ImportSession = {
         programId: target,
         jobId: "",
@@ -1064,7 +1094,7 @@ export function useImportJob() {
     if (current.reviewId || (reviewJob && ["failed", "conflict", "completed"].includes(reviewJob.status))) {
       try {
         const latest = await api<ProgramRead>(`/api/v1/programs/${current.programId}`);
-        setProgram(latest);
+        openProgramState(latest);
         setReviewJob(null);
         setReviewDetails(null);
         setCheckJob(null);
@@ -1098,6 +1128,7 @@ export function useImportJob() {
     versionId: session.versionId ?? "",
     program,
     signature: signatureForProgram(signature, session.programId),
+    signatureSaving,
     saveSignature,
     job,
     reviewJob,

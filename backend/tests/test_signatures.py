@@ -52,6 +52,7 @@ def test_save_restore_preserve_signature_and_reject_changed_signature_on_retry()
             headers={"Idempotency-Key": uuid4().hex},
         )
         assert restored.status_code == 201, restored.text
+        assert client.put(root + "/signature", json={"value": "Вера"}).status_code == 200
         with app.state.resources.postgres.connection() as conn:
             for version, author in ((saved.json(), "Анна"), (restored.json(), "Борис")):
                 rows = conn.execute(
@@ -61,3 +62,31 @@ def test_save_restore_preserve_signature_and_reject_changed_signature_on_retry()
                 assert rows
                 assert all(tuple(row) == ("user", author) for row in rows)
         assert len(client.get(root + "/versions").json()) == 3
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.getenv("RUN_INTEGRATION") != "1", reason="Нужна тестовая PostgreSQL")
+def test_program_signature_survives_reopening_and_is_scoped_to_program():
+    with TestClient(app) as client:
+        first = client.post("/api/v1/programs", json={"name": "Подпись"}).json()
+        second = client.post("/api/v1/programs", json={"name": "Другая программа"}).json()
+        root = "/api/v1/programs/" + first["id"]
+        assert first["signature"] is None
+        saved = client.put(root + "/signature", json={"value": "  Анна  "})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["signature"] == "Анна"
+        assert saved.json()["current_version_id"] == first["current_version_id"]
+    with TestClient(app) as reopened:
+        assert reopened.get(root).json()["signature"] == "Анна"
+        assert reopened.get("/api/v1/programs/" + second["id"]).json()["signature"] is None
+        assert reopened.put(root + "/signature", json={"value": "Борис"}).status_code == 200
+        assert reopened.get(root).json()["signature"] == "Борис"
+        for body in ({}, {"value": None}, {"value": ""}, {"value": " \t\n"},
+                     {"value": "я" * 121}, {"value": "a\x00b"}):
+            assert reopened.put(root + "/signature", json=body).status_code == 422
+        assert reopened.get(root).json()["signature"] == "Борис"
+        for value in ("😀" * 120, "  " + "я" * 120 + "  "):
+            assert reopened.put(root + "/signature", json={"value": value}).status_code == 200
+            assert reopened.get(root).json()["signature"] == value.strip()
+        assert reopened.put("/api/v1/programs/" + str(uuid4()) + "/signature",
+                            json={"value": "Анна"}).status_code == 404
