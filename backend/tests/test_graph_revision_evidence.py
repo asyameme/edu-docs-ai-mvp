@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from test_graph_performance import make_graph
 
+from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.graph_storage import load_graph, save_graph
 from app.review_logic import digest
@@ -94,6 +95,56 @@ def test_existing_fact_collision_is_still_rejected_and_rolled_back(connection):
     )
     with conn.cursor() as cur:
         assert load_graph(cur, original) == snapshot
+
+
+def test_reused_parent_facts_preserve_ids_and_validate_the_complete_graph(connection):
+    conn = connection
+    program, original, snapshot = make_graph(conn)
+    changed = deepcopy(snapshot)
+    changed["entities"][0]["attributes"]["value"] = "Новая редакция"
+    with conn.cursor() as cur:
+        saved = save_graph(cur, program, changed, reuse_source_links_from=original)
+        assert load_graph(cur, saved) == changed
+    rows = conn.execute(
+        "SELECT graph_state_id,public_id,source_link_id FROM graph_source_links "
+        "WHERE graph_state_id IN (%s,%s) ORDER BY position", (original, saved)
+    ).fetchall()
+    assert {
+        row["public_id"]: row["source_link_id"] for row in rows
+        if row["graph_state_id"] == original
+    } == {
+        row["public_id"]: row["source_link_id"] for row in rows
+        if row["graph_state_id"] == saved
+    }
+    invalid = deepcopy(changed)
+    invalid["source_links"][1]["observed_value"]["value"] = 999
+    with pytest.raises(DomainError, match="нового ID"), conn.transaction():
+        with conn.cursor() as cur:
+            save_graph(cur, program, invalid, reuse_source_links_from=original)
+    with conn.cursor() as cur:
+        assert load_graph(cur, original) == snapshot
+        assert load_graph(cur, saved) == changed
+
+
+def test_save_graph_reuses_the_already_serialized_validated_model(connection, monkeypatch):
+    conn = connection
+    program, _, snapshot = make_graph(conn)
+    model = SnapshotV2.model_validate(snapshot)
+    prevalidated = model.model_dump(mode="json")
+    calls = 0
+    model_dump = SnapshotV2.model_dump
+
+    def counted(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return model_dump(self, *args, **kwargs)
+
+    monkeypatch.setattr(SnapshotV2, "model_dump", counted)
+    with conn.cursor() as cur:
+        saved = save_graph(cur, program, model, prevalidated_data=prevalidated)
+    assert calls == 0
+    with conn.cursor() as cur:
+        assert load_graph(cur, saved) == snapshot
 
 
 def test_same_revision_can_keep_distinct_historical_evidence_variants(connection):
@@ -233,6 +284,63 @@ def test_new_history_tables_reject_update_delete_and_truncate(connection, table)
                   f"TRUNCATE {table} CASCADE"):
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
             conn.execute(query)
+
+
+@pytest.mark.parametrize("missing", ["required_source", "entity_owner", "relation_owner"])
+def test_set_validation_still_rejects_missing_existing_members(connection, missing):
+    conn = connection
+    program, state, _ = make_graph(conn)
+    row = conn.execute(
+        "SELECT * FROM graph_state_contents WHERE graph_state_id=%s", (state,)
+    ).fetchone()
+    if missing == "required_source":
+        row["source_ref_ids"] = []
+        row["evidence_set_ids"] = []
+        row["evidence_order_id"] = None
+    elif missing == "relation_owner":
+        row["relation_revision_ids"] = []
+    else:
+        row["relation_revision_ids"] = []
+        row["entity_revision_ids"] = []
+    building = uuid4()
+    conn.execute("INSERT INTO graph_states(id,program_id) VALUES(%s,%s)", (building, program))
+    row["graph_state_id"] = building
+    with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
+        conn.execute(
+            "INSERT INTO graph_state_contents(graph_state_id,program_id,entity_revision_ids,"
+            "relation_revision_ids,document_selection_ids,source_ref_ids,evidence_set_ids,"
+            "evidence_order_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            tuple(row[key] for key in (
+                "graph_state_id", "program_id", "entity_revision_ids", "relation_revision_ids",
+                "document_selection_ids", "source_ref_ids", "evidence_set_ids", "evidence_order_id",
+            )),
+        )
+
+
+def test_validation_sets_migration_roundtrip_keeps_history(connection):
+    conn = connection
+    _, state, snapshot = make_graph(conn)
+    file = Path(__file__).parents[1] / "migrations/versions/0012_graph_validation_sets.py"
+    spec = importlib.util.spec_from_file_location(file.stem, file)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class Operations:
+        def execute(self, query):
+            conn.execute(query)
+
+    migration.op = Operations()
+    original_hash = conn.execute(
+        "SELECT content_hash FROM graph_states WHERE id=%s", (state,)
+    ).fetchone()["content_hash"]
+    for apply in (migration.upgrade, migration.downgrade, migration.upgrade):
+        apply()
+        conn.execute("SELECT graph_validate_contents(%s)", (state,))
+        with conn.cursor() as cur:
+            assert load_graph(cur, state) == snapshot
+        assert conn.execute(
+            "SELECT content_hash FROM graph_states WHERE id=%s", (state,)
+        ).fetchone()["content_hash"] == original_hash
 
 
 def test_migration_preserves_revision_ids_public_ids_hashes_and_legacy_snapshots():

@@ -292,8 +292,9 @@ class ReviewRepository:
                     raise DomainError(409, "Проверять нужно текущую версию")
                 stored_version = Repository.require(
                     cur.execute(
-                        "SELECT graph_state_id,review FROM program_versions "
-                        "WHERE program_id=%s AND id=%s",
+                        "SELECT v.graph_state_id,v.review,s.content_hash FROM program_versions v "
+                        "LEFT JOIN graph_states s ON s.id=v.graph_state_id AND s.status='sealed' "
+                        "WHERE v.program_id=%s AND v.id=%s",
                         (program_id, body.version_id),
                     ).fetchone()
                 )
@@ -316,6 +317,8 @@ class ReviewRepository:
                         raise DomainError(409, "Подтверждённую версию нельзя проверять повторно")
                 if stored_version["graph_state_id"] is None:
                     raise DomainError(409, "У проверяемой версии нет сохранённого графа")
+                if stored_version["content_hash"] is None:
+                    raise DomainError(409, "Проверка требует запечатанного графа с хэшем")
                 source_documents = review["parameters"]["input"]["documents"]
                 ruleset = review["report"]["result"]["ruleset"]
                 if executor == "local":
@@ -396,7 +399,9 @@ class ReviewRepository:
                     "review": stored_version["review"],
                 }
                 parameters.update(
-                    content_hash=content_hash(snapshot),
+                    # Хэш вычислен при записи и защищён вместе с sealed-состоянием.
+                    # Review не входит в него; подтверждение отдельно сверяет содержимое.
+                    content_hash=stored_version["content_hash"],
                     ruleset=ruleset,
                     project_check_documents=(review["parameters"].get("schema_version") == 2),
                     input={
@@ -710,7 +715,10 @@ class ReviewRepository:
                     (program_id, body.conflict_id),
                 ).fetchone()
             )
-            owner = self.job_with_cursor(cur, program_id, issue["job_id"])
+            owner = (
+                review if issue["job_id"] == review_id
+                else self.job_with_cursor(cur, program_id, issue["job_id"])
+            )
             if owner["parameters"]["review_id"] != str(review_id):
                 raise DomainError(404, "Конфликт из другой подготовки")
             if body.check_job_id and body.check_job_id != issue["job_id"]:

@@ -45,7 +45,7 @@ class ProposalAccept(Contract):
 def accept_proposal(
     program_id: UUID, session_id: UUID, turn_id: UUID, body: ProposalAccept,
     operation_key: OperationKey, request: Request,
-):
+) -> dict:
     return ChatWriteRepository(request.app.state.resources.postgres).accept(
         program_id, session_id, turn_id, body, operation_key
     )

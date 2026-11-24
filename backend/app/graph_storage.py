@@ -231,11 +231,19 @@ def _json_equivalent(left, right):
     return type(left) is type(right) and left == right
 
 
-def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, members=None):
+def save_graph(
+    cur, program_id, snapshot, *, producer=None, attempt=None, members=None,
+    reuse_source_links_from=None, prevalidated_data=None,
+):
     from app.graph_composition import GraphComposition, write_members
 
     composition = GraphComposition.for_cursor(cur, program_id)
-    if isinstance(snapshot, SnapshotV2):
+    namespace = program_id if isinstance(program_id, UUID) else UUID(str(program_id))
+    if prevalidated_data is not None:
+        if not isinstance(snapshot, SnapshotV2):
+            raise TypeError("Предварительно сериализованные данные требуют SnapshotV2")
+        data = prevalidated_data
+    elif isinstance(snapshot, SnapshotV2):
         # Экземпляр модели уже прошёл проверку. Повторная валидация снимка с
         # десятками тысяч свидетельств стоит секунды и результата не меняет.
         data = snapshot.model_dump(mode="json")
@@ -449,7 +457,7 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
     )
     for kind, items in (("entity", data["entities"]), ("relation", data["relations"])):
         revisions = [
-            (item, uuid5(UUID(str(program_id)), kind + ":" + digest(item))) for item in items
+            (item, uuid5(namespace, kind + ":" + digest(item))) for item in items
         ]
         table = "entity_revisions" if kind == "entity" else "relation_revisions"
         known = _existing_by_id(
@@ -549,10 +557,22 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 ],
             )
     links = data.get("source_links", [])
+    prior_facts = {}
+    if composition is not None and reuse_source_links_from is not None:
+        rows = cur.execute(
+            "SELECT p.public_id,p.fact_id FROM graph_state_contents c "
+            "CROSS JOIN LATERAL unnest(c.evidence_set_ids) s(id) "
+            "JOIN revision_evidence_sets e ON e.id=s.id "
+            "CROSS JOIN LATERAL unnest(e.source_link_ids,e.public_ids) p(fact_id,public_id) "
+            "WHERE c.graph_state_id=%s AND c.program_id=%s",
+            (reuse_source_links_from, program_id),
+        ).fetchall()
+        prior_facts = {str(row["public_id"]): row["fact_id"] for row in rows}
     facts = [
         (
             link,
-            uuid5(UUID(str(program_id)), "source-link-fact:" + digest(link)),
+            prior_facts.get(str(link["id"]))
+            or uuid5(namespace, "source-link-fact:" + digest(link)),
             link["target_id"] if link["target_kind"] == "entity" else None,
             link["target_id"] if link["target_kind"] == "relation" else None,
         )

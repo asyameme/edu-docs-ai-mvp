@@ -7,7 +7,13 @@ from app.review_logic import digest
 
 
 def _identity(program, kind, value):
-    return uuid5(UUID(str(program)), kind + ":" + digest(value))
+    namespace = program if isinstance(program, UUID) else UUID(str(program))
+    return uuid5(namespace, kind + ":" + digest(value))
+
+
+def _uuid(value):
+    """Не преобразовывать уже разобранный UUID обратно в текст и снова в UUID."""
+    return value if isinstance(value, UUID) else UUID(value)
 
 
 def _fresh(cur, table, rows):
@@ -73,8 +79,8 @@ class GraphComposition:
             grouped[(kind, str(owners[(kind, str(target))]))].append(row)
         evidence = []
         for (kind, revision), items in grouped.items():
-            facts = [UUID(str(row[2])) for row in items]
-            public = [UUID(str(row[7])) for row in items]
+            facts = [_uuid(row[2]) for row in items]
+            public = [_uuid(row[7]) for row in items]
             identity = _identity(
                 program,
                 "revision-evidence",
@@ -92,7 +98,7 @@ class GraphComposition:
             )
         _fresh(cur, "revision_evidence_sets", evidence)
 
-        order = [UUID(str(row[7])) for row in links]
+        order = [_uuid(row[7]) for row in links]
         order_id = (
             _identity(program, "evidence-order", [str(item) for item in order]) if order else None
         )

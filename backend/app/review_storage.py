@@ -121,7 +121,16 @@ def insert_version(
         before = before_data
         if before is None:
             before = load_graph(cur, parent["graph_state_id"], parent["review"])
-        graph = save_graph(cur, program_id, snapshot)
+        reuse_links = (
+            isinstance(before_snapshot, SnapshotV2)
+            and isinstance(snapshot, SnapshotV2)
+            and before_snapshot.source_links is snapshot.source_links
+        )
+        graph = save_graph(
+            cur, program_id, snapshot,
+            reuse_source_links_from=parent["graph_state_id"] if reuse_links else None,
+            prevalidated_data=state,
+        )
     row = cur.execute(
         "INSERT INTO "
         "program_versions(id,program_id,number,parent_version_id,restored_from_version_id,"
