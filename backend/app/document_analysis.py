@@ -4,7 +4,6 @@ from copy import deepcopy
 from uuid import UUID, uuid5
 
 from app.document_reconciliation import (
-    shared_indicator_groups,
     validate_document_mutation_variants,
 )
 from app.errors import DomainError
@@ -296,50 +295,7 @@ def analyze_documents(documents, job_id, *, config=None):
                 "source_ref_ids": [], "evidence": evidence,
                 "requires_decision": bool(variants), "variants": variants,
             })
-    issues.extend(_shared_indicator_issues(issues, documents, UUID(str(job_id))))
     return {"schema_version": 2, "ruleset": ruleset, "coverage": coverage,
             "issues": issues, "artifacts": []}
 
 
-def _shared_indicator_issues(issues, documents, job_id):
-    """Give a single layout decision for each shared source touched by R-08."""
-    touched = {}
-    for issue in issues:
-        if issue["type"] != "indicator_formulation_review":
-            continue
-        for variant in issue["variants"]:
-            for change in variant["changes"]:
-                if change["value"] != change["expected_old_value"]:
-                    touched[change["document_id"], change["field_path"]] = issue
-    for document in documents:
-        identity, parsed = str(document["document_id"]), document["parsed"]
-        for indices in sorted(shared_indicator_groups(parsed)):
-            keys = [(identity, f"/indicators/{index}/text") for index in indices]
-            affected = [
-                touched[key] for key in keys if key in touched
-            ]
-            if not affected:
-                continue
-            rule = affected[0]
-            codes = ", ".join(parsed["indicators"][index]["code"] for index in indices)
-            filename = parsed["meta"]["file_name"]
-            issue_id = uuid5(job_id, f"shared-indicators:{identity}:{indices}")
-            yield {
-                "id": str(issue_id),
-                "rule_code": rule["rule_code"], "rule_revision": rule["rule_revision"],
-                "type": "indicator_shared_text", "severity": "warning", "status": "needs_review",
-                "message": f"В «{filename}» у индикаторов {codes} один общий текст. "
-                           "Как записать формулировки в документе?",
-                "checks": rule["checks"], "source_document_ids": [identity],
-                "source_ref_ids": [], "evidence": {}, "requires_decision": True,
-                "variants": [
-                    {"id": str(uuid5(issue_id, action)), "label": label, "changes": [{
-                        "op": "set_shared_indicator_text", "document_id": identity,
-                        "indicator_indices": list(indices), "action": action,
-                    }]}
-                    for action, label in (
-                        ("keep", "Оставить общий текст в этом документе"),
-                        ("split", "Записать отдельно по каждому коду согласно выбранным формулировкам"),
-                    )
-                ],
-            }

@@ -217,7 +217,8 @@ def shared_indicator_groups(parsed):
 def _validate_shared_indicator_text(documents, change):
     mutation = SharedIndicatorTextMutation.model_validate(change)
     document = documents.get(str(mutation.document_id))
-    if document is None or tuple(mutation.indicator_indices) not in shared_indicator_groups(document):
+    groups = shared_indicator_groups(document) if document else set()
+    if document is None or tuple(mutation.indicator_indices) not in groups:
         raise DomainError(422, "Общий фрагмент индикаторов не совпадает с исходным документом")
     return mutation
 
@@ -270,6 +271,7 @@ def apply_document_mutations(original_documents, changes, *, relation_origins=No
         for (identity, indices), action in shared.items()
         if action == "keep" for index in indices
     }
+    kept_fields |= _auto_kept_shared_fields(original_documents, unique, shared)
     for (document_id, _), (_, mutation, parts) in unique.items():
         if (document_id, tuple(parts)) in kept_fields:
             continue
@@ -281,3 +283,34 @@ def apply_document_mutations(original_documents, changes, *, relation_origins=No
             result, original_documents, link_changes, aliases, relation_origins
         )
     return result
+
+
+def _auto_kept_shared_fields(original_documents, unique, shared):
+    """Общие тексты индикаторов без явного решения пользователя.
+
+    Один общий текст в документе обслуживает несколько кодов индикаторов, и
+    физически в него можно записать только одну формулировку. Спорить об этом
+    с пользователем не нужно: если выбранные формулировки кодов совпадают,
+    они записываются в общий текст; если различаются — документ сохраняет
+    свой исходный общий текст.
+    """
+    decided = {
+        (identity, tuple(indices)) for identity, indices in shared
+    }
+    kept = set()
+    for document_id in {key[0] for key in unique}:
+        document = original_documents.get(document_id)
+        if document is None:
+            continue
+        for indices in shared_indicator_groups(document):
+            if (document_id, tuple(indices)) in decided:
+                continue
+            fields = {("indicators", str(index), "text") for index in indices}
+            values = {
+                mutation.value
+                for (identity, parts), (document, mutation, _) in unique.items()
+                if identity == document_id and tuple(parts) in fields
+            }
+            if len(values) > 1:
+                kept |= {(document_id, field) for field in fields}
+    return kept

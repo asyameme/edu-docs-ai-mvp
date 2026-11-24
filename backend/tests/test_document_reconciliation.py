@@ -89,6 +89,41 @@ def test_shared_text_decision_only_controls_the_shared_occurrences(action, expec
     assert [row["text"] for row in selected[DOC]["indicators"]] == expected
 
 
+def _shared_text_document():
+    ref = {"file": "РПД.docx", "table": 1, "row": 2, "col": 3}
+    document = contract_parsed()
+    document["indicators"] = [
+        {"code": code, "competency_code": "ОПК-1", "text": "Общий текст",
+         "source_ref": {**ref, "row": row}}
+        for code, row in [("ОПК-1.1", 2), ("ОПК-1.2", 2)]
+    ]
+    return document
+
+
+def test_shared_text_without_decision_keeps_original_when_choices_differ():
+    # Вопроса пользователю нет: в документе остаётся исходный общий текст.
+    individual = [
+        mutation("/indicators/0/text", "Общий текст", "Новый A"),
+        mutation("/indicators/1/text", "Общий текст", "Новый B"),
+    ]
+
+    selected = apply_document_mutations({DOC: _shared_text_document()}, individual)
+
+    assert [row["text"] for row in selected[DOC]["indicators"]] == ["Общий текст", "Общий текст"]
+
+
+def test_shared_text_without_decision_writes_uniform_choice():
+    # Одинаковые выбранные формулировки записываются в общий текст.
+    individual = [
+        mutation("/indicators/0/text", "Общий текст", "Единый новый"),
+        mutation("/indicators/1/text", "Общий текст", "Единый новый"),
+    ]
+
+    selected = apply_document_mutations({DOC: _shared_text_document()}, individual)
+
+    assert [row["text"] for row in selected[DOC]["indicators"]] == ["Единый новый", "Единый новый"]
+
+
 def test_null_is_a_present_value_and_boolean_is_not_number():
     original = {DOC: parsed(None)}
     assert (
