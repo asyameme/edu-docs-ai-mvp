@@ -24,10 +24,20 @@ export type DiagnosticGroup = {
 
 export function ruleDisplayLabel(ruleCode: string): string {
   switch (ruleCode) {
-    case "R-01-graph": return "R-01 · итоговые связи";
-    case "R-08-semantic": return "R-08 · формулировки индикаторов";
-    case "R-08-local-reference": return "R-08 · ссылки индикаторов на компетенции";
-    default: return ruleCode;
+    case "R-01": return "Состав и коды компетенций";
+    case "R-01-graph": return "Связи компетенций между документами";
+    case "R-02": return "Часы в учебном плане и рабочих программах";
+    case "R-03-RPP": return "Нагрузка практики по семестрам";
+    case "R-04": return "Часы и зачётные единицы";
+    case "R-05-title": return "Зачётные единицы в титуле и нагрузке";
+    case "R-07": return "Формулировки компетенций";
+    case "R-08":
+    case "R-08-semantic": return "Формулировки индикаторов";
+    case "R-08-local-reference": return "Связи индикаторов и компетенций";
+    case "R-09": return "Покрытие компетенций учебным планом";
+    case "R-11": return "Результаты обучения и содержание дисциплин";
+    case "Парсер": return "Разбор документов";
+    default: return "Проверка документов";
   }
 }
 

@@ -49,6 +49,21 @@
           "title": "Hours Total",
           "type": "integer"
         },
+        "workload_cells": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/CurriculumWorkloadCell"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workload Cells"
+        },
         "block": {
           "title": "Block",
           "type": "string"
@@ -123,6 +138,31 @@
         "parser_config"
       ],
       "title": "CurriculumMeta",
+      "type": "object"
+    },
+    "CurriculumWorkloadCell": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/SourceRefV2"
+        },
+        "hours": {
+          "minimum": 0,
+          "title": "Hours",
+          "type": "integer"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "hours",
+        "text"
+      ],
+      "title": "CurriculumWorkloadCell",
       "type": "object"
     },
     "ParseIssue": {

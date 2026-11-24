@@ -153,6 +153,7 @@ class ReviewActivities:
                         ruleset=input_data["ruleset"],
                         rule_codes=job["parameters"].get("manual_rule_codes"),
                         document_ids=job["parameters"].get("manual_document_ids"),
+                        competency_code=job["parameters"].get("manual_competency_code"),
                     )
             else:
                 if not self.settings.analysis_url:
@@ -298,4 +299,17 @@ class ReviewActivities:
             job["workflow_id"],
             "analysis_unavailable",
             "Анализ не завершился после повторных попыток; исходные данные сохранены",
+        )
+
+    @activity.defn(name="review_build_graph_v1")
+    def build_graph(self, request):
+        job_id = UUID(request["job_id"])
+        self.repo.mark_graph_build_started(job_id)
+        return self.repo.build_graph(job_id)
+
+    @activity.defn(name="review_graph_build_failed_v1")
+    def graph_build_failed(self, request):
+        self.repo.fail_graph_build(
+            UUID(request["job_id"]),
+            "Не удалось собрать граф после повторных попыток. Повторите подготовку пакета.",
         )

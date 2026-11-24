@@ -7,6 +7,25 @@ import pytest
 from pydantic import ValidationError
 
 from app.domain import SnapshotV2, VersionCreate, VersionRead
+from app.review_contract import CheckCreate
+
+
+def test_manual_checks_require_exactly_one_target():
+    version, document = uuid4(), uuid4()
+    assert CheckCreate(version_id=version, rule_codes=["R-11"], document_ids=[document])
+    assert CheckCreate(
+        version_id=version, rule_codes=["R-09"], competency_code=" УК-1 "
+    ).competency_code == "УК-1"
+    for scope in (
+        {"rule_codes": ["R-11"]},
+        {"rule_codes": ["R-11"], "document_ids": [document, uuid4()]},
+        {"rule_codes": ["R-09"]},
+        {"rule_codes": ["R-09"], "competency_code": " "},
+        {"rule_codes": ["R-09", "R-11"], "document_ids": [document], "competency_code": "УК-1"},
+        {"competency_code": "УК-1"},
+    ):
+        with pytest.raises(ValidationError):
+            CheckCreate(version_id=version, **scope)
 
 
 def test_version_read_preserves_v2_matrix_value_and_field_evidence():

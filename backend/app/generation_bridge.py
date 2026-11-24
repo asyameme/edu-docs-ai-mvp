@@ -10,6 +10,7 @@ from backend.contracts.document_v2.models import SourceRefV2
 from app.document_reconciliation import apply_document_mutations
 from app.domain import SnapshotV2
 from app.errors import DomainError
+from app.review_contract import DOCUMENT_MUTATION_OPS
 from worker.generation import (
     CONFLICT,
     FieldChange,
@@ -21,9 +22,11 @@ from worker.generation.docx_patch import (
     DocxPatchError,
     cell_has_vertical_merge,
     patch_docx_bytes,
+    read_area_text,
     read_row_cells,
 )
 from worker.generation.patches import with_document_changes
+from worker.parser.results import extract_indicators
 from worker.validation.validator import competency_links_for_row
 
 
@@ -39,7 +42,7 @@ def snapshot_changes(snapshot: SnapshotV2) -> list[FieldChange]:
     }
     changes = {}
     for link in snapshot.source_links:
-        if not link.field_path.startswith("/attributes/"):
+        if not link.field_path.startswith("/attributes/") or link.observed_value.get("calculated"):
             continue
         target = targets.get((link.target_kind, str(link.target_id)))
         if target is None:
@@ -78,7 +81,7 @@ def snapshot_changes(snapshot: SnapshotV2) -> list[FieldChange]:
     return list(changes.values())
 
 
-_DOCUMENT_OPS = {"set_document_value", "set_competency_links"}
+_DOCUMENT_OPS = DOCUMENT_MUTATION_OPS
 
 
 def _require_supported(snapshot: SnapshotV2) -> None:
@@ -138,6 +141,87 @@ class GenerationPlan:
 
     changes: list[FieldChange]
     competency_lists: list[CompetencyListEdit]
+
+
+@dataclass(frozen=True, slots=True)
+class SharedIndicatorEdit:
+    document_id: str
+    source_ref: dict
+    original_text: str
+    codes_and_texts: tuple[tuple[str, str], ...]
+    replaced_links: frozenset[tuple[str, str]]
+
+
+def _indicator_anchor(document_id, ref):
+    return (document_id, *(ref.get(key) for key in ("table", "row", "col", "paragraph_index")))
+
+
+def shared_indicator_edits(snapshot: SnapshotV2, parsed_documents):
+    split = [
+        change
+        for decision in (snapshot.review.decisions if snapshot.review else [])
+        for change in decision.changes
+        if change.get("op") == "set_shared_indicator_text" and change["action"] == "split"
+    ]
+    if not split:
+        return []
+    refs = {str(ref.id): (str(ref.document_id), json.loads(ref.locator)) for ref in snapshot.source_refs}
+    index = {}
+    for entity in snapshot.entities:
+        if entity.kind != "indicator":
+            continue
+        for ref_id in entity.source_ref_ids:
+            document_id, ref = refs[str(ref_id)]
+            key = (_indicator_anchor(document_id, ref), entity.attributes.get("code"))
+            index.setdefault(key, []).append((entity, str(ref_id)))
+    edits = []
+    for choice in split:
+        identity = str(choice["document_id"])
+        original = [parsed_documents[identity]["indicators"][i] for i in choice["indicator_indices"]]
+        ref = original[0]["source_ref"]
+        codes_and_texts, replaced_links = [], set()
+        for row in original:
+            matches = index.get((_indicator_anchor(identity, ref), row["code"]), ())
+            if len(matches) != 1:
+                raise GenerationBridgeError(f"Не найден однозначный индикатор {row['code']} для общего текста")
+            entity, ref_id = matches[0]
+            codes_and_texts.append((row["code"], entity.attributes["text"]))
+            replaced_links.add((str(entity.id), ref_id))
+        edits.append(SharedIndicatorEdit(
+            identity, ref, original[0]["text"], tuple(codes_and_texts), frozenset(replaced_links)
+        ))
+    return edits
+
+
+def apply_shared_indicator_edits(documents, edits, notes):
+    sources = {item.document_id: item for item in documents}
+    for edit in edits:
+        source = sources[edit.document_id]
+        codes = [code for code, _ in edit.codes_and_texts]
+        expected = "; ".join(codes) + ": " + edit.original_text
+        pattern = re.compile(
+            r"\s*;\s*".join(map(re.escape, codes))
+            + r"\s*:\s*" + r"\s+".join(map(re.escape, edit.original_text.split()))
+        )
+        new = " ".join(f"{code}: {' '.join(text.split())}" for code, text in edit.codes_and_texts)
+        try:
+            originals = [p for p in read_area_text(source.content, edit.source_ref) if pattern.fullmatch(p.strip())]
+            if len(originals) != 1:
+                raise DocxPatchError(f"не найден общий фрагмент «{expected}»")
+            indicators, issues = extract_indicators(
+                new, codes[0].split(".", 1)[0], SourceRefV2.model_validate(edit.source_ref)
+            )
+            if issues or [(x.code, x.text) for x in indicators] != [
+                (code, " ".join(text.split())) for code, text in edit.codes_and_texts
+            ]:
+                raise DocxPatchError("выбранные формулировки нельзя безопасно разделить по кодам")
+            patch = DocxPatch(edit.source_ref, originals[0], new)
+            patch_docx_bytes(source.content, [patch])
+        except (DocxPatchError, ValueError) as error:
+            notes.append(f"{source.file_name}: индикаторы {', '.join(codes)} не разделены ({error})")
+            continue
+        documents = with_document_changes(documents, edit.document_id, patches=[patch])
+    return documents
 
 
 def competency_list_edits(snapshot: SnapshotV2, original_documents) -> list[CompetencyListEdit]:

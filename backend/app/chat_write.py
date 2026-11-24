@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
 
+from app.curriculum_workload import with_legacy_curriculum_workload
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.repository import Repository
@@ -20,6 +21,7 @@ from worker.agent.proposal_apply import (
     plan_approved_changes,
     touched_document_ids,
     unwritable_changes,
+    workload_targets,
 )
 
 
@@ -70,6 +72,17 @@ class ChatWriteRepository:
                 proposal = ChangeProposal.model_validate(turn["result"])
                 if proposal.unresolved_questions:
                     raise DomainError(409, "Сначала разрешите вопросы предложения")
+                stored_snapshot = snapshot
+
+                def read_source(owner, document_id):
+                    return Repository.require(cur.execute(
+                        "SELECT original_name,content FROM source_documents WHERE program_id=%s AND id=%s",
+                        (owner, document_id),
+                    ).fetchone())
+
+                snapshot = with_legacy_curriculum_workload(
+                    snapshot, program_id, workload_targets(proposal), read_source,
+                )
                 try:
                     changes = plan_approved_changes(snapshot, proposal)
                 except ProposalApplicationError as error:
@@ -112,7 +125,7 @@ class ChatWriteRepository:
                 parent_version_id = current
                 prior_changes = []
                 for index, change in enumerate(changes):
-                    before_change = snapshot
+                    before_change = stored_snapshot if index == 0 else snapshot
                     snapshot = apply_change(snapshot, change)
                     prior_changes.append({
                         "op": "set_attribute", "target_kind": change.target_kind,

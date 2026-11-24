@@ -61,7 +61,29 @@ export type ReviewJob = {
   message: string | null;
   analysis_version_id: string | null;
   current_review_version_id: string | null;
+  document_ids?: string[] | null;
+  competency_code?: string | null;
 };
+
+type GraphBuildJobBase = {
+  id: string;
+  pending_version_id: string;
+  message: string | null;
+};
+
+export type GraphBuildJob =
+  | (GraphBuildJobBase & {
+    status: "pending" | "processing";
+    output_version_id: null;
+  })
+  | (GraphBuildJobBase & {
+    status: "completed";
+    output_version_id: string;
+  })
+  | (GraphBuildJobBase & {
+    status: "failed" | "conflict";
+    output_version_id: null;
+  });
 
 export type PrepareReviewRequest = {
   import_job_id: string;
@@ -70,6 +92,12 @@ export type PrepareReviewRequest = {
 };
 
 export type ReviewMutation =
+  | {
+    op: "set_shared_indicator_text";
+    document_id: string;
+    indicator_indices: number[];
+    action: "keep" | "split";
+  }
   | {
     op: "set_competency_links";
     document_id: string;
@@ -193,6 +221,11 @@ export type ReviewDetails = {
   confirmation: { accepted_warning_ids: string[]; author: string | null } | null;
   check_job_id: string | null;
   check_report: CheckReport | null;
+  graph_build: GraphBuildJob | null;
+  manual_check_targets?: {
+    rpd: Array<{ document_id: string; name: string }>;
+    competencies: Array<{ code: string; formulation: string }>;
+  };
   prepare_report: PrepareReport | null;
 };
 

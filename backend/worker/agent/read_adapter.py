@@ -9,6 +9,7 @@ from pydantic_ai import ModelRetry
 from pydantic_core import to_json
 
 from app.config import get_settings
+from app.curriculum_workload import HOURS_COMPONENT_PREFIX, with_legacy_curriculum_workload
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.repository import Repository
@@ -19,7 +20,9 @@ from worker.agent.contracts import (
     GraphProjection,
     SourceFragment,
     ValidationFinding,
+    WorkloadField,
 )
+from worker.agent.proposal_apply import ApprovedChange, touched_document_ids, unwritable_changes
 from worker.agent.read_port import configure_worker_read_port
 from worker.generation.docx_patch import DocxPatchError, read_area_text
 
@@ -188,12 +191,39 @@ class PostgresChatReadPort:
         entity = next((item for item in snapshot.entities if item.id == entity_id), None)
         if entity is None:
             raise DomainError(404, "Сущность отсутствует в выбранной версии")
+        if entity.kind == "curriculum_item" and "hours_by_kind" not in entity.attributes:
+            snapshot = await asyncio.to_thread(
+                with_legacy_curriculum_workload, snapshot, program_id, {entity_id},
+                Repository(self.pool).document_content,
+            )
+            entity = next(item for item in snapshot.entities if item.id == entity_id)
         ids = set(entity.source_ref_ids)
         bounded = _bounded_entity(entity)
         relations = [
             r for r in snapshot.relations if r.source_id == entity_id or r.target_id == entity_id
         ]
         bounded_relations = [_bounded_relation(r) for r in relations[:8]]
+        workload = []
+        if entity.kind == "curriculum_item" and "hours_by_kind" in entity.attributes:
+            for link in snapshot.source_links:
+                if (
+                    link.target_id == entity_id
+                    and link.field_path.startswith(HOURS_COMPONENT_PREFIX)
+                    and link.observed_value.get("cell_text") is not None
+                ):
+                    name = link.field_path[len(HOURS_COMPONENT_PREFIX):]
+                    name = name.replace("~1", "/").replace("~0", "~")
+                    workload.append(WorkloadField(
+                        label=name, hours=entity.attributes["hours_by_kind"][name],
+                        field_path=link.field_path, source_ref_id=link.source_ref_id,
+                    ))
+        hours_total_write_error = None
+        if workload:
+            hours_total_write_error = "Итог рассчитывается автоматически из граф нагрузки."
+        elif entity.kind == "curriculum_item" and type(entity.attributes.get("hours_total")) is int:
+            hours_total_write_error = await asyncio.to_thread(
+                self._curriculum_hours_write_error, program_id, snapshot, entity,
+            )
         return EntityReadResult(
             entity=bounded,
             matched_context=match_excerpt(json.dumps(entity.attributes, ensure_ascii=False), query)
@@ -205,7 +235,27 @@ class PostgresChatReadPort:
             or bounded_relations != relations[:8],
             relations=bounded_relations,
             source_refs=[_bounded_ref(ref) for ref in snapshot.source_refs if ref.id in ids][:5],
+            hours_total_write_error=hours_total_write_error,
+            editable_workload=workload,
         )
+
+    def _curriculum_hours_write_error(self, program_id, snapshot, entity):
+        hours = entity.attributes["hours_total"]
+        # Проверяем замену на временной копии DOCX. Никаких версий и файлов не записываем.
+        change = ApprovedChange(
+            "entity", entity.id, "/attributes/hours_total", hours, hours + 1, "", ()
+        )
+        document_ids = sorted(touched_document_ids(snapshot, [change]))
+        if not document_ids:
+            return "У общего объёма часов нет источника для прямой замены в учебном плане."
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id,content FROM source_documents WHERE program_id=%s AND id=ANY(%s)",
+                (program_id, document_ids),
+            ).fetchall()
+        documents = {str(row[0]): bytes(row[1]) for row in rows}
+        problems = unwritable_changes(snapshot, [change], documents)
+        return "; ".join(problems) if problems else None
 
     @limit_tool_payload
     async def read_source_fragment(
@@ -251,7 +301,7 @@ class PostgresChatReadPort:
             start = max(0, line_number - 1 - context_paragraphs * 3)
             end = min(len(lines), line_number + context_paragraphs * 3)
             fragment = lines[line_number - 1][:6000]
-            surrounding = "\n".join(lines[start:end])[:12000]
+            surrounding = "\n".join(lines[start:end])[:12000] if context_paragraphs else ""
             with self.pool.connection() as conn:
                 document = conn.execute(
                     "SELECT original_name FROM source_documents WHERE program_id=%s AND id=%s",
@@ -283,7 +333,7 @@ class PostgresChatReadPort:
             if not text:
                 raise DomainError(404, "В указанном фрагменте источника нет текста")
             fragment = text[:6000]
-            surrounding = fragment
+            surrounding = ""
             document_name = document["original_name"]
         return SourceFragment(
             source_ref=_bounded_ref(ref),
@@ -341,24 +391,91 @@ class PostgresChatReadPort:
 
     def _get_validation_findings(self, program_id, version_id, limit):
         with self.pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT id,rule_code,type,severity,status,details FROM validation_issues "
-                "WHERE program_id=%s AND version_id=%s ORDER BY created_at DESC,id LIMIT %s",
-                (program_id, version_id, limit),
-            ).fetchall()
-        return [
-            ValidationFinding.model_validate(
-                {
-                    "id": row[0],
-                    "rule_code": row[1],
-                    "type": row[2],
-                    "severity": row[3],
-                    "status": row[4],
-                    "details": _bounded_value(row[5], budget=900),
-                }
+            version = conn.execute(
+                "SELECT review FROM program_versions WHERE program_id=%s AND id=%s",
+                (program_id, version_id),
+            ).fetchone()
+            if version is None:
+                raise DomainError(404, "Версия программы не найдена")
+
+            review = version[0] or {}
+            review_id = review.get("review_id")
+            confirmation = review.get("confirmation") or {}
+            check_job_id = confirmation.get("check_job_id")
+            if not check_job_id:
+                latest_check = conn.execute(
+                    """SELECT id FROM processing_jobs WHERE program_id=%s
+                       AND input_version_id=%s AND type='validate'
+                       AND parameters->>'purpose'='check'
+                       AND parameters->>'manual_rule_codes' IS NULL
+                       AND report->>'outcome'='completed'
+                       ORDER BY created_at DESC,id DESC LIMIT 1""",
+                    (program_id, version_id),
+                ).fetchone()
+                check_job_id = latest_check[0] if latest_check else None
+
+            job_ids = [UUID(str(value)) for value in (review_id, check_job_id) if value]
+            if job_ids:
+                rows = conn.execute(
+                    """SELECT id,job_id,rule_code,type,severity,status,details
+                       FROM validation_issues WHERE program_id=%s
+                       AND (version_id=%s OR job_id=ANY(%s))
+                       ORDER BY created_at DESC,id LIMIT %s""",
+                    (program_id, version_id, job_ids, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id,job_id,rule_code,type,severity,status,details
+                       FROM validation_issues WHERE program_id=%s AND version_id=%s
+                       ORDER BY created_at DESC,id LIMIT %s""",
+                    (program_id, version_id, limit),
+                ).fetchall()
+
+        decisions = {
+            str(item.get("conflict_id"))
+            for item in review.get("decisions", [])
+            if isinstance(item, dict) and item.get("conflict_id")
+        }
+        accepted = {
+            str(value)
+            for value in confirmation.get("accepted_warning_ids", [])
+        }
+        has_current_check = check_job_id is not None
+        findings = []
+        for row in rows:
+            issue_id, job_id, rule_code, issue_type, severity, status, details = row
+            details = details or {}
+            if (
+                has_current_check
+                and review_id
+                and str(job_id) == str(review_id)
+                and str(rule_code).startswith("R-08")
+                and (
+                    not details.get("requires_decision")
+                    or str(issue_id) in decisions
+                )
+            ):
+                continue
+            effective_status = (
+                "resolved"
+                if str(issue_id) in decisions
+                else "accepted"
+                if str(issue_id) in accepted
+                else status
             )
-            for row in rows
-        ]
+            findings.append(
+                ValidationFinding.model_validate(
+                    {
+                        "id": issue_id,
+                        "rule_code": rule_code,
+                        "type": issue_type,
+                        "severity": severity,
+                        "status": effective_status,
+                        "details": _bounded_value(details, budget=900),
+                    }
+                )
+            )
+        return findings
 
 
 def build_read_port(pool):

@@ -156,8 +156,70 @@ def test_value_repeated_in_the_row_is_not_guessed():
         "entity", "e-1", "/attributes/formulation", "ref-1", {"value": "Способен А"}
     )
 
-    with pytest.raises(GenerationMappingError, match="не найдено записанное значение"):
+    with pytest.raises(GenerationMappingError, match="найдено неоднозначно"):
         resolve_planned_patches({"doc-1": docx}, plan_patches([change], [link], [ref]))
+
+
+def test_formulation_is_replaced_across_paragraphs_in_one_cell():
+    docx = make_docx(
+        "<w:tbl><w:tr><w:tc>" + _paragraph("ОПК-1. Способен  анализировать")
+        + _paragraph("научные данные.") + "</w:tc></w:tr></w:tbl>"
+    )
+    ref = SourceEvidence("ref-1", "doc-1", json.dumps({"table": 1, "row": 1, "col": 1}))
+    change = FieldChange(
+        "entity", "e-1", "/attributes/formulation", "Способен анализировать проверенные данные."
+    )
+    link = FieldEvidence(
+        "entity", "e-1", "/attributes/formulation", "ref-1",
+        {"value": "Способен анализировать научные данные."},
+    )
+    resolved = resolve_planned_patches({"doc-1": docx}, plan_patches([change], [link], [ref]))
+    patched = patch_docx_bytes(docx, resolved["doc-1"])
+
+    assert read_area_text(patched, {"table": 1, "row": 1, "col": 1}) == (
+        "ОПК-1. Способен анализировать", "проверенные данные."
+    )
+
+
+def test_formulation_search_stops_at_cell_boundary():
+    docx = make_docx(_table(("Способен анализировать", "научные данные.")))
+    with pytest.raises(DocxPatchError, match="не найден"):
+        patch_docx_bytes(docx, [DocxPatch(
+            {"table": 1, "row": 1}, "Способен анализировать научные данные.",
+            "Способен анализировать проверенные данные.", normalize_whitespace=True,
+        )])
+
+
+def test_code_glued_to_formulation_is_still_found():
+    # Характеристика и РПП пишут код и текст одним абзацем без пробела.
+    docx = make_docx(
+        _paragraph("УКБ-2Способен устанавливать и поддерживать взаимоотношения"),
+        _table(("УК-1.1Анализирует задачу", "войлок")),
+    )
+
+    paragraph_patch = DocxPatch(
+        {"paragraph_index": 1},
+        "Способен устанавливать и поддерживать взаимоотношения",
+        "Способен выстраивать отношения",
+        normalize_whitespace=True,
+    )
+    cell_patch = DocxPatch(
+        {"table": 1, "row": 1, "col": 1},
+        "Анализирует задачу",
+        "Разбирает задачу",
+        normalize_whitespace=True,
+    )
+    patched = patch_docx_bytes(docx, [paragraph_patch, cell_patch])
+
+    assert read_area_text(patched, {"paragraph_index": 1}) == (
+        "УКБ-2Способен выстраивать отношения",
+    )
+    assert read_area_text(patched, {"table": 1, "row": 1, "col": 1}) == ("УК-1.1Разбирает задачу",)
+
+    # Буква рядом с буквой по-прежнему означает «внутри слова» — не заменяем.
+    inside_word = make_docx(_paragraph("приспособен устанавливать взаимоотношения"))
+    with pytest.raises(DocxPatchError, match="не найден"):
+        patch_docx_bytes(inside_word, [paragraph_patch])
 
 
 def test_missing_value_can_be_reported_instead_of_failing_the_plan():

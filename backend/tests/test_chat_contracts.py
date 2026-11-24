@@ -204,8 +204,11 @@ def test_dispatcher_pages_past_one_hundred_pending_turns():
                 "user_text": "Вопрос",
                 "program_id": uuid4(),
                 "version_id": uuid4(),
-                "conversation": None,
+                "session_id": uuid4(),
             }
+
+        def prior_turns(self, turn, limit):
+            return []
 
     class Client:
         started = []

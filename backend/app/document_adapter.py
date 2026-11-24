@@ -9,6 +9,7 @@ from collections import defaultdict
 from copy import deepcopy
 from uuid import UUID, uuid5
 
+from app.curriculum_workload import HOURS_TOTAL_PATH, workload_evidence
 from app.domain import SnapshotV2
 from app.parser_document import parse_output
 
@@ -94,6 +95,9 @@ class DocumentBuilder:
             seed += f":{ordinal}"
         identity = self.identity(seed)
         attributes = {k: deepcopy(v) for k, v in member.items() if k != "source_ref"}
+        workload = attributes.pop("workload_cells", None)
+        if workload:
+            attributes["hours_by_kind"] = {name: cell["hours"] for name, cell in workload.items()}
         item = self.entities.setdefault(
             identity,
             {
@@ -105,7 +109,18 @@ class DocumentBuilder:
         )
         original_member = member if original_member is None else original_member
         observed = {k: deepcopy(v) for k, v in original_member.items() if k != "source_ref"}
-        self.evidence(item, "entity", document_id, ref, attributes, observed)
+        fields = {key: value for key, value in attributes.items() if not workload or key != "hours_by_kind"}
+        self.evidence(item, "entity", document_id, ref, fields, observed)
+        if workload:
+            ref_id = self.source(document_id, ref)
+            total_link = self.identity(f"link:entity:{identity}:{HOURS_TOTAL_PATH}:{ref_id}")
+            self.links[total_link]["observed_value"]["calculated"] = True
+            for cell_ref, cell_link in workload_evidence(self.program_id, identity, document_id, workload):
+                ref_id, link_id = str(cell_ref.id), str(cell_link.id)
+                self.refs.setdefault(ref_id, cell_ref.model_dump(mode="json"))
+                self.links[link_id] = cell_link.model_dump(mode="json")
+                if ref_id not in item["source_ref_ids"]:
+                    item["source_ref_ids"].append(ref_id)
         self.register(document_id, kind, key, identity)
         if kind == "curriculum_item":
             self.register(document_id, kind, f"{key}::semester={attributes['semester']}", identity)

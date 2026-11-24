@@ -136,11 +136,17 @@ class AssessmentTool(BaseEntity):
     name: str
 
 
+class CurriculumWorkloadCell(BaseEntity):
+    hours: int = Field(ge=0, strict=True)
+    text: str = Field(min_length=1)
+
+
 class CurriculumItem(BaseEntity):
     discipline_name: str
     semester: int = Field(ge=1, le=8)
     credit_units: int = Field(ge=0)
     hours_total: int = Field(ge=0)
+    workload_cells: dict[str, CurriculumWorkloadCell] | None = None
     block: str
     # Регистрационный номер рабочей программы из квадратных скобок в названии
     # (например, «[076083] Глубокое обучение…»); служит ключом сопоставления

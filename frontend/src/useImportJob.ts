@@ -6,6 +6,7 @@ import {
   saveSession,
   type CheckJob,
   type DecisionBatchRequest,
+  type GraphBuildJob,
   type ImportJob,
   type ImportSession,
   type OptionalRuleCode,
@@ -16,6 +17,8 @@ import {
   type VersionRead,
 } from "./api";
 import { signatureForProgram, type ProgramSignature } from "./signature";
+import { levelOnlyVariantTargets } from "./levelVariants";
+import { ruleDisplayLabel } from "./diagnostics";
 
 const emptySession: ImportSession = { programId: "", jobId: "" };
 
@@ -44,6 +47,8 @@ export function useImportJob() {
   const [job, setJob] = useState<ImportJob | null>(null);
   const [reviewJob, setReviewJob] = useState<ReviewJob | null>(null);
   const [reviewDetails, setReviewDetails] = useState<ReviewDetails | null>(null);
+  const [graphBuildJob, setGraphBuildJob] = useState<GraphBuildJob | null>(null);
+  const graphBuildHandledRef = useRef("");
   const reviewDetailsLoadsRef = useRef(new Map<string, Promise<ReviewDetails>>());
   const [checkJob, setCheckJob] = useState<CheckJob | null>(null);
   const [optionalRuleChecks, setOptionalRuleChecks] = useState<Partial<Record<OptionalRuleCode, CheckJob>>>({});
@@ -82,6 +87,9 @@ export function useImportJob() {
     setJob(null);
     setReviewJob(null);
     setReviewDetails(null);
+    setGraphBuildJob(null);
+    signatureRef.current = null;
+    setSignature(null);
     setCheckJob(null);
     setOptionalRuleChecks({});
     setRecoveredReviewFor(null);
@@ -175,8 +183,14 @@ export function useImportJob() {
           snapshot: { ...details.version.snapshot, source_refs: [...refs.values()] },
         },
       };
-      if (sessionRef.current.programId === programId && sessionRef.current.versionId === versionId) {
+      const active = sessionRef.current;
+      if (active.programId === programId && active.versionId === versionId) {
         setReviewDetails(complete);
+        if (!complete.confirmed && complete.check_job_id && complete.check_report &&
+          (!active.checkJobId || active.checkVersionId !== versionId)
+        ) {
+          updateSession({ checkJobId: complete.check_job_id, checkVersionId: versionId });
+        }
       }
       return complete;
     })();
@@ -191,7 +205,89 @@ export function useImportJob() {
       },
     );
     return load;
-  }, []);
+  }, [updateSession]);
+
+  useEffect(() => {
+    const pendingBuild = reviewDetails?.graph_build;
+    if (!pendingBuild || !session.programId) {
+      setGraphBuildJob(null);
+      return;
+    }
+
+    setGraphBuildJob(pendingBuild);
+    let active = true;
+    let timer: number | undefined;
+    const reviewId = reviewDetails.version.snapshot.review?.review_id;
+    const programId = session.programId;
+
+    const applyBuiltVersion = async (build: GraphBuildJob) => {
+      if (build.status !== "completed") return;
+      const versionId = build.output_version_id;
+      if (graphBuildHandledRef.current === build.id) return;
+      graphBuildHandledRef.current = build.id;
+      updateSession({ versionId, checkJobId: undefined, checkVersionId: undefined });
+      setCheckJob(null);
+      try {
+        await loadReviewDetails(versionId, programId);
+        if (active) setGraphBuildJob(null);
+      } catch {
+        if (active) setNotice("Граф программы собран. Обновляем данные версии…");
+      }
+    };
+
+    if (pendingBuild.status === "completed") {
+      void applyBuiltVersion(pendingBuild);
+      return () => { active = false; };
+    }
+    if (pendingBuild.status === "failed" || pendingBuild.status === "conflict") {
+      setNotice(pendingBuild.message || "Не удалось завершить сборку графа программы.");
+      return () => { active = false; };
+    }
+    if (!reviewId) return () => { active = false; };
+
+    const poll = async () => {
+      try {
+        const latest = await api<GraphBuildJob>(
+          `/api/v1/programs/${programId}/reviews/${reviewId}/graph-build`,
+        );
+        if (!active) return;
+        setGraphBuildJob(latest);
+        if (latest.status === "completed") {
+          await applyBuiltVersion(latest);
+          return;
+        }
+        if (latest.status === "failed" || latest.status === "conflict") {
+          setNotice(latest.message || "Не удалось завершить сборку графа программы.");
+          try {
+            const currentVersionId = sessionRef.current.versionId;
+            if (currentVersionId) {
+              const refreshed = await loadReviewDetails(currentVersionId, programId);
+              if (active) setReviewDetails(refreshed);
+            }
+          } catch {
+            // Сохраняем исходное предупреждение; список замечаний обновится при следующем чтении.
+          }
+          return;
+        }
+      } catch {
+        // Временная ошибка чтения статуса не отменяет устойчивую задачу Temporal.
+      }
+      if (active) timer = window.setTimeout(() => void poll(), 1500);
+    };
+
+    timer = window.setTimeout(() => void poll(), 700);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    reviewDetails?.graph_build?.id,
+    reviewDetails?.graph_build?.status,
+    reviewDetails?.version.snapshot.review?.review_id,
+    session.programId,
+    updateSession,
+    loadReviewDetails,
+  ]);
 
   useEffect(() => {
     signatureRef.current = null;
@@ -267,7 +363,7 @@ export function useImportJob() {
     };
     void openProgram();
     return () => { active = false; };
-  }, [session.programId, applyProgramState, loadReviewDetails, resetStaleSession]);
+  }, [session.programId, applyProgramState, loadReviewDetails, openProgramState, resetStaleSession]);
 
   useEffect(() => {
     if (!session.programId) return;
@@ -661,7 +757,7 @@ export function useImportJob() {
           });
           return;
         }
-        setNotice(error instanceof Error ? error.message : `Не удалось получить результат ${ruleCode}`);
+        setNotice(error instanceof Error ? error.message : `Не удалось получить результат проверки «${ruleDisplayLabel(ruleCode).toLocaleLowerCase("ru")}»`);
         timers.set(ruleCode, setTimeout(() => void poll(ruleCode, jobId), 3000));
       }
     };
@@ -835,48 +931,13 @@ export function useImportJob() {
     }
   }
 
-  // Уровень освоения («Базовый», «Средний», …) в скобках — служебная пометка
-  // ЦКМВ: одни документы её приводят, другие нет, содержание совпадает.
-  const LEVEL_NOTE = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/i;
-  const LEVEL_NOTE_ALL = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/gi;
-
-  function variantLabelText(label: string): string {
-    return label.replace(/^Выбрать значение из документов:\s*/i, "").trim();
-  }
-
-  function variantBaseText(label: string): string {
-    return variantLabelText(label)
-      .replace(LEVEL_NOTE_ALL, "")
-      .replaceAll("ё", "е")
-      .toLocaleLowerCase("ru")
-      .replace(/\s+/g, " ")
-      .trim()
-      .replace(/[.,;:!?]+$/, "")
-      .trim();
-  }
-
-  function variantHasLevel(label: string): boolean {
-    return LEVEL_NOTE.test(variantLabelText(label));
-  }
-
   async function decideLevelOnlyVariants(): Promise<number | null> {
     const current = sessionRef.current;
     if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return null;
     const details = reviewDetails;
     if (!details) return 0;
 
-    const targets: Array<{ conflictId: string; variantId: string }> = [];
-    for (const issue of details.issues) {
-      if (!issue.requires_decision || issue.decision || issue.variants.length < 2) continue;
-
-      const bases = new Set(issue.variants.map((variant) => variantBaseText(variant.label)));
-      if (bases.size !== 1) continue;
-
-      const withLevel = issue.variants.filter((variant) => variantHasLevel(variant.label));
-      if (withLevel.length !== 1) continue;
-
-      targets.push({ conflictId: issue.id, variantId: withLevel[0].id });
-    }
+    const targets = levelOnlyVariantTargets(details.issues);
 
     if (targets.length === 0) return 0;
     const signature = signatureForProgram(signatureRef.current, current.programId);
@@ -1008,7 +1069,7 @@ export function useImportJob() {
     }
   }, [updateSession]);
 
-  async function runOptionalRuleCheck(ruleCode: OptionalRuleCode, documentId?: string) {
+  async function runOptionalRuleCheck(ruleCode: OptionalRuleCode, target: string) {
     const current = sessionRef.current;
     const currentDetails = reviewDetails;
     const anotherCheckRunning = Object.values(optionalRuleChecks).some(
@@ -1018,7 +1079,7 @@ export function useImportJob() {
       checkJob && ["pending", "processing"].includes(checkJob.status),
     );
     if (
-      reviewBusyRef.current || anotherCheckRunning || standardCheckRunning ||
+      !target || reviewBusyRef.current || anotherCheckRunning || standardCheckRunning ||
       !current.programId || !current.reviewId || !current.versionId ||
       !currentDetails || currentDetails.version.id !== current.versionId ||
       currentDetails.version.snapshot.review?.graph_ready !== true || currentDetails.confirmed
@@ -1034,7 +1095,7 @@ export function useImportJob() {
           body: JSON.stringify({
             version_id: current.versionId,
             rule_codes: [ruleCode],
-            ...(ruleCode === "R-11" && documentId ? { document_ids: [documentId] } : {}),
+            ...(ruleCode === "R-11" ? { document_ids: [target] } : { competency_code: target }),
           }),
         },
       );
@@ -1049,20 +1110,26 @@ export function useImportJob() {
       updateSession({ optionalRuleCheckJobIds });
       setNotice("");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : `Не удалось запустить ${ruleCode}`);
+      setNotice(error instanceof Error ? error.message : `Не удалось запустить проверку «${ruleDisplayLabel(ruleCode).toLocaleLowerCase("ru")}»`);
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
     }
   }
 
-  async function confirm(acceptedWarningIds: string[]) {
+  async function confirm(acceptedWarningIds: string[], expectedVersionId?: string) {
     const current = sessionRef.current;
-    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId || !checkJob || checkJob.status !== "completed") return;
+    if (expectedVersionId && current.versionId !== expectedVersionId) {
+      setNotice("Версия программы изменилась. Просмотрите актуальные замечания.");
+      return null;
+    }
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId ||
+      !checkJob || checkJob.status !== "completed" || checkJob.input_version_id !== current.versionId
+    ) return null;
     const signature = signatureForProgram(signatureRef.current, current.programId);
     if (!signature) {
       setNotice("Укажите подпись для этой программы кнопкой над программой.");
-      return;
+      return null;
     }
     reviewBusyRef.current = true;
     setReviewBusy(true);
@@ -1079,9 +1146,13 @@ export function useImportJob() {
       });
       updateSession({ versionId: version.id });
       setNotice("");
-      await loadReviewDetails(version.id, current.programId);
+      void loadReviewDetails(version.id, current.programId).catch(() => {
+        setNotice("Версия подтверждена. Не удалось обновить данные на экране.");
+      });
+      return version;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось подтвердить версию");
+      return null;
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
@@ -1133,6 +1204,7 @@ export function useImportJob() {
     job,
     reviewJob,
     reviewDetails,
+    graphBuildJob,
     checkJob,
     optionalRuleChecks,
     busy,

@@ -3,7 +3,9 @@
 from copy import deepcopy
 from uuid import UUID, uuid5
 
-from app.document_reconciliation import validate_document_mutation_variants
+from app.document_reconciliation import (
+    validate_document_mutation_variants,
+)
 from app.errors import DomainError
 from app.review_logic import digest
 from app.validation_bridge import (
@@ -295,3 +297,5 @@ def analyze_documents(documents, job_id, *, config=None):
             })
     return {"schema_version": 2, "ruleset": ruleset, "coverage": coverage,
             "issues": issues, "artifacts": []}
+
+

@@ -15,7 +15,7 @@ from .common import (
     finalize_output, heading_level, normalize, parse_workload_number, read_section,
 )
 from backend.contracts.document_v2.models import (
-    Competency, CurriculumItem, CurriculumMeta, CurriculumOutput, ParseIssue,
+    Competency, CurriculumItem, CurriculumMeta, CurriculumOutput, CurriculumWorkloadCell, ParseIssue,
     Relation, SourceRef,
 )
 from .results import split_competency
@@ -204,7 +204,7 @@ def _curriculum_header(rows, start):
         for column, path in enumerate(labels)
         if column not in columns.values()
     }
-    return {"columns": columns, "hours": hours, "end": end, "width": width}
+    return {"columns": columns, "hours": hours, "labels": labels, "end": end, "width": width}
 
 
 def _hours_total(output, cells, header, ref):
@@ -214,26 +214,34 @@ def _hours_total(output, cells, header, ref):
         return _integer(
             output, cells[column].text, "hours_total",
             ref.model_copy(update={"col": column + 1}),
-        )
+        ), None
     if len(totals) > 1:
         _issue(output, "ambiguous", "УП: несколько колонок общего количества часов", ref)
-        return None
+        return None, None
     components = [col for col, kind in header["hours"].items() if kind == "component"]
     unsupported = [col for col, kind in header["hours"].items() if kind in {"unknown", "subtotal"}]
     if not components or unsupported:
         _issue(output, "unexpected_format", "УП: нельзя однозначно определить независимые колонки часов по шапке", ref)
-        return None
-    values = []
+        return None, None
+    workload = {}
     seen = set()
     for column in components:
         cell = cells[column]
         cell_ref = ref.model_copy(update={"col": column + 1})
         if cell._tc in seen:
             _issue(output, "ambiguous", "УП: одна ячейка объединяет несколько видов нагрузки", cell_ref)
-            return None
+            return None, None
         seen.add(cell._tc)
-        values.append(_integer(output, cell.text, "часы вида работы", cell_ref))
-    return sum(values) if all(value is not None for value in values) else None
+        text = cell.text.strip()
+        hours = _integer(output, text, "часы вида работы", cell_ref)
+        if hours is None:
+            return None, None
+        label = " / ".join(header["labels"][column])
+        if label in workload:
+            _issue(output, "ambiguous", "УП: одинаковые названия видов нагрузки", cell_ref)
+            return None, None
+        workload[label] = CurriculumWorkloadCell(hours=hours, text=text, source_ref=cell_ref)
+    return sum(cell.hours for cell in workload.values()), workload
 
 
 def _discipline_name(cell):
@@ -423,12 +431,12 @@ def extract_curriculum_items(output, document):
                 output, cells[credit_col].text, "credit_units",
                 row_ref.model_copy(update={"col": credit_col + 1}), minimum=0,
             )
-            hours = _hours_total(output, cells, header, row_ref)
+            hours, workload = _hours_total(output, cells, header, row_ref)
             if credits is None or hours is None:
                 continue
             output.curriculum_items.append(CurriculumItem(
                 discipline_name=name, semester=actual_semester,
-                credit_units=credits, hours_total=hours,
+                credit_units=credits, hours_total=hours, workload_cells=workload,
                 block=raw_block, source_ref=row_ref,
                 registration_number=registration_number,
             ))
@@ -463,7 +471,10 @@ def parse_curriculum(file_path, *, program_id: str | None = None) -> CurriculumO
     file_path = Path(file_path)
     if file_path.suffix.lower() != ".docx":
         raise ValueError("Ожидается учебный план в формате DOCX")
-    raw = file_path.read_bytes()
+    return parse_curriculum_content(file_path.read_bytes(), file_path.name, program_id=program_id)
+
+
+def parse_curriculum_content(raw, file_name, *, program_id: str | None = None) -> CurriculumOutput:
     document = Document(BytesIO(raw))
     title_parts = []
     for block in document.iter_inner_content():
@@ -477,8 +488,8 @@ def parse_curriculum(file_path, *, program_id: str | None = None) -> CurriculumO
     if "учебныйплан" not in title or "рабочаяпрограмма" in title:
         raise ValueError("Не удалось однозначно распознать учебный план по титулу")
     output = CurriculumOutput(meta=CurriculumMeta(
-        file_name=file_path.name, file_hash=sha256(raw).hexdigest(),
-        parser_config="curriculum_docx_v5", program_id=program_id,
+        file_name=file_name, file_hash=sha256(raw).hexdigest(),
+        parser_config="curriculum_docx_v6", program_id=program_id,
     ))
     extract_curriculum_competencies(output, document)
     extract_curriculum_items(output, document)

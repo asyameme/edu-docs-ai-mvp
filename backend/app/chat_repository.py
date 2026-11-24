@@ -146,17 +146,8 @@ class ChatRepository:
     def turn_input(self, turn_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
-                "SELECT t.id,t.user_text,"
-                "COALESCE(t.conversation,previous.conversation) AS conversation,"
-                "s.id AS session_id,s.program_id,s.version_id "
-                "FROM chat_turns t JOIN chat_sessions s ON s.id=t.session_id "
-                "LEFT JOIN LATERAL ("
-                " SELECT prior.conversation FROM chat_turns prior "
-                " WHERE prior.session_id=t.session_id AND prior.status='completed' "
-                " AND (prior.created_at,prior.id)<(t.created_at,t.id) "
-                " AND prior.conversation IS NOT NULL "
-                " ORDER BY prior.created_at DESC,prior.id DESC LIMIT 1"
-                ") previous ON true WHERE t.id=%s",
+                "SELECT t.id,t.user_text,t.created_at,s.id AS session_id,s.program_id,s.version_id "
+                "FROM chat_turns t JOIN chat_sessions s ON s.id=t.session_id WHERE t.id=%s",
                 (turn_id,),
             ).fetchone()
             if row is None:
@@ -173,6 +164,18 @@ class ChatRepository:
             ):
                 raise DomainError(409, "Чат станет доступен после сборки графа")
             return row
+
+    def prior_turns(self, turn, limit):
+        """Завершённые обмены до сообщения в той же сессии, от старых к новым."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            rows = cur.execute(
+                """SELECT user_text,result FROM chat_turns WHERE session_id=%s
+                   AND status='completed' AND result IS NOT NULL
+                   AND (created_at,id)<(%s,%s)
+                   ORDER BY created_at DESC,id DESC LIMIT %s""",
+                (turn["session_id"], turn["created_at"], turn["id"], limit),
+            ).fetchall()
+        return rows[::-1]
 
     def turn_status(self, turn_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -197,6 +200,18 @@ class ChatRepository:
                 raise DomainError(422, "Ответ содержит источник вне выбранной версии")
             result["sources"] = [sources[str(item["id"])] for item in result.get("sources", [])]
         elif result.get("kind") == "change_proposal":
+            from app.curriculum_workload import with_legacy_curriculum_workload
+            from app.domain import SnapshotV2
+            from worker.agent.contracts import ChangeProposal
+            from worker.agent.proposal_apply import workload_targets
+
+            targets = workload_targets(ChangeProposal.model_validate(result))
+            if targets:
+                editable = with_legacy_curriculum_workload(
+                    SnapshotV2.model_validate(snapshot), turn["program_id"], targets,
+                    Repository(self.pool).document_content,
+                )
+                source_ids.update(str(ref.id) for ref in editable.source_refs)
             for change in result.get("changes", []):
                 allowed = entity_ids if change["target_kind"] == "entity" else relation_ids
                 if str(change["target_id"]) not in allowed or not set(
