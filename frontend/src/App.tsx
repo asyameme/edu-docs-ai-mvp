@@ -1055,7 +1055,10 @@ function App() {
             ? ""
             : chatStatusMessage;
   const currentCheckReport = checkMatchesCurrentVersion ? processing.checkJob?.report ?? null : null;
-  const displayedCoverage = currentCheckReport?.coverage ?? (graphReady ? [] : prepareReport?.coverage ?? []);
+  // Список правил показывается только на этапе ответов (до сборки графа).
+  // После сборки графа правила со страницы исчезают: остаются статус проверки
+  // и блок ручных проверок R-09/R-11.
+  const displayedCoverage = graphReady ? [] : prepareReport?.coverage ?? [];
   const displayedValidationIssueCount = groupDiagnostics(
     (currentCheckReport?.issues ?? (graphReady ? [] : prepareReport?.issues ?? []))
       .filter((issue) => !issue.requires_decision).map((issue) => reviewDiagnostic(issue, [])),
@@ -1642,7 +1645,9 @@ function App() {
                           <div><strong>{parsedProgram.documentCount}</strong><span>файлов обработано</span></div>
                           <div><strong>{displayedValidationIssueCount}</strong><span>групп замечаний проверки</span></div>
                           <div><strong>{unresolvedCount}</strong><span>решений ожидают</span></div>
-                          <div><strong>{displayedCoverage.length}</strong><span>видов проверок</span></div>
+                          {!graphReady && (
+                            <div><strong>{displayedCoverage.length}</strong><span>видов проверок</span></div>
+                          )}
                         </div>
                         <p className="validation-stage-message" role="status">
                           {checkIsRunning
