@@ -29,6 +29,39 @@ def client_for(monkeypatch, repository):
     return TestClient(app)
 
 
+def test_accept_serializes_full_version_without_generic_graph_walk(monkeypatch):
+    import fastapi.encoders
+
+    from app.chat_write import ChatWriteRepository
+
+    program, session, turn, version, check = [uuid4() for _ in range(5)]
+    snapshot = {"metadata": {"probe": True, "number": 0, "fraction": 0.75},
+                "source_links": [{"observed_value": {"value": None, "text": "ё"}}]}
+    result = {"version": {"id": version, "snapshot": snapshot}, "check_job_id": check}
+    monkeypatch.setattr(ChatWriteRepository, "accept", lambda *a, **kw: result)
+    original_encoder = fastapi.encoders.jsonable_encoder
+
+    def checked_encoder(value, *a, **kw):
+        if value is snapshot:
+            raise AssertionError("Граф не должен повторно обходиться общим кодировщиком")
+        return original_encoder(value, *a, **kw)
+
+    monkeypatch.setattr(fastapi.encoders, "jsonable_encoder", checked_encoder)
+    app = FastAPI()
+    app.state.resources = SimpleNamespace(postgres=None)
+    app.include_router(chat_api.router)
+    with TestClient(app) as http:
+        response = http.post(
+            f"/api/v1/programs/{program}/chat/sessions/{session}/runs/{turn}/accept",
+            json={"expected_version_id": str(version), "signature": "Проверка"},
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+    assert response.status_code == 201
+    assert response.json() == {
+        "version": {"id": str(version), "snapshot": snapshot}, "check_job_id": str(check),
+    }
+
+
 @pytest.mark.parametrize("case,status", [("missing", 404), ("foreign", 404), ("invalid", 422)])
 def test_sse_validates_run_before_streaming(monkeypatch, case, status):
     class Repository:

@@ -44,12 +44,13 @@ class ChatWriteRepository:
             if version is None:
                 if current != body.expected_version_id:
                     raise DomainError(409, "Версия изменилась; получите новое предложение")
-                session_snapshot = ReviewRepository.version(
-                    cur, program_id, turn["version_id"]
-                )["snapshot"]
                 current_snapshot = ReviewRepository.version(cur, program_id, current)["snapshot"]
-                if content_hash(session_snapshot) != content_hash(current_snapshot):
-                    raise DomainError(409, "Предложение относится к другому состоянию графа")
+                if turn["version_id"] != current:
+                    session_snapshot = ReviewRepository.version(
+                        cur, program_id, turn["version_id"]
+                    )["snapshot"]
+                    if content_hash(session_snapshot) != content_hash(current_snapshot):
+                        raise DomainError(409, "Предложение относится к другому состоянию графа")
                 if turn["status"] != "completed" or (turn["result"] or {}).get(
                     "kind"
                 ) != "change_proposal":
@@ -111,23 +112,29 @@ class ChatWriteRepository:
                 parent_version_id = current
                 prior_changes = []
                 for index, change in enumerate(changes):
+                    before_change = snapshot
                     snapshot = apply_change(snapshot, change)
                     prior_changes.append({
                         "op": "set_attribute", "target_kind": change.target_kind,
                         "target_id": str(change.target_id), "field_path": change.field_path,
                         "value": change.new_value,
                     })
-                    snapshot.review.confirmation = None
-                    snapshot.review.decisions = [
+                    decisions = [
                         item for item in snapshot.review.decisions
                         if item.conflict_id != turn_id
                     ]
-                    snapshot.review.decisions.append(ReviewDecision(
+                    decisions.append(ReviewDecision(
                         conflict_id=turn_id, variant_id=turn_id,
                         check_job_id=snapshot.review.review_id,
                         changes=list(prior_changes),
                         decided_at=datetime.now(UTC), author=body.signature,
                     ))
+                    snapshot = snapshot.model_copy(update={
+                        "review": snapshot.review.model_copy(update={
+                            "confirmation": None,
+                            "decisions": decisions,
+                        }),
+                    })
                     # Каждая правка получает собственную неизменяемую версию и проверку.
                     try:
                         project_snapshot_documents(document_inputs, snapshot)
@@ -138,6 +145,7 @@ class ChatWriteRepository:
                         key=key if index == len(changes) - 1 else None,
                         fingerprint=fingerprint if index == len(changes) - 1 else None,
                         actor_type="user", actor_id=body.signature,
+                        before_snapshot=before_change,
                     )
                     parent_version_id = version["id"]
                     check_id = ReviewRepository(self.pool).create(
@@ -145,6 +153,8 @@ class ChatWriteRepository:
                         CheckCreate(version_id=version["id"]), purpose="check",
                         review_id=snapshot.review.review_id, allow_historical=True,
                         connection=conn,
+                        snapshot_override=snapshot,
+                        review_override=review,
                     )
                 cur.execute(
                     "UPDATE chat_sessions SET version_id=%s,updated_at=now() WHERE id=%s",

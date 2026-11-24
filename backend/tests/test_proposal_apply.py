@@ -231,6 +231,28 @@ def test_apply_change_returns_new_snapshot(snapshot):
     original = next(item for item in snap.entities if item.id == data["entity"])
     assert original.attributes["hours"] == 108
     assert len(updated.source_links) == len(snap.source_links)
+    assert updated.source_links is snap.source_links
+    assert updated.source_refs is snap.source_refs
+    assert updated.relations is snap.relations
+    assert updated.entities[0] is not snap.entities[0]
+    assert updated.entities[0].attributes is not snap.entities[0].attributes
+
+
+def test_graph_validation_serializes_each_evidence_target_once(snapshot, monkeypatch):
+    snap, data = snapshot
+    raw = snap.model_dump(mode="json")
+    original_dump = Entity.model_dump
+    dumped_targets = []
+
+    def counted_dump(self, *args, **kwargs):
+        if self.id == data["entity"]:
+            dumped_targets.append(self.id)
+        return original_dump(self, *args, **kwargs)
+
+    monkeypatch.setattr(Entity, "model_dump", counted_dump)
+    SnapshotV2.model_validate(raw)
+
+    assert dumped_targets == [data["entity"]]
 
 
 def test_generation_inputs_touch_all_evidence_documents(snapshot):

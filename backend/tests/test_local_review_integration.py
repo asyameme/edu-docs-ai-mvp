@@ -120,7 +120,7 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
             and "graph_validation" in rule["phases"]
             and rule.get("run_mode", "automatic") == "automatic"
         }
-        assert len(coverage) == 9
+        assert len(coverage) == 13
         assert "R-07" not in coverage
         assert "R-01-graph" in coverage
         assert all("checks" not in entry for entry in report["coverage"])

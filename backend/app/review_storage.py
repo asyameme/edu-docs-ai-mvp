@@ -30,6 +30,22 @@ def previous_version(cur, program_id, key, fingerprint):
         return version_dto(row)
 
 
+def journal_before_snapshot(before, snapshot, state):
+    """Сериализовать прежние значения только у изменившихся частей модели."""
+    from app.domain import SnapshotV2
+
+    if not isinstance(before, SnapshotV2) or not isinstance(snapshot, SnapshotV2):
+        return before.model_dump(mode="json") if hasattr(before, "model_dump") else before
+    shared = {
+        field for field in type(snapshot).model_fields
+        if getattr(before, field) is getattr(snapshot, field)
+    }
+    return {
+        **before.model_dump(mode="json", exclude=shared),
+        **{field: state[field] for field in shared},
+    }
+
+
 def insert_version(
     cur,
     program_id,
@@ -43,31 +59,84 @@ def insert_version(
     restore_id=None,
     actor_type="system",
     actor_id="backend",
+    reuse_parent_graph=False,
+    before_snapshot=None,
 ):
+    from app.domain import SnapshotV2
     from app.graph_storage import journal, load_graph, save_graph
+    from app.review_logic import digest
 
     state = snapshot.model_dump(mode="json")
+    before_data = journal_before_snapshot(before_snapshot, snapshot, state)
     parent = cur.execute(
         "SELECT number,graph_state_id,review FROM program_versions WHERE program_id=%s AND id=%s",
         (program_id, parent_id),
     ).fetchone()
     if parent is None:
         raise DomainError(404, "Родительская версия не найдена")
-    before = load_graph(cur, parent["graph_state_id"], parent["review"])
     if restore_id:
+        before = before_data
+        if before is None:
+            before = load_graph(cur, parent["graph_state_id"], parent["review"])
         graph = cur.execute(
             "SELECT graph_state_id FROM program_versions WHERE program_id=%s AND id=%s",
             (program_id, restore_id),
         ).fetchone()["graph_state_id"]
     elif (state.get("review") or {}).get("graph_ready") is False:
+        before = before_data
+        if before is None:
+            before = load_graph(cur, parent["graph_state_id"], parent["review"])
         graph = None
+    elif reuse_parent_graph:
+        if isinstance(before_snapshot, SnapshotV2) and isinstance(snapshot, SnapshotV2):
+            graph_unchanged = all(
+                getattr(before_snapshot, field) is getattr(snapshot, field)
+                for field in (
+                    "schema_version", "metadata", "document_ids", "entities", "relations",
+                    "source_refs", "source_links",
+                )
+            )
+            if not graph_unchanged:
+                raise DomainError(
+                    409, "Повторное использование требует неизменённой модели графа"
+                )
+            # Снимки разделяют те же объекты графа; в журнале меняется только review.
+            before = {
+                **state,
+                "review": before_snapshot.review.model_dump(mode="json")
+                if before_snapshot.review is not None
+                else None,
+            }
+        else:
+            before = before_data
+            if before is None:
+                before = load_graph(cur, parent["graph_state_id"], parent["review"])
+            graph_unchanged = digest(
+                {k: v for k, v in before.items() if k != "review"}
+            ) == digest({k: v for k, v in state.items() if k != "review"})
+        if parent["graph_state_id"] is None or not graph_unchanged:
+            raise DomainError(409, "Повторное использование требует неизменного содержимого графа")
+        graph = parent["graph_state_id"]
     else:
-        graph = save_graph(cur, program_id, snapshot)
+        before = before_data
+        if before is None:
+            before = load_graph(cur, parent["graph_state_id"], parent["review"])
+        reuse_links = (
+            isinstance(before_snapshot, SnapshotV2)
+            and isinstance(snapshot, SnapshotV2)
+            and before_snapshot.source_links is snapshot.source_links
+        )
+        graph = save_graph(
+            cur, program_id, snapshot,
+            reuse_source_links_from=parent["graph_state_id"] if reuse_links else None,
+            prevalidated_data=state,
+        )
     row = cur.execute(
         "INSERT INTO "
         "program_versions(id,program_id,number,parent_version_id,restored_from_version_id,"
         "graph_state_id,review,origin,operation_key,request_hash) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING " + VERSION_COLUMNS,
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING "
+        "id,program_id,number,parent_version_id,restored_from_version_id,origin,created_at",
         (
             version_id,
             program_id,
@@ -81,12 +150,15 @@ def insert_version(
             fingerprint,
         ),
     ).fetchone()
+    # state — та же проверенная модель, которую сохраняют graph_state_id/review.
+    # Не перечитываем большой JSON-граф из PostgreSQL только ради журнала и ответа.
+    row["snapshot"] = state
     journal(
         cur,
         program_id,
         version_id,
         before,
-        row["snapshot"],
+        state,
         actor_type=actor_type,
         actor_id=actor_id,
     )

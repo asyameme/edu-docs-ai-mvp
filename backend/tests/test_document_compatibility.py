@@ -137,6 +137,27 @@ def test_selected_document_value_keeps_original_observation_and_parsed_artifact(
     assert "parsed_documents" not in result.metadata
 
 
+def test_unchanged_selected_documents_reuse_the_normalized_original(monkeypatch):
+    from app import document_adapter
+    from app.document_adapter import to_snapshot_v2
+
+    program, document = uuid4(), uuid4()
+    original = payload()
+    file = {"document_id": document, "output": original}
+    calls = []
+    parse_output = document_adapter.parse_output
+
+    def counted(value):
+        calls.append(value)
+        return parse_output(value)
+
+    monkeypatch.setattr(document_adapter, "parse_output", counted)
+    state, _ = to_snapshot_v2(program, [file])
+    result = SnapshotV2.model_validate(state)
+    assert len(calls) == 1
+    assert result.metadata["parsed_documents"][str(document)] == original
+
+
 def test_different_v2_types_keep_fields_and_explicit_unknown_values():
     old = payload()
     old["disciplines"][0]["source_ref"].pop("paragraph_index")

@@ -317,7 +317,7 @@ def test_graph_check_omits_drafts_and_keeps_active_rules():
         and "graph_validation" in rule["phases"]
         and rule.get("run_mode", "automatic") == "automatic"
     }
-    assert len(result["coverage"]) == 9
+    assert len(result["coverage"]) == 13
     assert result["ruleset"]["required_rules"] == [
         "R-01-graph", "R-08-local-reference", "R-04",
     ]

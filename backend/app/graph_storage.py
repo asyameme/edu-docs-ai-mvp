@@ -81,6 +81,12 @@ def pack_tree(cur, program_id, value):
             return {"__pending_graph": True, "review": value.get("review")}
         state = save_graph(cur, program_id, value)
         return {"__graph_state": str(state), "review": value.get("review")}
+    if (
+        "document_id" in value
+        and isinstance(value.get("parsed"), dict)
+        and set(value["parsed"]) == {"__parsed_artifact"}
+    ):
+        return value
     if "document_id" in value and isinstance(value.get("parsed"), dict):
         checksum = hashlib.sha256(canonical_bytes(value["parsed"])).hexdigest()
         row = cur.execute(
@@ -181,18 +187,63 @@ def _existing_by_id(cur, sql, ids, columns):
     return found
 
 
-def _insert_many(cur, sql, rows):
+def _insert_many(cur, sql, rows, *, copy_to=None):
     """Построчная запись конвейером: полный граф — это сотни тысяч строк.
 
     Каждая строка по-прежнему проходит свои триггеры и внешние ключи; меняется
     только число обменов с сервером — один на пакет вместо одного на строку.
     """
+    if copy_to is not None and len(rows) >= 32:
+        table, columns = copy_to
+        with cur.copy(f"COPY {table}({columns}) FROM STDIN") as stream:
+            for row in rows:
+                stream.write_row(row)
+        return
     for chunk in _chunks(rows):
         cur.executemany(sql, chunk)
 
 
-def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, members=None):
-    if isinstance(snapshot, SnapshotV2):
+def _check_link_facts(facts, stored):
+    for link, fact_id, entity, relation in facts:
+        values = dict(entity_id=entity, relation_id=relation, source_ref_id=link["source_ref_id"],
+                      field_path=link["field_path"], observed_value=link["observed_value"])
+        previous = stored.get(str(fact_id))
+        if previous is not None and digest(
+            {k: str(v) if isinstance(v, UUID) else v for k, v in previous.items()}
+        ) != digest(values):
+            raise DomainError(422, "Правка свидетельства требует нового ID")
+
+
+def _json_equivalent(left, right):
+    """Сравнить значения с равенством чисел как в PostgreSQL JSONB."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _json_equivalent(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_equivalent(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return type(left) is type(right) and left == right
+
+
+def save_graph(
+    cur, program_id, snapshot, *, producer=None, attempt=None, members=None,
+    reuse_source_links_from=None, prevalidated_data=None,
+):
+    from app.graph_composition import GraphComposition, write_members
+
+    composition = GraphComposition.for_cursor(cur, program_id)
+    namespace = program_id if isinstance(program_id, UUID) else UUID(str(program_id))
+    if prevalidated_data is not None:
+        if not isinstance(snapshot, SnapshotV2):
+            raise TypeError("Предварительно сериализованные данные требуют SnapshotV2")
+        data = prevalidated_data
+    elif isinstance(snapshot, SnapshotV2):
         # Экземпляр модели уже прошёл проверку. Повторная валидация снимка с
         # десятками тысяч свидетельств стоит секунды и результата не меняет.
         data = snapshot.model_dump(mode="json")
@@ -222,16 +273,26 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
         for row in rows:
             members.setdefault(str(row["document_id"]), row["member_name"])
     fallback = {}
+    document_ids = [UUID(str(document)) for document in data["document_ids"]]
+    document_rows = cur.execute(
+        "SELECT id,original_name FROM source_documents WHERE program_id=%s AND id=ANY(%s)",
+        (program_id, document_ids),
+    ).fetchall()
+    original_names = {str(row["id"]): row["original_name"] for row in document_rows}
+    if len(original_names) != len(document_ids):
+        raise DomainError(422, "Источник отсутствует или принадлежит другой программе")
     if parsed is None:
         imported = (data.get("review") or {}).get("import_job_id")
+        artifact_rows = cur.execute(
+            "SELECT DISTINCT ON(document_id) document_id,id FROM document_artifacts "
+            "WHERE program_id=%s AND document_id=ANY(%s) AND kind='parsed_json' "
+            "AND (%s::uuid IS NULL OR producing_job_id=%s) "
+            "ORDER BY document_id,created_at DESC,id",
+            (program_id, document_ids, imported, imported),
+        ).fetchall()
+        fallback = {str(row["document_id"]): row["id"] for row in artifact_rows}
         for document in data["document_ids"]:
-            found = cur.execute(
-                "SELECT id FROM document_artifacts WHERE program_id=%s AND document_id=%s "
-                "AND kind='parsed_json' AND (%s::uuid IS NULL OR producing_job_id=%s) "
-                "ORDER BY created_at DESC,id LIMIT 1",
-                (program_id, document, imported, imported),
-            ).fetchone()
-            fallback[document] = found["id"] if found else None
+            fallback.setdefault(str(document), None)
     # Review хранится у версии и не влияет на состав графа.
     previous = cur.execute(
         "SELECT id FROM graph_states WHERE program_id=%s AND content_hash=%s "
@@ -272,14 +333,9 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
         "producing_attempt) VALUES(%s,%s,%s,%s,%s,%s)",
         (state, program_id, schema, Jsonb(metadata), producer, attempt),
     )
-    for position, document in enumerate(data["document_ids"]):
-        original = cur.execute(
-            "SELECT original_name FROM source_documents WHERE program_id=%s AND id=%s",
-            (program_id, document),
-        ).fetchone()
-        if original is None:
-            raise DomainError(422, "Источник отсутствует или принадлежит другой программе")
-        artifact = fallback.get(document)
+    selected_artifacts = {}
+    for document in data["document_ids"]:
+        artifact = fallback.get(str(document))
         if parsed and document in parsed:
             checksum = hashlib.sha256(canonical_bytes(parsed[document])).hexdigest()
             found = None
@@ -316,26 +372,45 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 )
             else:
                 raise DomainError(422, "У JSON документа нет сохранённого результата импорта")
+        selected_artifacts[str(document)] = artifact
+    member_pairs = [
+        (UUID(document), artifact)
+        for document, artifact in selected_artifacts.items()
+        if document not in members and artifact
+    ]
+    previous_members = {}
+    if member_pairs:
+        names = cur.execute(
+            "SELECT DISTINCT ON(d.document_id,d.parsed_artifact_id) "
+            "d.document_id,d.parsed_artifact_id,d.member_name FROM graph_documents d "
+            "JOIN unnest(%s::uuid[],%s::uuid[]) AS wanted(document_id,artifact_id) "
+            "ON wanted.document_id=d.document_id AND wanted.artifact_id=d.parsed_artifact_id "
+            "WHERE d.program_id=%s ORDER BY d.document_id,d.parsed_artifact_id,d.graph_state_id",
+            ([document for document, _ in member_pairs],
+             [artifact for _, artifact in member_pairs], program_id),
+        ).fetchall()
+        previous_members = {
+            (str(row["document_id"]), str(row["parsed_artifact_id"])): row["member_name"]
+            for row in names
+        }
+    for position, document in enumerate(data["document_ids"]):
+        artifact = selected_artifacts[str(document)]
         if document not in members and artifact:
-            named = cur.execute(
-                "SELECT member_name FROM graph_documents WHERE program_id=%s "
-                "AND document_id=%s AND parsed_artifact_id=%s ORDER BY "
-                "graph_state_id LIMIT 1",
-                (program_id, document, artifact),
-            ).fetchone()
-            if named:
-                members[document] = named["member_name"]
-        cur.execute(
+            name = previous_members.get((str(document), str(artifact)))
+            if name:
+                members[document] = name
+        write_members(
+            cur, composition, "graph_documents",
             "INSERT INTO graph_documents(program_id,graph_state_id,document_id,parsed_artifact_id,"
             "member_name,position) VALUES(%s,%s,%s,%s,%s,%s)",
-            (
+            [(
                 program_id,
                 state,
                 document,
                 artifact,
-                members.get(document, original["original_name"]),
+                members.get(document, original_names[str(document)]),
                 position,
-            ),
+            )],
         )
     refs = data["source_refs"]
     ref_columns = ("id", "document_id", "artifact_id", "section", "locator", "artifact_locator")
@@ -369,9 +444,11 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
             for ref in refs
             if str(ref["id"]) not in stored_refs
         ],
+        copy_to=("source_refs", ",".join(("id", "program_id", *ref_columns[1:])))
+        if composition is not None else None,
     )
-    _insert_many(
-        cur,
+    write_members(
+        cur, composition, "graph_sources",
         "INSERT INTO graph_sources VALUES(%s,%s,%s,%s,%s)",
         [
             (program_id, state, ref["id"], ref["document_id"], position)
@@ -380,7 +457,7 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
     )
     for kind, items in (("entity", data["entities"]), ("relation", data["relations"])):
         revisions = [
-            (item, uuid5(UUID(str(program_id)), kind + ":" + digest(item))) for item in items
+            (item, uuid5(namespace, kind + ":" + digest(item))) for item in items
         ]
         table = "entity_revisions" if kind == "entity" else "relation_revisions"
         known = _existing_by_id(
@@ -404,6 +481,8 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                     (rev, program_id, item["id"], item["kind"], Jsonb(item["attributes"]))
                     for item, rev in fresh
                 ],
+                copy_to=("entity_revisions", "revision_id,program_id,entity_id,kind,attributes")
+                if composition is not None else None,
             )
         else:
             _insert_many(
@@ -424,6 +503,15 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                     )
                     for item, rev in fresh
                 ],
+                copy_to=(
+                    (
+                        "relation_revisions",
+                        "revision_id,program_id,relation_id,source_entity_id,"
+                        "target_entity_id,type,confidence,attributes",
+                    )
+                    if composition is not None
+                    else None
+                ),
             )
         _insert_many(
             cur,
@@ -439,10 +527,12 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 for item, rev in fresh
                 for order, ref_id in enumerate(item["source_ref_ids"])
             ],
+            copy_to=("revision_sources", "program_id,entity_revision_id,relation_revision_id,"
+                     "source_ref_id,position") if composition is not None else None,
         )
         if kind == "entity":
-            _insert_many(
-                cur,
+            write_members(
+                cur, composition, "graph_entities",
                 "INSERT INTO graph_entities VALUES(%s,%s,%s,%s,%s)",
                 [
                     (program_id, state, item["id"], rev, position)
@@ -450,8 +540,8 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 ],
             )
         else:
-            _insert_many(
-                cur,
+            write_members(
+                cur, composition, "graph_relations",
                 "INSERT INTO graph_relations VALUES(%s,%s,%s,%s,%s,%s,%s)",
                 [
                     (
@@ -467,10 +557,22 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 ],
             )
     links = data.get("source_links", [])
+    prior_facts = {}
+    if composition is not None and reuse_source_links_from is not None:
+        rows = cur.execute(
+            "SELECT p.public_id,p.fact_id FROM graph_state_contents c "
+            "CROSS JOIN LATERAL unnest(c.evidence_set_ids) s(id) "
+            "JOIN revision_evidence_sets e ON e.id=s.id "
+            "CROSS JOIN LATERAL unnest(e.source_link_ids,e.public_ids) p(fact_id,public_id) "
+            "WHERE c.graph_state_id=%s AND c.program_id=%s",
+            (reuse_source_links_from, program_id),
+        ).fetchall()
+        prior_facts = {str(row["public_id"]): row["fact_id"] for row in rows}
     facts = [
         (
             link,
-            uuid5(UUID(str(program_id)), "source-link-fact:" + digest(link)),
+            prior_facts.get(str(link["id"]))
+            or uuid5(namespace, "source-link-fact:" + digest(link)),
             link["target_id"] if link["target_kind"] == "entity" else None,
             link["target_id"] if link["target_kind"] == "relation" else None,
         )
@@ -481,23 +583,13 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
     )
     stored_links = _existing_by_id(
         cur,
-        "SELECT " + ",".join(link_columns) + " FROM source_links WHERE id = ANY(%s)",
+        "SELECT " + (",".join(link_columns) if composition is None else "id")
+        + " FROM source_links WHERE id = ANY(%s)",
         [fact_id for _, fact_id, _, _ in facts],
-        link_columns,
+        link_columns if composition is None else ("id",),
     )
-    for link, fact_id, entity, relation in facts:
-        values = dict(
-            entity_id=entity,
-            relation_id=relation,
-            source_ref_id=link["source_ref_id"],
-            field_path=link["field_path"],
-            observed_value=link["observed_value"],
-        )
-        previous = stored_links.get(str(fact_id))
-        if previous is not None and digest(
-            {k: str(v) if isinstance(v, UUID) else v for k, v in previous.items()}
-        ) != digest(values):
-            raise DomainError(422, "Правка свидетельства требует нового ID")
+    if composition is None:
+        _check_link_facts(facts, stored_links)
     _insert_many(
         cur,
         "INSERT INTO source_links(id,program_id,entity_id,relation_id,source_ref_id,field_path,"
@@ -513,10 +605,13 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
                 Jsonb(link["observed_value"]),
             )
             for link, fact_id, entity, relation in facts
+            if str(fact_id) not in stored_links
         ],
+        copy_to=("source_links", ",".join(("id", "program_id", *link_columns[1:])))
+        if composition is not None else None,
     )
-    _insert_many(
-        cur,
+    write_members(
+        cur, composition, "graph_source_links",
         "INSERT INTO graph_source_links VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
         [
             (
@@ -532,8 +627,28 @@ def save_graph(cur, program_id, snapshot, *, producer=None, attempt=None, member
             for position, (link, fact_id, entity, relation) in enumerate(facts)
         ],
     )
-    assembled = load_graph(cur, state, data.get("review"))
-    if digest(assembled) != digest(data):
+    if composition is not None:
+        composition.persist(state)
+    assembled = load_graph(
+        cur,
+        state,
+        None if composition is not None and schema == 2 else data.get("review"),
+    )
+    verified = data
+    if composition is not None and schema == 2:
+        # Review принадлежит версии, поэтому проверка состава не должна копировать
+        # большой JSON только ради добавления этого независимого параметра.
+        assembled.pop("review", None)
+        verified = expected
+    if not _json_equivalent(assembled, verified):
+        if composition is not None:
+            # Полная обратная сборка уже проверила все значения. Подробности
+            # старых фактов читаются только для сохранения прежней ошибки 422.
+            detailed = _existing_by_id(
+                cur, "SELECT " + ",".join(link_columns) + " FROM source_links WHERE id=ANY(%s)",
+                [fact_id for _, fact_id, _, _ in facts], link_columns,
+            )
+            _check_link_facts(facts, detailed)
         raise ValueError("Граф не восстанавливает исходный контракт без потерь")
     cur.execute(
         "UPDATE graph_states SET status='sealed',content_hash=%s,sealed_at=now() WHERE id=%s",
@@ -560,6 +675,15 @@ def journal(cur, program_id, version_id, before, after, *, actor_type="system", 
         return type(old) is type(new) and old == new
 
     def diff(kind, identity, old, new, path=""):
+        if old is new:
+            return
+        if (
+            path in {"/source_refs", "/source_links"}
+            and isinstance(old, list)
+            and isinstance(new, list)
+        ):
+            if len(old) >= 64 and len(old) == len(new) and digest(old) == digest(new):
+                return
         if equivalent(old, new):
             return
         if isinstance(old, dict) and isinstance(new, dict):
@@ -585,6 +709,8 @@ def journal(cur, program_id, version_id, before, after, *, actor_type="system", 
             else:
                 diff(kind, identity, old[identity], new[identity])
     for key in ("entities", "relations"):
+        if before.get(key) is after.get(key):
+            continue
         old_order = [item["id"] for item in before.get(key, [])]
         new_order = [item["id"] for item in after.get(key, [])]
         if old_order != new_order and set(old_order) == set(new_order):
@@ -630,4 +756,6 @@ def journal(cur, program_id, version_id, before, after, *, actor_type="system", 
             )
             for position, (kind, identity, path, action, old, new) in enumerate(changes)
         ],
+        copy_to=("change_log", "id,program_id,version_id,position,target_kind,target_id,field_path,"
+                 "action,old_value,new_value,actor_type,actor_id"),
     )

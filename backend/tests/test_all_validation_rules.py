@@ -8,10 +8,10 @@ import pytest
 
 from app.document_analysis import analyze_documents
 from app.domain import SnapshotV2
-from app.review_contract import AnalysisV2, CheckResult
-from app.review_projection import validator_result_for_contract
 from app.local_parser import parse_local_document
 from app.parser_adapter import to_snapshot
+from app.review_contract import AnalysisV2, CheckResult
+from app.review_projection import validator_result_for_contract
 from app.validation_bridge import project_snapshot_documents, run_local_check
 from worker.validation.validator import load_rules, run_validation
 
@@ -48,13 +48,13 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
         and rule.get("run_mode", "automatic") == "automatic"
     }
     assert set(coverage) == all_rules
-    assert len(coverage) == 9
+    assert len(coverage) == 13
     assert coverage["R-03"]["status"] == "passed"
     assert coverage["R-03-RPP"]["status"] == "passed"
     assert coverage["R-05"]["status"] == "passed"
     assert coverage["R-05-title"]["status"] == "passed"
     assert coverage["R-06"]["status"] == "passed"
-    assert coverage["R-02"]["status"] == "needs_review"
+    assert coverage["R-02"]["status"] == "passed"
     assert all(issue["rule_code"] in all_rules for issue in result["issues"])
     assert result["ruleset"]["required_rules"] == [
         "R-01-graph", "R-08-local-reference", "R-04",
@@ -65,12 +65,21 @@ def test_backend_runs_only_active_rules_on_real_documents(monkeypatch):
                if rule["id"] in selected)
     AnalysisV2.model_validate(validator_result_for_contract(analysis))
     CheckResult.model_validate(validator_result_for_contract(result))
-    for phase_result in (analysis, result):
+    for phase_result, phase in (
+        (analysis, "document_reconciliation"), (result, "graph_validation")
+    ):
         phase_coverage = {entry["rule_code"]: entry for entry in phase_result["coverage"]}
-        assert set(phase_coverage) == all_rules
+        assert set(phase_coverage) == {
+            rule["id"] for rule in config["rules"]
+            if rule["status"] != "draft" and phase in rule["phases"]
+            and rule.get("run_mode", "automatic") == "automatic"
+        }
         assert {"R-09", "R-11"}.isdisjoint(phase_coverage)
-        assert phase_result["ruleset"]["required_rules"] == ["R-01", "R-08-local-reference", "R-04"]
-        for code in selected:
+        assert phase_result["ruleset"]["required_rules"] == (
+            [] if phase == "document_reconciliation"
+            else ["R-01-graph", "R-08-local-reference", "R-04"]
+        )
+        for code in selected & phase_coverage.keys():
             assert phase_coverage[code]["status"] == "passed", phase_coverage[code]
             assert phase_coverage[code]["checks"] > 0
     assert inputs == original

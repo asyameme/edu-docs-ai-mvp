@@ -7,10 +7,10 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from psycopg_pool import PoolTimeout
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from temporalio.client import WorkflowExecutionStatus, WorkflowQueryFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -32,6 +32,16 @@ from app.review_projection import project_legacy_review_result
 from app.review_repository import ReviewRepository
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}", tags=["Reviews"])
+_VERSION_READ_SERIALIZER = TypeAdapter(VersionRead)
+
+
+def version_response(value):
+    """Сериализовать уже проверенную версию без повторной проверки всего графа."""
+    return Response(
+        content=_VERSION_READ_SERIALIZER.dump_json(value, warnings="none"),
+        status_code=201,
+        media_type="application/json",
+    )
 
 
 class ReviewJobRead(BaseModel):
@@ -190,26 +200,30 @@ def read_version_review(
     return ReviewRepository(repo.pool).details(program_id, version_id, limit, offset)
 
 
-@router.post("/reviews/{review_id}/decisions", status_code=201)
+@router.post("/reviews/{review_id}/decisions", status_code=201, response_model=VersionRead)
 def decide(
     program_id: UUID,
     review_id: UUID,
     body: DecisionCreate,
     operation_key: OperationKey,
     repo: RepoDep,
-) -> VersionRead:
-    return ReviewRepository(repo.pool).decide(program_id, review_id, operation_key, body)
+) -> Response:
+    version = ReviewRepository(repo.pool).decide(program_id, review_id, operation_key, body)
+    return version_response(version)
 
 
-@router.post("/reviews/{review_id}/decisions/batch", status_code=201)
+@router.post(
+    "/reviews/{review_id}/decisions/batch", status_code=201, response_model=VersionRead
+)
 def decide_batch(
     program_id: UUID,
     review_id: UUID,
     body: DecisionBatchCreate,
     operation_key: OperationKey,
     repo: RepoDep,
-) -> VersionRead:
-    return ReviewRepository(repo.pool).decide_many(program_id, review_id, operation_key, body)
+) -> Response:
+    version = ReviewRepository(repo.pool).decide_many(program_id, review_id, operation_key, body)
+    return version_response(version)
 
 
 @router.post("/reviews/{review_id}/checks", status_code=202)
@@ -256,15 +270,16 @@ async def read_check(
     }
 
 
-@router.post("/reviews/{review_id}/confirm", status_code=201)
+@router.post("/reviews/{review_id}/confirm", status_code=201, response_model=VersionRead)
 def confirm(
     program_id: UUID,
     review_id: UUID,
     body: ConfirmCreate,
     operation_key: OperationKey,
     repo: RepoDep,
-) -> VersionRead:
-    return ReviewRepository(repo.pool).confirm(program_id, review_id, operation_key, body)
+) -> Response:
+    version = ReviewRepository(repo.pool).confirm(program_id, review_id, operation_key, body)
+    return version_response(version)
 
 
 @router.get(

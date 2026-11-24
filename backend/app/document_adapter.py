@@ -232,24 +232,41 @@ class DocumentBuilder:
             )
 
 
-def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=None):
+def to_snapshot_v2(
+    program_id, files, *, original_files=None, relation_origins=None, return_model=False
+):
     builder, parsed_documents, codes = DocumentBuilder(program_id), {}, {}
     normalized_documents = {}
     store_selected_json = original_files is None
-    originals = {
-        str(item["document_id"]): parse_output(item.get("output", item.get("parsed"))).model_dump(
-            mode="json", exclude_none=False
+    originals, original_fingerprints, original_program_codes = {}, {}, {}
+    for item in original_files if original_files is not None else files:
+        raw = item.get("output", item.get("parsed"))
+        if not raw:
+            continue
+        parsed = parse_output(raw)
+        document_id = str(item["document_id"])
+        originals[document_id] = parsed.model_dump(mode="json", exclude_none=False)
+        original_fingerprints[document_id] = canonical(
+            raw.model_dump(mode="json", exclude_none=False)
+            if hasattr(raw, "model_dump") else raw
         )
-        for item in (original_files if original_files is not None else files)
-        if item.get("output", item.get("parsed"))
-    }
+        original_program_codes[document_id] = parsed.meta.program_id
     for item in files:
         raw_output = item["output"]
         if not raw_output:
             continue
-        parsed = parse_output(raw_output)
-        output = parsed.model_dump(mode="json", exclude_none=False)
         document_id = str(item["document_id"])
+        output_fingerprint = canonical(
+            raw_output.model_dump(mode="json", exclude_none=False)
+            if hasattr(raw_output, "model_dump") else raw_output
+        )
+        if output_fingerprint == original_fingerprints.get(document_id):
+            output = originals[document_id]
+            code = original_program_codes[document_id]
+        else:
+            parsed = parse_output(raw_output)
+            output = parsed.model_dump(mode="json", exclude_none=False)
+            code = parsed.meta.program_id
         original = originals.get(document_id)
         if original is None:
             raise ValueError("Исходный JSON документа отсутствует")
@@ -257,7 +274,6 @@ def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=N
         if store_selected_json:
             parsed_documents[document_id] = deepcopy(raw_output)
         normalized_documents[document_id] = output
-        code = parsed.meta.program_id
         if code:
             try:
                 internal_id = UUID(code)
@@ -307,7 +323,10 @@ def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=N
             raise ValueError("Выбор изменил структуру списка связей")
         for member, origin in zip(selected_relations, origins, strict=True):
             original_member = original_relations[origin] if origin is not None else None
-            if original_member is not None and member.get("source_ref") != original_member.get("source_ref"):
+            if (
+                original_member is not None
+                and member.get("source_ref") != original_member.get("source_ref")
+            ):
                 raise ValueError("Выбор изменил provenance исходной связи")
             for endpoint_kind, endpoint_key in (
                 (member["src_entity"], member["src_key"]),
@@ -439,4 +458,4 @@ def to_snapshot_v2(program_id, files, *, original_files=None, relation_origins=N
             "metadata": metadata,
         }
     )
-    return snapshot.model_dump(mode="json"), builder.issues
+    return (snapshot if return_model else snapshot.model_dump(mode="json")), builder.issues
