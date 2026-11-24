@@ -17,9 +17,12 @@ with workflow.unsafe.imports_passed_through():
     from app.chat_model import chat_agent
     from worker.agent.contracts import ChatDeps
 
-MAX_CHAT_HISTORY_TURNS = 2
-MAX_CHAT_HISTORY_BYTES = 32_000
-MAX_CHAT_REQUEST_INPUT_TOKENS = 32_000
+# Окно истории: агент должен помнить контекст беседы, а не последние два
+# обмена. Kimi K3 держит большой контекст; бюджет входа одного запроса
+# поднят, чтобы чтение большой сущности не обрывало ход заготовленной фразой.
+MAX_CHAT_HISTORY_TURNS = 10
+MAX_CHAT_HISTORY_BYTES = 96_000
+MAX_CHAT_REQUEST_INPUT_TOKENS = 64_000
 # На каждом шаге модель заново получает часть контекста. Бюджет всего хода
 # учитывает эти повторы отдельно от размера одного запроса.
 MAX_CHAT_TURN_INPUT_TOKENS = 128_000
@@ -48,20 +51,38 @@ def _bounded_history_text(text: str) -> str:
     return best
 
 
+def _assistant_history_text(result) -> str:
+    """Прошлый ответ агента — читаемым текстом, а не служебным JSON.
+
+    Модели проще опираться на обычный текст, и он заметно короче JSON —
+    в окно истории помещается больше обменов.
+    """
+
+    kind = result.get("kind")
+    if kind == "answer":
+        return result.get("message") or ""
+    if kind == "clarification":
+        questions = " ".join(result.get("questions") or [])
+        return " ".join(part for part in (result.get("message"), questions) if part)
+    if kind == "change_proposal":
+        changes = "; ".join(
+            f"{item.get('field_path')}: {item.get('expected_old_value')!r} → "
+            f"{item.get('new_value')!r}"
+            for item in result.get("changes") or []
+        )
+        summary = result.get("summary") or ""
+        return f"Предложение правки: {summary} ({changes})" if changes else summary
+    return json.dumps(result, ensure_ascii=False)
+
+
 def conversation_from_turns(session_id, turns) -> Conversation:
     """Воспроизводит видимые сообщения без ответов инструментов и рассуждений модели."""
     messages = []
     for turn in turns:
-        result = turn["result"]
-        if result["kind"] == "answer":
-            result = {
-                **result,
-                "sources": [{"id": item["id"]} for item in result.get("sources", [])],
-            }
         messages.extend([
             ModelRequest(parts=[UserPromptPart(content=_bounded_history_text(turn["user_text"]))]),
             ModelResponse(parts=[TextPart(content=_bounded_history_text(
-                json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+                _assistant_history_text(turn["result"])
             ))]),
         ])
     return _conversation_for_turn(Conversation(conversation_id=str(session_id), messages=messages))
@@ -131,7 +152,9 @@ class ChatWorkflow(PydanticAIWorkflow):
             try:
                 result = await chat_agent.run(
                     payload["text"],
-                    deps=ChatDeps(program_id=payload["program_id"], version_id=payload["version_id"]),
+                    deps=ChatDeps(
+                        program_id=payload["program_id"], version_id=payload["version_id"]
+                    ),
                     conversation=conversation,
                     usage_limits=limits,
                 )

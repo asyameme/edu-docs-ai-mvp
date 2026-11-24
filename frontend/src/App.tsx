@@ -652,6 +652,14 @@ function ChatScreen({
   onOpenSource,
   onCloseSource,
 }: ChatScreenProps) {
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  // Каждое новое сообщение (пользователя или агента) прокручивает чат к низу.
+  useEffect(() => {
+    const node = transcriptRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [messages]);
+
   return (
     <>
       <section className="page-heading">
@@ -665,7 +673,7 @@ function ChatScreen({
       </section>
 
       <section className="chat-panel card" aria-label="Чат с агентом">
-        <div className="chat-transcript" aria-live="polite" aria-relevant="additions text">
+        <div className="chat-transcript" ref={transcriptRef} aria-live="polite" aria-relevant="additions text">
           {messages.length === 0 ? (
             <div className="chat-empty-state">
               <div className="agent-mark" aria-hidden="true">ИИ</div>
