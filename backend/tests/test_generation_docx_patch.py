@@ -110,3 +110,46 @@ def test_patch_keeps_other_package_parts():
     with ZipFile(BytesIO(docx)) as original, ZipFile(BytesIO(patched)) as result:
         assert result.read("word/styles.xml") == original.read("word/styles.xml")
         assert result.read("word/document.xml") != original.read("word/document.xml")
+
+
+def test_normalized_text_patch_allows_following_glued_indicator_code():
+    old_text = "Применяет методы машинного обучения и статистического анализа"
+    new_text = old_text + ". (Базовый)"
+    next_indicator_code = "ПКП-ППК-ДА3.2"
+    docx = make_docx(
+        _table("ПКП-ППК-ДА3", "результаты обучения", old_text + next_indicator_code)
+    )
+
+    patched = patch_docx_bytes(
+        docx,
+        [
+            DocxPatch(
+                source_ref={"table": 1, "row": 1, "col": 3},
+                old_text=old_text,
+                new_text=new_text,
+                normalize_whitespace=True,
+            )
+        ],
+    )
+
+    assert new_text + next_indicator_code in read_area_text(
+        patched, {"table": 1, "row": 1, "col": 3}
+    )[0]
+
+
+def test_normalized_text_patch_still_rejects_arbitrary_glued_letter():
+    old_text = "Применяет методы машинного обучения и статистического анализа"
+    docx = make_docx(_table("ПКП-ППК-ДА3", "результаты обучения", old_text + "ошибка"))
+
+    with pytest.raises(DocxPatchError, match="не найден"):
+        patch_docx_bytes(
+            docx,
+            [
+                DocxPatch(
+                    source_ref={"table": 1, "row": 1, "col": 3},
+                    old_text=old_text,
+                    new_text=old_text + ". (Базовый)",
+                    normalize_whitespace=True,
+                )
+            ],
+        )
