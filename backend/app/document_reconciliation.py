@@ -4,7 +4,11 @@ from copy import deepcopy
 
 from app.errors import DomainError
 from app.parser_document import parse_output
-from app.review_contract import CompetencyLinksMutation, DocumentMutation
+from app.review_contract import (
+    CompetencyLinksMutation,
+    DocumentMutation,
+    SharedIndicatorTextMutation,
+)
 from app.review_logic import digest, pointer_parts
 from worker.validation.validator import competency_links_for_row
 
@@ -98,6 +102,9 @@ def _normalize(change):
 def validate_document_mutations(documents, changes):
     """Проверяет применимость всех вариантов по отдельности к исходным JSON."""
     for change in changes:
+        if change.get("op") == "set_shared_indicator_text":
+            _validate_shared_indicator_text(documents, change)
+            continue
         if change.get("op") == "set_competency_links":
             _validate_competency_links(documents, change)
             continue
@@ -191,11 +198,41 @@ def _apply_competency_links(result, original, changes, aliases, origins):
             origins[identity] = kept + [None] * len(append)
 
 
+def shared_indicator_groups(parsed):
+    """Find distinct indicator codes backed by the same text at one location."""
+    rows = parsed.get("indicators", [])
+    by_source = {}
+    for index, row in enumerate(rows):
+        ref, text = row.get("source_ref"), row.get("text")
+        if not ref or not ref.get("table") or not ref.get("row") or not ref.get("col") or not text:
+            continue
+        key = (ref.get("table"), ref.get("row"), ref.get("col"), ref.get("paragraph_index"), text)
+        by_source.setdefault(key, []).append(index)
+    return {
+        tuple(indices) for indices in by_source.values()
+        if len(indices) > 1 and len({rows[index]["code"] for index in indices}) == len(indices)
+    }
+
+
+def _validate_shared_indicator_text(documents, change):
+    mutation = SharedIndicatorTextMutation.model_validate(change)
+    document = documents.get(str(mutation.document_id))
+    if document is None or tuple(mutation.indicator_indices) not in shared_indicator_groups(document):
+        raise DomainError(422, "Общий фрагмент индикаторов не совпадает с исходным документом")
+    return mutation
+
+
 def apply_document_mutations(original_documents, changes, *, relation_origins=None):
     """Каждый полный набор решений заново накладывается на неизменённый импорт."""
-    normalized, link_changes = [], []
+    normalized, link_changes, shared = [], [], {}
     for change in changes:
-        if change.get("op") == "set_competency_links":
+        if change.get("op") == "set_shared_indicator_text":
+            decision = _validate_shared_indicator_text(original_documents, change)
+            key = (str(decision.document_id), tuple(decision.indicator_indices))
+            if key in shared and shared[key] != decision.action:
+                raise DomainError(409, "Для общего фрагмента выбраны разные действия")
+            shared[key] = decision.action
+        elif change.get("op") == "set_competency_links":
             link_changes.append(change)
         else:
             normalized.append(_normalize(change))
@@ -228,7 +265,14 @@ def apply_document_mutations(original_documents, changes, *, relation_origins=No
 
     result = deepcopy(original_documents)
     aliases = {}
+    kept_fields = {
+        (identity, ("indicators", str(index), "text"))
+        for (identity, indices), action in shared.items()
+        if action == "keep" for index in indices
+    }
     for (document_id, _), (_, mutation, parts) in unique.items():
+        if (document_id, tuple(parts)) in kept_fields:
+            continue
         _write(result[document_id], parts, mutation.value)
         if len(parts) == 3 and parts[0] == "competencies" and parts[-1] == "code":
             aliases[mutation.expected_old_value] = mutation.value

@@ -55,6 +55,16 @@ class ReviewJobRead(BaseModel):
     message: str | None = None
     analysis_version_id: UUID | None = None
     current_review_version_id: UUID | None = None
+    document_ids: list[UUID] | None = None
+    competency_code: str | None = None
+
+
+class GraphBuildRead(BaseModel):
+    id: UUID
+    pending_version_id: UUID
+    output_version_id: UUID | None
+    status: Literal["pending", "processing", "completed", "failed", "conflict"]
+    message: str | None = None
 
 
 async def job_state(repo, client, program_id, job_id):
@@ -70,6 +80,8 @@ async def job_state(repo, client, program_id, job_id):
         if "outcome" in row["report"]
         else int(row["report"].get("progress_percent") or 0),
         "message": row["report"].get("message"),
+        "document_ids": row["parameters"].get("manual_document_ids"),
+        "competency_code": row["parameters"].get("manual_competency_code"),
     }
     if "outcome" not in row["report"]:
         if client.namespace != row["temporal_namespace"]:
@@ -200,6 +212,11 @@ def read_version_review(
     return ReviewRepository(repo.pool).details(program_id, version_id, limit, offset)
 
 
+@router.get("/reviews/{review_id}/graph-build", response_model=GraphBuildRead)
+def read_graph_build(program_id: UUID, review_id: UUID, repo: RepoDep) -> GraphBuildRead:
+    return ReviewRepository(repo.pool).graph_build_status(program_id, review_id)
+
+
 @router.post("/reviews/{review_id}/decisions", status_code=201, response_model=VersionRead)
 def decide(
     program_id: UUID,
@@ -241,6 +258,8 @@ def create_check(
         output_version_id=None,
         status=row["report"].get("outcome", "pending"),
         progress=100 if "outcome" in row["report"] else 0,
+        document_ids=row["parameters"].get("manual_document_ids"),
+        competency_code=row["parameters"].get("manual_competency_code"),
     )
 
 

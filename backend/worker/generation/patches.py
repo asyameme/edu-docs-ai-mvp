@@ -25,6 +25,7 @@ from .docx_patch import (
     DocxPatch,
     DocxPatchError,
     RowRemoval,
+    count_text_matches,
     patch_docx_bytes,
     read_area_text,
 )
@@ -92,6 +93,7 @@ class PlannedPatch:
     old_text: str
     new_text: str
     change: FieldChange
+    exact_cell: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +223,9 @@ def plan_patches(
             try:
                 old_text = _render_value(link.observed_value["value"], unit)
                 new_text = _render_value(change.new_value, unit)
+                cell_text = link.observed_value.get("cell_text")
+                if cell_text is not None:
+                    old_text = _render_value(cell_text)
             except GenerationMappingError as error:
                 raise GenerationMappingError(
                     f"Свидетельство поля {_describe(change)}: {error}"
@@ -232,6 +237,7 @@ def plan_patches(
                     old_text=old_text,
                     new_text=new_text,
                     change=change,
+                    exact_cell=cell_text is not None,
                 )
             )
     return dict(planned)
@@ -314,12 +320,17 @@ def resolve_planned_patches(
                     source_ref=source_ref,
                     old_text=patch.old_text,
                     new_text=patch.new_text,
+                    normalize_whitespace=_is_formulation(patch),
                 )
             )
         resolved[document_id] = tuple(
             item for index, item in enumerate(frozen) if index not in dropped
         )
     return resolved
+
+
+def _is_formulation(patch: PlannedPatch) -> bool:
+    return patch.change.field_path.rsplit("/", 1)[-1] in {"formulation", "text"}
 
 
 def locate_observed_value(document: bytes, patch: PlannedPatch) -> tuple[dict, int]:
@@ -331,12 +342,16 @@ def locate_observed_value(document: bytes, patch: PlannedPatch) -> tuple[dict, i
     the whole row contains it exactly once, the row becomes the patch location.
     """
     source_ref = patch.source_ref
-    occurrences = sum(text.count(patch.old_text) for text in read_area_text(document, source_ref))
+    if patch.exact_cell:
+        if not all(type(source_ref.get(key)) is int for key in ("table", "row", "col")):
+            raise DocxPatchError("Для нагрузки нужны точные координаты ячейки")
+        texts = [text.strip() for text in read_area_text(document, source_ref) if text.strip()]
+        return dict(source_ref), int(texts == [patch.old_text])
+    options = {"normalize_whitespace": _is_formulation(patch)}
+    occurrences = count_text_matches(document, source_ref, patch.old_text, **options)
     if occurrences == 0 and source_ref.get("col") is not None:
         row_ref = {key: value for key, value in source_ref.items() if key != "col"}
-        row_area = read_area_text(document, row_ref)
-        if sum(text.count(patch.old_text) for text in row_area) == 1:
-            return row_ref, 1
+        return row_ref, count_text_matches(document, row_ref, patch.old_text, **options)
     return dict(source_ref), occurrences
 
 
@@ -359,7 +374,8 @@ def check_patch_applies(document: bytes, patch: PlannedPatch) -> str | None:
             document,
             [
                 DocxPatch(
-                    source_ref=source_ref, old_text=patch.old_text, new_text=patch.new_text
+                    source_ref=source_ref, old_text=patch.old_text, new_text=patch.new_text,
+                    normalize_whitespace=_is_formulation(patch),
                 )
             ],
         )

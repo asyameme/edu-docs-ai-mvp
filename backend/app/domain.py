@@ -277,9 +277,19 @@ class VersionCreate(Contract):
         return self
 
 
+class ProgramSignatureUpdate(Contract):
+    value: str = Field(min_length=1, max_length=120)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def trim_value(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
 class ProgramRead(Contract):
     id: UUID
     name: str
+    signature: str | None = None
     current_version_id: UUID
     created_at: datetime
 

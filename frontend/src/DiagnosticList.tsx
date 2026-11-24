@@ -132,7 +132,7 @@ export function DiagnosticList({ items, acceptance }: { items: Diagnostic[]; acc
           </select>
         </label>
         <label>Поиск по тексту или документу
-          <input type="search" value={query} placeholder="Код, правило или название файла"
+          <input type="search" value={query} placeholder="Название проверки или документа"
             onChange={(event) => { setQuery(event.target.value); setLimit(PAGE_SIZE); }} />
         </label>
       </div>

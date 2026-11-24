@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ImportProgress } from "./ImportProgress";
-import { GenerationScreen } from "./GenerationScreen";
+import { GenerationScreen, type GenerationReview } from "./GenerationScreen";
 import { DiagnosticList } from "./DiagnosticList";
 import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
@@ -37,6 +37,7 @@ type ReconciliationFinding = {
   choices: FindingChoice[];
   selectedChoiceId?: string;
   ruleCode?: string;
+  sharedIndicatorText?: boolean;
   // Сохранённое собственное значение: вариант пользователя вне готовых.
   customDecision?: string | null;
 };
@@ -59,12 +60,12 @@ const optionalRuleOptions: Array<{ code: OptionalRuleCode; title: string; descri
   {
     code: "R-09",
     title: "Покрытие компетенций учебным планом",
-    description: "Смысловая оценка покрытия компетенций по дисциплинам и результатам обучения.",
+    description: "Проверяет, как дисциплины программы развивают выбранную компетенцию.",
   },
   {
     code: "R-11",
-    title: "Результаты обучения и содержание РПД",
-    description: "Сопоставление результатов обучения с содержанием раздела 2 и оцениванием раздела 3.",
+    title: "Связь результатов обучения с дисциплиной",
+    description: "Сравнивает результаты обучения с темами и оценочными средствами одной РПД.",
   },
 ];
 
@@ -476,8 +477,32 @@ function formatIssueSummary(issues: Diagnostic[]) {
 type FindingFilter = "all" | "R-01" | "R-07" | "R-08" | "R-11";
 type FindingStatusFilter = "all" | "pending" | "saved";
 
+const findingFilters: Array<{ code: FindingFilter; label: string }> = [
+  { code: "all", label: "Все замечания" },
+  { code: "R-01", label: "Состав компетенций" },
+  { code: "R-07", label: "Тексты компетенций" },
+  { code: "R-08", label: "Тексты индикаторов" },
+];
+
+const findingFilterDescriptions: Partial<Record<FindingFilter, string>> = {
+  "R-01": "Сверяем состав и коды компетенций в учебном плане и рабочих программах. Если списки расходятся, выберите нужный вариант.",
+  "R-07": "Сравниваем формулировки одинаковых компетенций в документах. Если текст отличается, выберите вариант, который нужно сохранить.",
+  "R-08": "Сравниваем формулировки одинаковых индикаторов. Небольшие различия оформления не требуют решения.",
+  "R-11": "Показываем, как результат обучения связан с темами дисциплины и оцениванием. Это подсказка для экспертной оценки.",
+};
+
 function findingRuleGroup(ruleCode?: string) {
   return ruleCode?.match(/^R-(01|07|08|11)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
+}
+
+function findingCategoryLabel(ruleCode?: string) {
+  switch (findingRuleGroup(ruleCode)) {
+    case "R-01": return "Состав компетенций";
+    case "R-07": return "Текст компетенции";
+    case "R-08": return "Текст индикатора";
+    case "R-11": return "Содержание дисциплины";
+    default: return "Проверка документов";
+  }
 }
 
 function findingDocuments(finding: ReconciliationFinding) {
@@ -557,8 +582,9 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       return {
         id: issue.id,
         ruleCode: issue.rule_code,
+        sharedIndicatorText: issue.type === "indicator_shared_text",
         title: issue.message,
-        description: choiceSummary || `Правило ${issue.rule_code} · ${issue.type}`,
+        description: choiceSummary || `Проверьте расхождение: ${ruleDisplayLabel(issue.rule_code).toLocaleLowerCase("ru")}.`,
         selectedChoiceId: decision?.variant_id,
         choices,
         customDecision: typeof customDecision === "string" ? customDecision : null,
@@ -721,11 +747,17 @@ function ChatScreen({
                         <ol>{message.plan.changes.map((change) => <li key={change}>{change}</li>)}</ol>
                       ) : (
                         <>
-                          <ol>{message.plan.changes.map((change) => <li key={`${change.target_id}:${change.field_path}`}>
-                            <strong>{change.target_kind === "entity" ? "Сущность" : "Связь"} · {change.field_path.replaceAll("_", " ")}</strong>
-                            <span>{formatChatValue(change.expected_old_value)} → {formatChatValue(change.new_value)}</span>
-                            <small>{change.reason}</small>
-                          </li>)}</ol>
+                          <ol>{message.plan.changes.map((change) => {
+                            const workloadPrefix = "/attributes/hours_by_kind/";
+                            const workloadLabel = change.field_path.startsWith(workloadPrefix)
+                              ? change.field_path.slice(workloadPrefix.length).replaceAll("~1", " / ").replaceAll("~0", "~")
+                              : null;
+                            return <li key={`${change.target_id}:${change.field_path}`}>
+                              <strong>{workloadLabel ?? `${change.target_kind === "entity" ? "Сущность" : "Связь"} · ${change.field_path.replaceAll("_", " ")}`}</strong>
+                              <span>{formatChatValue(change.expected_old_value)} → {formatChatValue(change.new_value)}{workloadLabel ? " ч" : ""}</span>
+                              <small>{change.reason}</small>
+                            </li>;
+                          })}</ol>
                           {message.plan.unresolvedQuestions.length > 0 && (
                             <p className="plan-lock-note">Нужно уточнить: {message.plan.unresolvedQuestions.join(" · ")} Ответьте агенту в чате, чтобы он обновил предложение.</p>
                           )}
@@ -948,10 +980,12 @@ function App() {
     : {};
   const [selectedChoices, setSelectedChoices] = useState<Record<string, string>>(chatPreviewChoices);
   const [appliedChoices, setAppliedChoices] = useState<Record<string, string>>(chatPreviewChoices);
+  const [savingFindingId, setSavingFindingId] = useState<string | null>(null);
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
   const [findingFilter, setFindingFilter] = useState<FindingFilter>("all");
   const [findingStatusFilter, setFindingStatusFilter] = useState<FindingStatusFilter>("all");
   const [rpdDocumentId, setRpdDocumentId] = useState("");
+  const [coverageCompetencyCode, setCoverageCompetencyCode] = useState("");
   const [acceptedWarningIds, setAcceptedWarningIds] = useState<string[]>([]);
   const [levelAutoNotice, setLevelAutoNotice] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(hasDemoPreview ? demoChatMessages : []);
@@ -1002,6 +1036,12 @@ function App() {
   );
   const prepareReport = processing.reviewDetails?.prepare_report ?? null;
   const graphReady = processing.reviewDetails?.version.snapshot.review?.graph_ready === true;
+  useEffect(() => {
+    if (
+      processing.reviewDetails?.graph_build || graphReady ||
+      (!processing.reviewBusy && unresolvedCount > 0)
+    ) setSavingFindingId(null);
+  }, [processing.reviewBusy, processing.reviewDetails?.graph_build, unresolvedCount, graphReady]);
   const canUseLiveChat = !isDemoMode && graphReady && chatAvailability === "available" && chatSession !== null;
   const chatStatus = isDemoMode
     ? ""
@@ -1020,7 +1060,7 @@ function App() {
     (currentCheckReport?.issues ?? (graphReady ? [] : prepareReport?.issues ?? []))
       .filter((issue) => !issue.requires_decision).map((issue) => reviewDiagnostic(issue, [])),
   ).length;
-  const checkWarningDiagnostics = checkWarnings.map((issue) => {
+  function checkIssueDiagnostic(issue: ReviewIssue) {
     const ids = new Set(issue.source_document_ids ?? []);
     for (const ref of processing.reviewDetails?.version.snapshot.source_refs ?? []) {
       if (issue.source_ref_ids.includes(ref.id)) ids.add(ref.document_id);
@@ -1028,7 +1068,8 @@ function App() {
     return reviewDiagnostic(issue, [...ids].map((id) => ({ id,
       name: processing.job?.files.find((file) => file.document_id === id)?.member_name ?? "Документ пакета",
     })));
-  });
+  }
+  const checkWarningDiagnostics = checkWarnings.map(checkIssueDiagnostic);
   const checkIsRunning = Boolean(
     processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) &&
     processing.checkJob.input_version_id === processing.versionId,
@@ -1042,6 +1083,32 @@ function App() {
       return status !== "passed" && status !== "failed";
     }) ?? []
     : [];
+  const generationCheckReport = currentCheckReport ?? (
+    processing.reviewDetails?.version.id === processing.versionId
+      ? processing.reviewDetails?.check_report ?? null
+      : null
+  );
+  const generationBlockReason = !graphReady
+    ? "Завершите сверку документов в разделе «Программа»."
+    : unresolvedCount > 0
+      ? "В разделе «Программа» остались расхождения, по которым нужно выбрать вариант."
+      : !checkMatchesCurrentVersion
+        ? checkIsRunning ? "Дождитесь окончания повторной проверки." : "Нужна завершённая проверка текущей версии."
+        : checkBlockingCount > 0
+          ? "Исправьте блокирующие замечания перед сборкой пакета."
+          : skippedRequiredChecks.length > 0
+            ? "Дождитесь результатов обязательных проверок."
+            : !processing.signature
+              ? "Укажите подпись программы в верхней части экрана."
+              : processing.reviewBusy ? "Дождитесь сохранения изменений." : null;
+  const generationReview: GenerationReview = isConfirmed
+    ? { kind: "confirmed", versionId: processing.versionId }
+    : generationBlockReason
+      ? { kind: "blocked", reason: generationBlockReason }
+      : {
+        kind: "ready",
+        confirm: () => processing.confirm(checkWarnings.map((warning) => warning.id), processing.versionId),
+      };
 
   useEffect(() => {
     setAcceptedWarningIds([]);
@@ -1206,6 +1273,7 @@ function App() {
         setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
         return;
       }
+      setSavingFindingId(findingId);
       void processing.decideCustom(findingId, text);
       return;
     }
@@ -1214,6 +1282,7 @@ function App() {
       setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
       return;
     }
+    setSavingFindingId(findingId);
     void processing.decide(findingId, choiceId);
   }
 
@@ -1284,7 +1353,7 @@ function App() {
                 ...item.plan,
                 status: "applied",
                 validation: [
-                  "✓ Сумма баллов по дисциплине равна 100 (правило R-11).",
+                  "✓ Сумма баллов по дисциплине равна 100.",
                   "⚠ Проверьте согласованность формулировки в связанных документах.",
                 ],
               },
@@ -1341,35 +1410,37 @@ function App() {
     <div className="app-shell">
       <div className="workspace">
         <main className="main-content">
-          <nav className="section-navigation" aria-label="Разделы приложения">
-            {navigation.map((item) => (
-              <button
-                type="button"
-                key={item}
-                className={`nav-item${item === activeScreen ? " is-active" : ""}`}
-                aria-current={item === activeScreen ? "page" : undefined}
-                onClick={() => setActiveScreen(item)}
-              >
-                {item}
-              </button>
-            ))}
-          </nav>
+          <header className="app-header">
+            <nav className="section-navigation" aria-label="Разделы приложения">
+              {navigation.map((item) => (
+                <button
+                  type="button"
+                  key={item}
+                  className={`nav-item${item === activeScreen ? " is-active" : ""}`}
+                  aria-current={item === activeScreen ? "page" : undefined}
+                  onClick={() => setActiveScreen(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </nav>
+          </header>
           <div className="content-column">
             {!isDemoMode && processing.program && (
               <div className="program-signature" role="group" aria-label="Подпись программы">
                 <span>Подпись: <strong>{processing.signature ?? "не указана"}</strong></span>
                 {signatureEditing ? (
-                  <form className="program-signature-editor" onSubmit={(event) => {
+                  <form className="program-signature-editor" onSubmit={async (event) => {
                     event.preventDefault();
-                    if (processing.saveSignature(signatureDraft)) setSignatureEditing(false);
+                    if (await processing.saveSignature(signatureDraft)) setSignatureEditing(false);
                   }}>
                     <label htmlFor="program-signature-input">Имя для подписи</label>
-                    <input id="program-signature-input" type="text" maxLength={120} autoFocus
+                    <input id="program-signature-input" type="text" autoFocus
                       value={signatureDraft} onChange={(event) => setSignatureDraft(event.target.value)}
-                      disabled={processing.reviewBusy} />
-                    <button className="secondary-button" type="submit" disabled={processing.reviewBusy}>Сохранить</button>
+                      disabled={processing.reviewBusy || processing.signatureSaving} />
+                    <button className="secondary-button" type="submit" disabled={processing.reviewBusy || processing.signatureSaving}>Сохранить</button>
                     {processing.signature && <button className="competency-cancel-button" type="button"
-                      disabled={processing.reviewBusy} onClick={() => setSignatureEditing(false)}>Отмена</button>}
+                      disabled={processing.reviewBusy || processing.signatureSaving} onClick={() => setSignatureEditing(false)}>Отмена</button>}
                   </form>
                 ) : (
                   <button className="secondary-button" type="button" onClick={() => {
@@ -1404,11 +1475,12 @@ function App() {
             ) : activeScreen === "Генерация" ? (
               <GenerationScreen
                 programId={processing.programId}
-                confirmedVersionId={isConfirmed ? processing.versionId : ""}
+                review={generationReview}
                 versionNumber={versionNumber}
-                isConfirmed={isConfirmed}
                 isDemoMode={isDemoMode}
-                checkReport={processing.reviewDetails?.check_report ?? null}
+                checkReport={generationCheckReport}
+                issues={(generationCheckReport?.issues ?? []).map(checkIssueDiagnostic)}
+                reviewNotice={processing.notice}
                 acceptedWarnings={
                   processing.reviewDetails?.confirmation?.accepted_warning_ids.length ?? 0
                 }
@@ -1498,7 +1570,7 @@ function App() {
                   )}
                 </div>
                 {processing.reviewDetails && (
-                  <button className="secondary-button" type="button" onClick={processing.retryPrepare} disabled={processing.reviewBusy}>
+                  <button className="primary-button" type="button" onClick={processing.retryPrepare} disabled={processing.reviewBusy}>
                     Перезапустить сверку для этого пакета
                   </button>
                 )}
@@ -1522,13 +1594,13 @@ function App() {
                       </details>
                     )}
                     <div className="competency-filter-toolbar" aria-label="Фильтры результатов проверки">
-                      <div className="competency-filter-rules" role="group" aria-label="Фильтр по правилу">
-                        {(["all", "R-01", "R-07", "R-08", "R-11"] as const).map((filter) => (
-                          <button key={filter} type="button"
-                            className={`competency-filter-button${findingFilter === filter ? " is-active" : ""}`}
-                            aria-pressed={findingFilter === filter}
-                            onClick={() => setFindingFilter(filter)}>
-                            {filter === "all" ? "Все правила" : filter}
+                      <div className="competency-filter-rules" role="group" aria-label="Фильтр по виду расхождения">
+                        {findingFilters.map(({ code, label }) => (
+                          <button key={code} type="button"
+                            className={`competency-filter-button${findingFilter === code ? " is-active" : ""}`}
+                            aria-pressed={findingFilter === code}
+                            onClick={() => setFindingFilter(code)}>
+                            {label}
                           </button>
                         ))}
                       </div>
@@ -1570,20 +1642,28 @@ function App() {
                           <div><strong>{parsedProgram.documentCount}</strong><span>файлов обработано</span></div>
                           <div><strong>{displayedValidationIssueCount}</strong><span>групп замечаний проверки</span></div>
                           <div><strong>{unresolvedCount}</strong><span>решений ожидают</span></div>
-                          <div><strong>{displayedCoverage.length}</strong><span>правил в отчёте</span></div>
+                          <div><strong>{displayedCoverage.length}</strong><span>видов проверок</span></div>
                         </div>
                         <p className="validation-stage-message" role="status">
                           {checkIsRunning
                             ? `Проверки по графу выполняются · ${processing.checkJob?.progress ?? 0}%.`
                             : checkMatchesCurrentVersion
                               ? "Результаты относятся к выбранной версии графа."
-                              : processing.reviewBusy && unresolvedCount > 0
-                                ? "Сохраняем выбор. После последнего обязательного решения система построит граф сущностей и связей."
+                              : processing.graphBuildJob?.status === "failed" || processing.graphBuildJob?.status === "conflict"
+                                ? processing.graphBuildJob.message ?? "Не удалось собрать граф программы. Откройте замечания проверки."
+                                : processing.graphBuildJob && ["pending", "processing"].includes(processing.graphBuildJob.status)
+                                  ? "Последнее решение сохранено. Собираем граф программы; после завершения откроются проверки и чат."
+                                  : savingFindingId && unresolvedCount === 0 && !graphReady
+                                    ? "Последнее решение сохранено. Запускаем сборку графа программы…"
+                                  : processing.reviewBusy && savingFindingId && unresolvedCount === 1
+                                    ? "Сохраняем последнее решение. После этого начнётся сборка графа программы."
+                                    : processing.reviewBusy && unresolvedCount > 0
+                                      ? "Сохраняем выбор. После последнего обязательного решения система построит граф программы."
                                 : unresolvedCount > 0
-                                  ? `Сохраните решения для ${unresolvedCount} расхождений. После этого система построит граф сущностей и связей.`
+                                  ? `Сохраните решения для ${unresolvedCount} расхождений. После этого система построит граф программы.`
                                   : !graphReady
-                                    ? "Граф ещё не готов. Завершите обязательные решения и проверьте ошибки построения графа."
-                                    : "Граф построен. Автоматические проверки запущены; R-09 и R-11 можно запускать отдельно по запросу."}
+                                    ? "Граф ещё не готов. Завершите обязательные решения и проверьте замечания о построении графа."
+                                    : "Граф построен. Можно отдельно проверить покрытие компетенций и связь результатов обучения с дисциплинами."}
                         </p>
                         {!isDemoMode && !checkMatchesCurrentVersion && (
                           <button
@@ -1620,19 +1700,36 @@ function App() {
                       <section className="optional-rule-checks" aria-labelledby="optional-rule-checks-title">
                         <div className="optional-rule-checks-heading">
                           <div>
-                            <h3 id="optional-rule-checks-title">Семантические проверки по запросу</h3>
-                            <p>Запускаются только по кнопке после построения графа. Их замечания не блокируют подтверждение версии.</p>
+                            <h3 id="optional-rule-checks-title">Дополнительные проверки</h3>
+                            <p>Запустите их отдельно после сверки документов. Результаты помогут найти возможные пробелы, но не мешают подтвердить версию.</p>
                           </div>
                         </div>
                         <div className="optional-rule-check-grid">
                           {optionalRuleOptions.map(({ code, title, description }) => {
-                            const check = processing.optionalRuleChecks[code];
+                            const targets = processing.reviewDetails?.manual_check_targets;
+                            const isRpdCheck = code === "R-11";
+                            const options = isRpdCheck
+                              ? (targets?.rpd ?? []).map((doc) => ({
+                                  value: doc.document_id,
+                                  label: shortDocumentName(doc.name),
+                                })).sort((a, b) => a.label.localeCompare(b.label, "ru"))
+                              : (targets?.competencies ?? []).map((competency) => ({
+                                  value: competency.code,
+                                  label: competency.formulation
+                                    ? `${competency.code} — ${competency.formulation}`
+                                    : competency.code,
+                                }));
+                            const selected = isRpdCheck ? rpdDocumentId : coverageCompetencyCode;
+                            const target = options.some((option) => option.value === selected) ? selected : "";
+                            const chooseTarget = isRpdCheck ? setRpdDocumentId : setCoverageCompetencyCode;
+                            const previous = processing.optionalRuleChecks[code];
+                            const previousTarget = isRpdCheck ? previous?.document_ids?.[0] : previous?.competency_code;
+                            const check = previousTarget ? previous : undefined;
+                            const targetLabel = options.find((option) => option.value === previousTarget)?.label
+                              ?? previousTarget;
                             const running = Boolean(check && ["pending", "processing"].includes(check.status));
                             const coverage = check?.report?.coverage.find((item) => item.rule_code === code);
                             const issues = check?.report?.issues.filter((issue) => issue.rule_code === code) ?? [];
-                            const rpdDocuments = (processing.job?.files ?? [])
-                              .filter((file) => /(^|\/)РПД\//i.test(file.member_name.replaceAll("\\", "/")))
-                              .sort((left, right) => left.member_name.localeCompare(right.member_name, "ru"));
                             const diagnostics = issues.map((issue: ReviewIssue) => {
                               const documentIds = new Set(issue.source_document_ids ?? []);
                               for (const ref of processing.reviewDetails?.version.snapshot.source_refs ?? []) {
@@ -1646,32 +1743,23 @@ function App() {
                             return (
                               <article className="optional-rule-check-card" key={code}>
                                 <div>
-                                  <span className="optional-rule-code">{code}</span>
+                                  <span className="optional-rule-code">Дополнительно</span>
                                   <h4>{title}</h4>
                                   <p>{description}</p>
                                 </div>
-                                <button
-                                  className="secondary-button"
-                                  type="button"
-                                  disabled={isConfirmed || processing.reviewBusy || checkIsRunning || optionalCheckIsRunning}
-                                  onClick={() => void processing.runOptionalRuleCheck(code)}
-                                >
-                                  {running ? "Проверка выполняется…" : check ? "Запустить снова" : "Запустить проверку"}
-                                </button>
-                                {code === "R-11" && rpdDocuments.length > 0 && (
-                                  <div className="optional-rule-document-scope">
-                                    <label htmlFor="r-11-document-scope">
-                                      Документ РПД
+                                <div className="optional-rule-document-scope">
+                                    <label htmlFor={`${code}-scope`}>
+                                      {isRpdCheck ? "Рабочая программа дисциплины" : "Компетенция"}
                                       <select
-                                        id="r-11-document-scope"
-                                        value={rpdDocumentId}
-                                        disabled={isConfirmed || processing.reviewBusy || optionalCheckIsRunning}
-                                        onChange={(event) => setRpdDocumentId(event.target.value)}
+                                        id={`${code}-scope`}
+                                        value={target}
+                                        disabled={!options.length || isConfirmed || processing.reviewBusy || optionalCheckIsRunning}
+                                        onChange={(event) => chooseTarget(event.target.value)}
                                       >
-                                        <option value="">Все документы</option>
-                                        {rpdDocuments.map((file) => (
-                                          <option key={file.document_id} value={file.document_id}>
-                                            {shortDocumentName(file.member_name)}
+                                        <option value="">{isRpdCheck ? "Выберите одну РПД" : "Выберите одну компетенцию"}</option>
+                                        {options.map((option) => (
+                                          <option key={option.value} value={option.value}>
+                                            {option.label}
                                           </option>
                                         ))}
                                       </select>
@@ -1680,15 +1768,15 @@ function App() {
                                       className="secondary-button"
                                       type="button"
                                       disabled={
-                                        !rpdDocumentId || isConfirmed || processing.reviewBusy ||
+                                        !target || isConfirmed || processing.reviewBusy ||
                                         checkIsRunning || optionalCheckIsRunning
                                       }
-                                      onClick={() => void processing.runOptionalRuleCheck(code, rpdDocumentId)}
+                                      onClick={() => void processing.runOptionalRuleCheck(code, target)}
                                     >
-                                      Проверить выбранный документ
+                                      {running ? "Проверка выполняется…" : isRpdCheck ? "Проверить выбранную РПД" : "Проверить выбранную компетенцию"}
                                     </button>
-                                  </div>
-                                )}
+                                </div>
+                                {targetLabel && <p className="optional-rule-check-status">Последний запуск: {targetLabel}</p>}
                                 {check?.status === "failed" || check?.status === "conflict" ? (
                                   <p className="optional-rule-check-status optional-rule-check-status--error" role="alert">
                                     {check.message || "Не удалось завершить проверку."}
@@ -1768,14 +1856,41 @@ function App() {
                         </div>
                       </section>
                     )}
-                    {findingFilter === "R-08" && <p className="competency-toolbar-note">R-08 группирует формулировки индикаторов с одинаковым кодом в РПД, РПП и ЦКМВ. Отличия в регистре, пробелах, е/ё, краевой пунктуации и принятом сокращении «в т. ч.» не требуют выбора; остальные отличия показываются как варианты для решения пользователя.</p>}
-                    {findingFilter === "R-11" && <p className="competency-toolbar-note">R-11 сопоставляет каждый результат обучения в РПД с содержанием раздела 2 и оцениванием из раздела 3. Это смысловая подсказка, а не нормативный вывод: замечания нужно оценить специалисту.</p>}
+                    {findingFilterDescriptions[findingFilter] && <p className="competency-toolbar-note">{findingFilterDescriptions[findingFilter]}</p>}
                     <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
-                      <summary>Диагностика · групп: {visibleIssueCount}{findingFilter !== "all" ? ` · ${findingFilter}` : ""}</summary>
+                      <summary>Подробные результаты сверки · групп: {visibleIssueCount}{findingFilter !== "all" ? ` · ${findingFilters.find((item) => item.code === findingFilter)?.label}` : ""}</summary>
                       <DiagnosticList items={visibleIssues} />
                     </details>
+                    {!isConfirmed && unresolvedCount > 0 && (
+                      <div className="level-only-decisions">
+                        <button
+                          className="primary-button"
+                          type="button"
+                          disabled={processing.reviewBusy || isConfirmed}
+                          onClick={() => {
+                            setLevelAutoNotice(null);
+                            void processing.decideLevelOnlyVariants().then((applied) => {
+                              if (applied === null) return;
+                              setLevelAutoNotice(applied > 0
+                                ? `Автоматически выбрано формулировок с указанием уровня: ${applied}.`
+                                : "Вопросов, где варианты различаются только уровнем, не найдено.");
+                            });
+                          }}
+                        >
+                          {processing.reviewBusy ? "Выбираем…" : "Выбрать формулировки с уровнем"}
+                        </button>
+                        <p className="level-only-decisions-hint">
+                          Для вопросов, где один вариант отличается от другого только указанием
+                          уровня (Базовый, Средний, Продвинутый, …), выбирается вариант с уровнем.
+                          Остальные вопросы остаются на ручной выбор.
+                        </p>
+                        {levelAutoNotice && (
+                          <p className="level-only-decisions-status" role="status">{levelAutoNotice}</p>
+                        )}
+                      </div>
+                    )}
                     <div className="finding-list finding-accordion">
-                      {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранным фильтрам нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Проверьте замечания R-08 ниже." : findingFilter === "R-11" ? "R-11 не предлагает готовый вариант: его замечания показаны ниже для экспертной оценки." : "Попробуйте другой фильтр."}</p>}
+                      {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранной категории нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Подробности о формулировках индикаторов доступны ниже." : findingFilter === "R-11" ? "Эта проверка не предлагает готовый вариант: её замечания нужно оценить специалисту." : "Попробуйте другую категорию."}</p>}
                       {visibleFindings.map((finding, index) => {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
@@ -1783,24 +1898,28 @@ function App() {
                         const isResolved = Boolean(appliedChoice && selectedChoiceId === appliedChoice.id);
                         const ruleGroup = findingRuleGroup(finding.ruleCode);
                         const isChoiceFinding = ruleGroup === "R-01" || ruleGroup === "R-07" || ruleGroup === "R-08";
-                        const allowsCustomChoice = ruleGroup === "R-01" || ruleGroup === "R-07" || ruleGroup === "R-08";
+                        const allowsCustomChoice = !finding.sharedIndicatorText
+                          && (ruleGroup === "R-01" || ruleGroup === "R-07" || ruleGroup === "R-08");
+                        const compareFormulations = !finding.sharedIndicatorText
+                          && (ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1;
                         const isCustom = selectedChoiceId === "__custom__";
                         const isReject = selectedChoiceId === "__reject__";
                         const isUnsaved = Boolean(selectedChoiceId && !isResolved);
+                        const isSavingChoice = processing.reviewBusy && savingFindingId === finding.id;
                         const customText = customValues[finding.id] ?? "";
 
                         return (
                           <details className={`variant-accordion-item${isResolved ? " is-resolved" : ""}`} key={finding.id} name="validator-variant-findings">
                             <summary className="variant-accordion-summary">
-                              <span className="variant-accordion-code">{ruleGroup === "other" ? finding.ruleCode : ruleGroup}</span>
+                              <span className="finding-category">{findingCategoryLabel(finding.ruleCode)}</span>
                               <span className="variant-accordion-copy">
                                 <strong>{finding.title}</strong>
                                 <span>{isChoiceFinding && finding.choices.length > 0
                                   ? `${finding.choices.length} ${formatCountWithWords(finding.choices.length, "вариант", "варианта", "вариантов")}`
                                   : `Расхождение ${index + 1} из ${visibleFindings.length}`}</span>
                               </span>
-                              <span className={`finding-status${isResolved || finding.customDecision ? " finding-status--resolved" : ""}`}>
-                                {isResolved ? "Решено" : finding.customDecision ? "Свой вариант" : "Нужно решение"}
+                              <span className={`finding-status${isResolved || finding.customDecision ? " finding-status--resolved" : isSavingChoice ? " finding-status--saving" : ""}`}>
+                                {isSavingChoice ? "Сохраняем…" : isResolved ? "Решено" : finding.customDecision ? "Свой вариант" : "Нужно решение"}
                               </span>
                             </summary>
                             <div className="variant-accordion-body">
@@ -1834,7 +1953,7 @@ function App() {
                                       />
                                       <span className="choice-content">
                                         <span className="choice-value">
-                                          {(ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1
+                                          {compareFormulations
                                             ? <ComparisonText value={choice.value} otherValues={finding.choices.filter((item) => item.id !== choice.id).map((item) => item.value)} />
                                             : choice.value}
                                         </span>
@@ -1842,7 +1961,7 @@ function App() {
                                     </label>
                                   </div>
                                 ))}
-                                {(ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1 && (
+                                {compareFormulations && (
                                   <p className="competency-comparison-hint">Подсветка показывает текстовые отличия между формулировками.</p>
                                 )}
                                 {allowsCustomChoice && (
@@ -1961,35 +2080,6 @@ function App() {
                       <p className="upload-notice" role="alert">
                         Не выполнены обязательные проверки: {skippedRequiredChecks.join(", ")}.
                       </p>
-                    )}
-
-                    {!isConfirmed && unresolvedCount > 0 && (
-                      <div className="level-only-decisions">
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={processing.reviewBusy || isConfirmed}
-                          onClick={() => {
-                            setLevelAutoNotice(null);
-                            void processing.decideLevelOnlyVariants().then((applied) => {
-                                if (applied === null) return;
-                              setLevelAutoNotice(applied > 0
-                                ? `Автоматически выбрано формулировок с указанием уровня: ${applied}.`
-                                : "Вопросов, где варианты различаются только уровнем, не найдено.");
-                            });
-                          }}
-                        >
-                          {processing.reviewBusy ? "Выбираем…" : "Выбрать формулировки с уровнем"}
-                        </button>
-                        <p className="level-only-decisions-hint">
-                          Для вопросов, где один вариант отличается от другого только указанием
-                          уровня (Базовый, Средний, Продвинутый, …), выбирается вариант с уровнем.
-                          Остальные вопросы остаются на ручной выбор.
-                        </p>
-                        {levelAutoNotice && (
-                          <p className="level-only-decisions-status" role="status">{levelAutoNotice}</p>
-                        )}
-                      </div>
                     )}
 
                     <div className="confirm-version">

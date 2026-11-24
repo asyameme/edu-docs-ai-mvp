@@ -1,10 +1,10 @@
 """Предложение обмена Backend/ML: анализ пакета и проверка выбранного снимка."""
 
 import re
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, Field, JsonValue, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, JsonValue, StringConstraints, field_validator, model_validator
 
 from app.domain import Contract, Entity, RelationV2, SnapshotV2
 from app.parser_document import ParserDocument, parse_output
@@ -100,7 +100,19 @@ class CompetencyLinksMutation(Contract):
     codes: list[str] = Field(min_length=1)
 
 
-ReviewMutation = Mutation | DocumentMutation | CompetencyLinksMutation
+class SharedIndicatorTextMutation(Contract):
+    """Controls how one source phrase shared by several indicators is written."""
+
+    op: Literal["set_shared_indicator_text"]
+    document_id: UUID
+    indicator_indices: list[int] = Field(min_length=2)
+    action: Literal["keep", "split"]
+
+
+DOCUMENT_MUTATION_OPS = {
+    "set_document_value", "set_competency_links", "set_shared_indicator_text",
+}
+ReviewMutation = Mutation | DocumentMutation | CompetencyLinksMutation | SharedIndicatorTextMutation
 
 
 class Variant(Contract):
@@ -259,7 +271,7 @@ class AnalysisV2(CheckResult):
             if issue.requires_decision and not issue.variants:
                 raise ValueError("A decision issue must provide at least one variant")
             if issue.variants and any(
-                not isinstance(change, (DocumentMutation, CompetencyLinksMutation))
+                not isinstance(change, (DocumentMutation, CompetencyLinksMutation, SharedIndicatorTextMutation))
                 for variant in issue.variants
                 for change in variant.changes
             ):
@@ -333,12 +345,24 @@ class DecisionBatchCreate(Contract):
         return self
 
 
+CompetencyCode = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+def _check_manual_scope(rule_codes, document_ids, competency_code):
+    rules = set(rule_codes or ())
+    if "R-11" in rules or document_ids is not None:
+        if rules != {"R-11"} or not document_ids or len(document_ids) != 1 or competency_code is not None:
+            raise ValueError("Для R-11 выберите одну РПД и запустите правило отдельно")
+    if "R-09" in rules or competency_code is not None:
+        if rules != {"R-09"} or not competency_code or document_ids is not None:
+            raise ValueError("Для R-09 выберите одну компетенцию и запустите правило отдельно")
+
+
 class CheckCreate(Contract):
     version_id: UUID
     rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
-    # Ручная проверка R-11 может запускаться по одному документу РПД,
-    # чтобы не ждать LLM-оценку всех дисциплин пакета.
-    document_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=4)
+    document_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=1)
+    competency_code: CompetencyCode | None = None
 
     @field_validator("rule_codes")
     @classmethod
@@ -348,11 +372,8 @@ class CheckCreate(Contract):
         return value
 
     @model_validator(mode="after")
-    def documents_only_for_manual_rules(self) -> Self:
-        if self.document_ids is not None and self.rule_codes is None:
-            raise ValueError("Список документов допустим только для ручных правил")
-        if self.document_ids is not None and len(self.document_ids) != len(set(self.document_ids)):
-            raise ValueError("Документы ручной проверки не должны повторяться")
+    def check_manual_scope(self) -> Self:
+        _check_manual_scope(self.rule_codes, self.document_ids, self.competency_code)
         return self
 
 
@@ -445,7 +466,8 @@ class CheckRequest(Contract):
     ruleset: Ruleset
     documents: list[AnalysisDocument] = Field(default_factory=list)
     rule_codes: list[str] | None = Field(default=None, min_length=1, max_length=2)
-    document_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=4)
+    document_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=1)
+    competency_code: CompetencyCode | None = None
 
     @model_validator(mode="after")
     def documents_belong_to_program(self) -> Self:
@@ -456,4 +478,5 @@ class CheckRequest(Contract):
             document.check_program(self.program_id)
         if self.rule_codes is not None and len(self.rule_codes) != len(set(self.rule_codes)):
             raise ValueError("Ручные проверки не должны повторяться")
+        _check_manual_scope(self.rule_codes, self.document_ids, self.competency_code)
         return self

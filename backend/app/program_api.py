@@ -10,6 +10,7 @@ from app.domain import (
     DocumentRead,
     ProgramCreate,
     ProgramRead,
+    ProgramSignatureUpdate,
     VersionCreate,
     VersionRead,
     VersionRestore,
@@ -52,6 +53,13 @@ def programs(repo: RepoDep, limit: Limit = 50, offset: Offset = 0) -> list[Progr
 @router.get("/{program_id}")
 def program(program_id: UUID, repo: RepoDep) -> ProgramRead:
     return repo.program(program_id)
+
+
+@router.put("/{program_id}/signature")
+def update_signature(
+    program_id: UUID, body: ProgramSignatureUpdate, repo: RepoDep
+) -> ProgramRead:
+    return repo.update_signature(program_id, body.value)
 
 
 @router.post("/{program_id}/versions", status_code=201)

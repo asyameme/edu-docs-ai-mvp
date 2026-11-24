@@ -6,15 +6,24 @@ import {
   type GenerationJob,
   type PackageComposition,
   type RuleCoverage,
+  type VersionRead,
 } from "./api";
+import { DiagnosticList } from "./DiagnosticList";
+import type { Diagnostic } from "./diagnostics";
+
+export type GenerationReview =
+  | { kind: "confirmed"; versionId: string }
+  | { kind: "ready"; confirm: () => Promise<VersionRead | null> }
+  | { kind: "blocked"; reason: string };
 
 type GenerationScreenProps = {
   programId: string;
-  confirmedVersionId: string;
+  review: GenerationReview;
   versionNumber: number;
-  isConfirmed: boolean;
   isDemoMode: boolean;
   checkReport: CheckReport | null;
+  issues: Diagnostic[];
+  reviewNotice: string;
   acceptedWarnings: number;
 };
 
@@ -94,13 +103,16 @@ function packageDocuments(composition: PackageComposition | null) {
 
 function GenerationScreen({
   programId,
-  confirmedVersionId,
+  review,
   versionNumber,
-  isConfirmed,
   isDemoMode,
   checkReport,
+  issues,
+  reviewNotice,
   acceptedWarnings,
 }: GenerationScreenProps) {
+  const isConfirmed = review.kind === "confirmed";
+  const confirmedVersionId = review.kind === "confirmed" ? review.versionId : "";
   const [demo, setDemo] = useState<DemoGeneration>(() => (
     isDemoMode && isConfirmed
       ? { kind: "completed", packageVersion: versionNumber, generatedAt: "Демонстрационный результат" }
@@ -131,7 +143,7 @@ function GenerationScreen({
       if (!active) return;
       setHistory(jobs);
       const own = jobs.filter((item) => item.version_id === confirmedVersionId);
-      setJob(own[0] ?? null);
+      setJob((current) => current?.version_id === confirmedVersionId ? current : own[0] ?? null);
     }).catch((error: unknown) => {
       if (active) setNotice(errorMessage(error, "Не удалось загрузить историю генерации."));
     });
@@ -160,7 +172,7 @@ function GenerationScreen({
   }, [isDemoMode, job, base]);
 
   async function startGeneration() {
-    if (!isConfirmed || isRunning || starting) return;
+    if (review.kind === "blocked" || isRunning || starting) return;
     setNotice("");
     if (isDemoMode) {
       setDemo({ kind: "running", progress: 34 });
@@ -168,10 +180,12 @@ function GenerationScreen({
     }
     setStarting(true);
     try {
+      const version = review.kind === "ready" ? await review.confirm() : null;
+      if (review.kind === "ready" && !version) return;
       setJob(await api<GenerationJob>(base, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ version_id: confirmedVersionId }),
+        body: JSON.stringify({ version_id: version?.id ?? confirmedVersionId }),
       }));
     } catch (error) {
       setNotice(errorMessage(error, "Не удалось запустить генерацию."));
@@ -212,7 +226,7 @@ function GenerationScreen({
   const failed = !isDemoMode && job?.status === "failed";
   const manualNotes = job?.notes ?? [];
   const generationStatus = !isConfirmed
-    ? "Нужна подтверждённая версия"
+    ? review.kind === "ready" ? "Проверка завершена" : "Ожидает подтверждения"
     : isRunning
       ? "Формируем пакет"
       : isCompleted
@@ -222,6 +236,25 @@ function GenerationScreen({
           : "Готов к запуску";
   const statuses = countByStatus(checkReport?.coverage ?? []);
   const changedDocuments = job?.applied.length ?? 0;
+  const warningCount = issues.filter((issue) => issue.severity === "warning").length;
+  const hasWarnings = warningCount > 0;
+  const showIssues = !isDemoMode && issues.length > 0;
+  const startButton = (
+    <button
+      className="primary-button generation-start-button"
+      type="button"
+      disabled={review.kind === "blocked" || isRunning || starting}
+      onClick={() => { void startGeneration(); }}
+    >
+      {starting
+        ? isConfirmed ? "Запускаем сборку…" : "Подтверждаем версию…"
+        : isRunning
+          ? "Собираем пакет…"
+          : isConfirmed
+            ? isCompleted ? "Сформировать новый пакет" : "Сформировать пакет"
+            : hasWarnings ? "Принять замечания и сформировать пакет" : "Подтвердить и сформировать пакет"}
+    </button>
+  );
 
   return (
     <>
@@ -242,30 +275,44 @@ function GenerationScreen({
             {isCompleted ? "Пакет документов собран" : "Подготовьте новый пакет документов"}
           </h2>
           <p>
-            {isConfirmed
-              ? "Сформируем документы на основе подтверждённой версии программы."
-              : "Сначала подтвердите версию программы на экране «Программа»."}
+            {review.kind === "blocked"
+              ? review.reason
+              : isConfirmed
+                ? "Сформируем документы на основе подтверждённой версии программы."
+                : hasWarnings
+                  ? "Просмотрите оставшиеся замечания перед сборкой пакета."
+                  : "Проверка завершена, версию можно подтвердить и собрать пакет."}
           </p>
+          {reviewNotice && <p className="generation-notice" role="status">{reviewNotice}</p>}
         </div>
         <div className="generation-summary-action">
           <span className={"generation-state" + (isRunning ? " is-running" : "")} role="status">
             <span aria-hidden="true" />
             {generationStatus}
           </span>
-          <button
-            className="primary-button generation-start-button"
-            type="button"
-            disabled={!isConfirmed || isRunning || starting}
-            onClick={() => { void startGeneration(); }}
-          >
-            {starting
-              ? "Запускаем…"
-              : isRunning
-                ? "Собираем пакет…"
-                : isCompleted ? "Сформировать новый пакет" : "Сформировать пакет"}
-          </button>
+          {(!showIssues || isConfirmed) && startButton}
         </div>
       </section>
+
+      {showIssues && (
+        <section className="generation-section generation-review card" aria-labelledby="generation-issues-title">
+          <div className="generation-section-heading">
+            <div>
+              <h2 id="generation-issues-title">{isConfirmed ? "Принятые предупреждения" : "Оставшиеся замечания"}</h2>
+              <p>Результаты проверки текущей версии программы</p>
+            </div>
+          </div>
+          <DiagnosticList items={issues} />
+          {!isConfirmed && (
+            <div className="generation-review-action">
+              {hasWarnings && review.kind !== "blocked" && (
+                <p>Кнопка принимает все предупреждения текущей проверки ({warningCount}) и запускает сборку.</p>
+              )}
+              {startButton}
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="generation-layout">
         <div className="generation-main-column">
@@ -342,7 +389,7 @@ function GenerationScreen({
             <div className="generation-section-heading">
               <div>
                 <h2 id="generation-metrics-title">Сводка проверки</h2>
-                <p>По подтверждённой версии программы</p>
+                <p>По текущей версии программы</p>
               </div>
               <span className="generation-report-status">{isDemoMode ? "Демо-сводка" : checkReport ? "Результаты проверки" : "Нет данных"}</span>
             </div>
@@ -374,17 +421,17 @@ function GenerationScreen({
                 <article className="generation-metric">
                   <span>Правила с замечаниями</span>
                   <strong>{statuses.failed}</strong>
-                  <small>замечания приняты при подтверждении</small>
+                  <small>{isConfirmed ? "учтены при подтверждении" : "подробности в списке замечаний"}</small>
                 </article>
                 <article className="generation-metric generation-metric--review">
-                  <span>Принятые предупреждения</span>
-                  <strong>{acceptedWarnings}</strong>
-                  <small>групп предупреждений учтено</small>
+                  <span>{isConfirmed ? "Принятые предупреждения" : "Предупреждения"}</span>
+                  <strong>{isConfirmed ? acceptedWarnings : warningCount}</strong>
+                  <small>{isConfirmed ? "записей учтено" : "в текущей проверке"}</small>
                 </article>
               </div>
             ) : (
               <p className="generation-empty-metrics">
-                {isConfirmed ? "Результаты проверки подтверждённой версии недоступны." : "Сводка появится после проверки и подтверждения версии программы."}
+                {isConfirmed ? "Результаты проверки подтверждённой версии недоступны." : "Сводка появится после проверки версии программы."}
               </p>
             )}
           </section>

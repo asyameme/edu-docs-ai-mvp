@@ -13,8 +13,10 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from app.confirmation_policy import CONFIRMATION_POLICY
+from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH
 from app.document_reconciliation import apply_document_mutations
 from app.parser_document import parse_output
+from app.review_contract import DOCUMENT_MUTATION_OPS
 from app.review_logic import digest
 from worker.validation.validator import Document, load_rules, run_validation
 
@@ -302,10 +304,11 @@ def project_snapshot_documents(documents, snapshot):
 
     document_changes = []
     review_attribute_fields = set()
+    changed_workload = set()
     if snapshot.review:
         for decision in snapshot.review.decisions:
             for change in decision.changes:
-                if change.get("op") in {"set_document_value", "set_competency_links"}:
+                if change.get("op") in DOCUMENT_MUTATION_OPS:
                     document_changes.append(change)
                     continue
                 if change.get("op") != "set_attribute":
@@ -317,6 +320,12 @@ def project_snapshot_documents(documents, snapshot):
                     raise ValueError("Нет исходного поля для поддержанной повторной проверки")
                 if not change["field_path"].startswith("/attributes/"):
                     raise ValueError("Изменяемый путь должен находиться внутри attributes")
+                target = targets.get(key[:2])
+                if (target and target.get("kind") == "curriculum_item"
+                    and key[2].startswith(HOURS_COMPONENT_PREFIX)):
+                    changed_workload.add(key[:2])
+                    review_attribute_fields.add((*key[:2], HOURS_TOTAL_PATH))
+                    continue
                 review_attribute_fields.add(key)
     else:
         # Старые версии без review сохраняют прежнее поведение только для чисел.
@@ -452,6 +461,13 @@ def project_snapshot_documents(documents, snapshot):
         except json.JSONDecodeError as error:
             raise ValueError("Источник не содержит координаты для повторной проверки") from error
         field_tokens = path_tokens[1:]
+        if key[:2] in changed_workload and key[2] == HOURS_TOTAL_PATH:
+            # Старые артефакты не содержат разбиение, но итог остаётся доступен по строке.
+            records = [row for row in document.get("curriculum_items", [])
+                       if same_locator(row.get("source_ref"), locator)]
+            if len(records) == 1 and records[0].get("workload_cells"):
+                for name, cell in records[0]["workload_cells"].items():
+                    cell["hours"] = target["attributes"]["hours_by_kind"][name]
         values = record_values(document, locator, field_tokens)
         if len(values) == 1 and values[0] == new_value and type(values[0]) is type(new_value):
             continue
@@ -550,7 +566,8 @@ def validation_documents(documents):
     return inputs
 
 
-def run_document_rules(inputs, config, *, phase, rule_codes=None, document_ids=None):
+def run_document_rules(inputs, config, *, phase, rule_codes=None, document_ids=None,
+                       competency_code=None):
     """Запускает общий движок с тем же профилем и бюджетом на указанной стадии."""
     budget = _ValidationBudget()
     return run_validation(
@@ -558,11 +575,12 @@ def run_document_rules(inputs, config, *, phase, rule_codes=None, document_ids=N
         semantic_evaluator=budget.semantic,
         rule_codes=rule_codes,
         document_ids=document_ids,
+        competency_code=competency_code,
     ).to_dict()
 
 
 def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, rule_codes=None,
-                    document_ids=None):
+                    document_ids=None, competency_code=None):
     """Проверяет сохранённые документы и связывает замечания с их источниками."""
     config = config or load_rules()
     inputs = validation_documents(documents)
@@ -577,7 +595,8 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, r
         ruleset = {**ruleset, "required_rules": []}
     report = run_document_rules(
         inputs, config, phase="graph_validation", rule_codes=rule_codes,
-        document_ids=document_ids,
+        **({"document_ids": document_ids} if document_ids is not None else {}),
+        **({"competency_code": competency_code} if competency_code is not None else {}),
     )
     refs = {}
     document_aliases = {}

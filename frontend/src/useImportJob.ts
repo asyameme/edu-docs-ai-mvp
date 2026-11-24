@@ -6,6 +6,7 @@ import {
   saveSession,
   type CheckJob,
   type DecisionBatchRequest,
+  type GraphBuildJob,
   type ImportJob,
   type ImportSession,
   type OptionalRuleCode,
@@ -16,6 +17,7 @@ import {
   type VersionRead,
 } from "./api";
 import { signatureForProgram, type ProgramSignature } from "./signature";
+import { ruleDisplayLabel } from "./diagnostics";
 
 const emptySession: ImportSession = { programId: "", jobId: "" };
 
@@ -36,12 +38,16 @@ export function useImportJob() {
   const busyRef = useRef(false);
   const reviewBusyRef = useRef(false);
   const signatureRef = useRef<ProgramSignature | null>(null);
+  const signatureSavingRef = useRef(false);
+  const [signatureSaving, setSignatureSaving] = useState(false);
   const [signature, setSignature] = useState<ProgramSignature | null>(null);
   const [session, setSession] = useState(initial.current);
   const [program, setProgram] = useState<ProgramRead | null>(null);
   const [job, setJob] = useState<ImportJob | null>(null);
   const [reviewJob, setReviewJob] = useState<ReviewJob | null>(null);
   const [reviewDetails, setReviewDetails] = useState<ReviewDetails | null>(null);
+  const [graphBuildJob, setGraphBuildJob] = useState<GraphBuildJob | null>(null);
+  const graphBuildHandledRef = useRef("");
   const reviewDetailsLoadsRef = useRef(new Map<string, Promise<ReviewDetails>>());
   const [checkJob, setCheckJob] = useState<CheckJob | null>(null);
   const [optionalRuleChecks, setOptionalRuleChecks] = useState<Partial<Record<OptionalRuleCode, CheckJob>>>({});
@@ -63,6 +69,13 @@ export function useImportJob() {
     saveSession(next);
   }, []);
 
+  const openProgramState = useCallback((next: ProgramRead) => {
+    const restored = next.signature ? { programId: next.id, value: next.signature } : null;
+    signatureRef.current = restored;
+    setSignature(restored);
+    setProgram(next);
+  }, []);
+
   // Программа из сохранённой сессии исчезла (например, БД пересоздали):
   // молча возвращаем страницу к начальному экрану загрузки.
   const resetStaleSession = useCallback(() => {
@@ -73,6 +86,9 @@ export function useImportJob() {
     setJob(null);
     setReviewJob(null);
     setReviewDetails(null);
+    setGraphBuildJob(null);
+    signatureRef.current = null;
+    setSignature(null);
     setCheckJob(null);
     setOptionalRuleChecks({});
     setRecoveredReviewFor(null);
@@ -81,7 +97,7 @@ export function useImportJob() {
 
   const applyProgramState = useCallback((latest: ProgramRead, analysisVersionId?: string | null) => {
     if (sessionRef.current.programId !== latest.id) return;
-    setProgram(latest);
+    openProgramState(latest);
 
     const current = sessionRef.current;
     const patch: Partial<ImportSession> = {};
@@ -95,9 +111,10 @@ export function useImportJob() {
       patch.analysisVersionId = analysisVersionId;
     }
     if (Object.keys(patch).length > 0) updateSession(patch);
-  }, [updateSession]);
+  }, [updateSession, openProgramState]);
 
-  const saveSignature = useCallback((value: string) => {
+  const saveSignature = useCallback(async (value: string) => {
+    if (signatureSavingRef.current) return false;
     const programId = sessionRef.current.programId;
     const normalized = value.trim();
     if (!program || program.id !== programId) return false;
@@ -105,11 +122,31 @@ export function useImportJob() {
       setNotice("Введите имя для подписи длиной от 1 до 120 символов.");
       return false;
     }
-    const next = { programId, value: normalized };
-    signatureRef.current = next;
-    setSignature(next);
-    setNotice("");
-    return true;
+    signatureSavingRef.current = true;
+    setSignatureSaving(true);
+    try {
+      const saved = await api<ProgramRead>(`/api/v1/programs/${programId}/signature`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: normalized }),
+      });
+      if (sessionRef.current.programId !== programId) return false;
+      const next = saved.signature ? { programId, value: saved.signature } : null;
+      signatureRef.current = next;
+      setSignature(next);
+      setProgram((current) => current?.id === programId
+        ? { ...current, signature: saved.signature } : current);
+      setNotice("");
+      return true;
+    } catch (error) {
+      if (sessionRef.current.programId === programId) {
+        setNotice(error instanceof Error ? error.message : "Не удалось сохранить подпись");
+      }
+      return false;
+    } finally {
+      signatureSavingRef.current = false;
+      setSignatureSaving(false);
+    }
   }, [program]);
 
   const loadReviewDetails = useCallback((versionId: string, programId = sessionRef.current.programId) => {
@@ -145,8 +182,14 @@ export function useImportJob() {
           snapshot: { ...details.version.snapshot, source_refs: [...refs.values()] },
         },
       };
-      if (sessionRef.current.programId === programId && sessionRef.current.versionId === versionId) {
+      const active = sessionRef.current;
+      if (active.programId === programId && active.versionId === versionId) {
         setReviewDetails(complete);
+        if (!complete.confirmed && complete.check_job_id && complete.check_report &&
+          (!active.checkJobId || active.checkVersionId !== versionId)
+        ) {
+          updateSession({ checkJobId: complete.check_job_id, checkVersionId: versionId });
+        }
       }
       return complete;
     })();
@@ -161,7 +204,89 @@ export function useImportJob() {
       },
     );
     return load;
-  }, []);
+  }, [updateSession]);
+
+  useEffect(() => {
+    const pendingBuild = reviewDetails?.graph_build;
+    if (!pendingBuild || !session.programId) {
+      setGraphBuildJob(null);
+      return;
+    }
+
+    setGraphBuildJob(pendingBuild);
+    let active = true;
+    let timer: number | undefined;
+    const reviewId = reviewDetails.version.snapshot.review?.review_id;
+    const programId = session.programId;
+
+    const applyBuiltVersion = async (build: GraphBuildJob) => {
+      if (build.status !== "completed") return;
+      const versionId = build.output_version_id;
+      if (graphBuildHandledRef.current === build.id) return;
+      graphBuildHandledRef.current = build.id;
+      updateSession({ versionId, checkJobId: undefined, checkVersionId: undefined });
+      setCheckJob(null);
+      try {
+        await loadReviewDetails(versionId, programId);
+        if (active) setGraphBuildJob(null);
+      } catch {
+        if (active) setNotice("Граф программы собран. Обновляем данные версии…");
+      }
+    };
+
+    if (pendingBuild.status === "completed") {
+      void applyBuiltVersion(pendingBuild);
+      return () => { active = false; };
+    }
+    if (pendingBuild.status === "failed" || pendingBuild.status === "conflict") {
+      setNotice(pendingBuild.message || "Не удалось завершить сборку графа программы.");
+      return () => { active = false; };
+    }
+    if (!reviewId) return () => { active = false; };
+
+    const poll = async () => {
+      try {
+        const latest = await api<GraphBuildJob>(
+          `/api/v1/programs/${programId}/reviews/${reviewId}/graph-build`,
+        );
+        if (!active) return;
+        setGraphBuildJob(latest);
+        if (latest.status === "completed") {
+          await applyBuiltVersion(latest);
+          return;
+        }
+        if (latest.status === "failed" || latest.status === "conflict") {
+          setNotice(latest.message || "Не удалось завершить сборку графа программы.");
+          try {
+            const currentVersionId = sessionRef.current.versionId;
+            if (currentVersionId) {
+              const refreshed = await loadReviewDetails(currentVersionId, programId);
+              if (active) setReviewDetails(refreshed);
+            }
+          } catch {
+            // Сохраняем исходное предупреждение; список замечаний обновится при следующем чтении.
+          }
+          return;
+        }
+      } catch {
+        // Временная ошибка чтения статуса не отменяет устойчивую задачу Temporal.
+      }
+      if (active) timer = window.setTimeout(() => void poll(), 1500);
+    };
+
+    timer = window.setTimeout(() => void poll(), 700);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    reviewDetails?.graph_build?.id,
+    reviewDetails?.graph_build?.status,
+    reviewDetails?.version.snapshot.review?.review_id,
+    session.programId,
+    updateSession,
+    loadReviewDetails,
+  ]);
 
   useEffect(() => {
     signatureRef.current = null;
@@ -198,7 +323,7 @@ export function useImportJob() {
         sessionRef.current = restoredSession;
         setSession(restoredSession);
         saveSession(restoredSession);
-        setProgram(restoredProgram);
+        openProgramState(restoredProgram);
         setJob(restoredJob);
         setReviewJob(restoredReviewJob);
         setCheckJob(null);
@@ -237,7 +362,7 @@ export function useImportJob() {
     };
     void openProgram();
     return () => { active = false; };
-  }, [session.programId, applyProgramState, loadReviewDetails, resetStaleSession]);
+  }, [session.programId, applyProgramState, loadReviewDetails, openProgramState, resetStaleSession]);
 
   useEffect(() => {
     if (!session.programId) return;
@@ -631,7 +756,7 @@ export function useImportJob() {
           });
           return;
         }
-        setNotice(error instanceof Error ? error.message : `Не удалось получить результат ${ruleCode}`);
+        setNotice(error instanceof Error ? error.message : `Не удалось получить результат проверки «${ruleDisplayLabel(ruleCode).toLocaleLowerCase("ru")}»`);
         timers.set(ruleCode, setTimeout(() => void poll(ruleCode, jobId), 3000));
       }
     };
@@ -677,7 +802,7 @@ export function useImportJob() {
         target = programRead.id;
       }
       if (!programRead) throw new Error("Не удалось создать программу");
-      setProgram(programRead);
+      openProgramState(programRead);
       const nextSession: ImportSession = {
         programId: target,
         jobId: "",
@@ -978,7 +1103,7 @@ export function useImportJob() {
     }
   }, [updateSession]);
 
-  async function runOptionalRuleCheck(ruleCode: OptionalRuleCode, documentId?: string) {
+  async function runOptionalRuleCheck(ruleCode: OptionalRuleCode, target: string) {
     const current = sessionRef.current;
     const currentDetails = reviewDetails;
     const anotherCheckRunning = Object.values(optionalRuleChecks).some(
@@ -988,7 +1113,7 @@ export function useImportJob() {
       checkJob && ["pending", "processing"].includes(checkJob.status),
     );
     if (
-      reviewBusyRef.current || anotherCheckRunning || standardCheckRunning ||
+      !target || reviewBusyRef.current || anotherCheckRunning || standardCheckRunning ||
       !current.programId || !current.reviewId || !current.versionId ||
       !currentDetails || currentDetails.version.id !== current.versionId ||
       currentDetails.version.snapshot.review?.graph_ready !== true || currentDetails.confirmed
@@ -1004,7 +1129,7 @@ export function useImportJob() {
           body: JSON.stringify({
             version_id: current.versionId,
             rule_codes: [ruleCode],
-            ...(ruleCode === "R-11" && documentId ? { document_ids: [documentId] } : {}),
+            ...(ruleCode === "R-11" ? { document_ids: [target] } : { competency_code: target }),
           }),
         },
       );
@@ -1019,20 +1144,26 @@ export function useImportJob() {
       updateSession({ optionalRuleCheckJobIds });
       setNotice("");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : `Не удалось запустить ${ruleCode}`);
+      setNotice(error instanceof Error ? error.message : `Не удалось запустить проверку «${ruleDisplayLabel(ruleCode).toLocaleLowerCase("ru")}»`);
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
     }
   }
 
-  async function confirm(acceptedWarningIds: string[]) {
+  async function confirm(acceptedWarningIds: string[], expectedVersionId?: string) {
     const current = sessionRef.current;
-    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId || !checkJob || checkJob.status !== "completed") return;
+    if (expectedVersionId && current.versionId !== expectedVersionId) {
+      setNotice("Версия программы изменилась. Просмотрите актуальные замечания.");
+      return null;
+    }
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId ||
+      !checkJob || checkJob.status !== "completed" || checkJob.input_version_id !== current.versionId
+    ) return null;
     const signature = signatureForProgram(signatureRef.current, current.programId);
     if (!signature) {
       setNotice("Укажите подпись для этой программы кнопкой над программой.");
-      return;
+      return null;
     }
     reviewBusyRef.current = true;
     setReviewBusy(true);
@@ -1049,9 +1180,13 @@ export function useImportJob() {
       });
       updateSession({ versionId: version.id });
       setNotice("");
-      await loadReviewDetails(version.id, current.programId);
+      void loadReviewDetails(version.id, current.programId).catch(() => {
+        setNotice("Версия подтверждена. Не удалось обновить данные на экране.");
+      });
+      return version;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось подтвердить версию");
+      return null;
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
@@ -1064,7 +1199,7 @@ export function useImportJob() {
     if (current.reviewId || (reviewJob && ["failed", "conflict", "completed"].includes(reviewJob.status))) {
       try {
         const latest = await api<ProgramRead>(`/api/v1/programs/${current.programId}`);
-        setProgram(latest);
+        openProgramState(latest);
         setReviewJob(null);
         setReviewDetails(null);
         setCheckJob(null);
@@ -1098,10 +1233,12 @@ export function useImportJob() {
     versionId: session.versionId ?? "",
     program,
     signature: signatureForProgram(signature, session.programId),
+    signatureSaving,
     saveSignature,
     job,
     reviewJob,
     reviewDetails,
+    graphBuildJob,
     checkJob,
     optionalRuleChecks,
     busy,

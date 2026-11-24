@@ -22,6 +22,8 @@ from app.generation_activities import GenerationActivities
 from app.generation_dispatcher import dispatch_generations
 from app.generation_repository import GenerationRepository
 from app.generation_workflow import GenerationWorkflow
+from app.graph_build_dispatcher import dispatch_graph_builds
+from app.graph_build_workflow import GraphBuildWorkflow
 from app.import_activities import ImportActivities
 from app.import_dispatcher import dispatch_imports
 from app.import_repository import ImportRepository
@@ -89,6 +91,7 @@ async def main() -> None:
             LegacyImportWorkflow,
             ImportWorkflow,
             ReviewWorkflow,
+            GraphBuildWorkflow,
             GenerationWorkflow,
             *([ChatWorkflow] if chat_agent else []),
         ],
@@ -103,6 +106,8 @@ async def main() -> None:
             imports.finish_v2,
             reviews.execute,
             reviews.failed,
+            reviews.build_graph,
+            reviews.graph_build_failed,
             generations.build,
             generations.failed,
             chat_activities.mark_running,
@@ -129,6 +134,11 @@ async def main() -> None:
         review_dispatcher = asyncio.create_task(
             dispatch_reviews(client, ReviewRepository(pool), settings.temporal_task_queue, stop)
         )
+        graph_build_dispatcher = asyncio.create_task(
+            dispatch_graph_builds(
+                client, ReviewRepository(pool), settings.temporal_task_queue, stop
+            )
+        )
         generation_dispatcher = asyncio.create_task(
             dispatch_generations(
                 client, GenerationRepository(pool), settings.temporal_task_queue, stop
@@ -147,6 +157,7 @@ async def main() -> None:
             stop.set()
             await dispatcher
             await review_dispatcher
+            await graph_build_dispatcher
             await generation_dispatcher
             await chat_dispatcher
     executor.shutdown(wait=True)

@@ -9,7 +9,9 @@ from app.errors import DomainError
 from app.generation_bridge import (
     GenerationBridgeError,
     apply_competency_list_edits,
+    apply_shared_indicator_edits,
     describe_unresolved,
+    shared_indicator_edits,
     snapshot_matrix_graph,
     snapshot_plan,
 )
@@ -59,6 +61,8 @@ class GenerationActivities:
                 originals.append(
                     OriginalDocument(identity, kind, name, bytes(row["content"]))
                 )
+            shared = shared_indicator_edits(snapshot, parsed_documents)
+            replaced = {location for edit in shared for location in edit.replaced_links}
             links = [
                 FieldEvidence(
                     item.target_kind,
@@ -68,15 +72,26 @@ class GenerationActivities:
                     item.observed_value,
                 )
                 for item in snapshot.source_links
+                if item.field_path != "/attributes/text"
+                or (str(item.target_id), str(item.source_ref_id)) not in replaced
             ]
             refs = [
                 SourceEvidence(str(item.id), str(item.document_id), item.locator)
                 for item in snapshot.source_refs
             ]
             plan = snapshot_plan(snapshot, parsed_documents)
+            has_remaining_evidence = {
+                (item.target_kind, item.target_id, item.field_path) for item in links
+            }
+            split_targets = {target for target, _ in replaced}
+            changes = [
+                change for change in plan.changes
+                if change.field_path != "/attributes/text" or change.target_id not in split_targets
+                or (change.target_kind, change.target_id, change.field_path) in has_remaining_evidence
+            ]
             unresolved: list[UnresolvedPatch] = []
             documents = build_generation_documents(
-                plan.changes, links, refs, originals, unresolved
+                changes, links, refs, originals, unresolved
             )
             notes.extend(describe_unresolved(snapshot, documents, unresolved))
             # Решение о списке компетенций, которое нельзя записать в документ,
@@ -84,6 +99,7 @@ class GenerationActivities:
             documents = apply_competency_list_edits(
                 documents, plan.competency_lists, parsed_documents, notes
             )
+            documents = apply_shared_indicator_edits(documents, shared, notes)
             content = generate_program_package(
                 documents, snapshot_matrix_graph(snapshot), notes=notes, applied=applied
             )

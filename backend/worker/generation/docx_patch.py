@@ -42,6 +42,7 @@ class DocxPatch:
     source_ref: Mapping[str, object]
     old_text: str
     new_text: str
+    normalize_whitespace: bool = False
 
 
 def _validate_docx(data: bytes) -> None:
@@ -316,18 +317,113 @@ def _rewrite_document_xml(document: bytes, transform) -> bytes:
         source.close()
 
 
+def _paragraph_text(paragraph: ET.Element) -> str:
+    return "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
+
+
+def _text_matches(root, source_ref, old_text, normalize_whitespace):
+    paragraphs = _resolve_paragraphs(root, source_ref)
+    if not normalize_whitespace:
+        return [
+            [(paragraph, old_text)]
+            for paragraph in paragraphs
+            for _ in range(_paragraph_text(paragraph).count(old_text))
+        ]
+    words = old_text.split()
+    if not words:
+        return []
+    pattern = re.compile(r"\s+".join(map(re.escape, words)))
+    # A formulation can span paragraphs of one table cell. Never search across
+    # cells or across unrelated body paragraphs.
+    parent_groups = []
+    if source_ref.get("col") is not None or len(paragraphs) < 2:
+        groups = [paragraphs]
+    else:
+        selected = set(paragraphs)
+        parents = {
+            p: cell for cell in root.iter(f"{W}tc")
+            for p in cell.findall(f"{W}p") if p in selected
+        }
+        for paragraph in paragraphs:
+            parent = parents.get(paragraph, paragraph)
+            if not parent_groups or parent is not parent_groups[-1][0]:
+                parent_groups.append((parent, []))
+            parent_groups[-1][1].append(paragraph)
+        groups = [group for _, group in parent_groups]
+    matches = []
+    for group in groups:
+        spans = []
+        position = 0
+        for paragraph in group:
+            value = _paragraph_text(paragraph)
+            spans.append((paragraph, value, position))
+            position += len(value) + 1
+        joined = "\n".join(value for _, value, _ in spans)
+        for hit in pattern.finditer(joined):
+            # A normalized case must still match a complete word at its edges.
+            # Only a letter next to a letter means the match cuts a word in
+            # half; a digit next to a letter is the usual glued «УК-1.1Текст»
+            # code boundary and must not reject the match.
+            if (hit.start() and words[0][0].isalpha() and joined[hit.start() - 1].isalpha()
+                    or hit.end() < len(joined) and words[-1][-1].isalpha()
+                    and joined[hit.end()].isalpha()):
+                continue
+            matches.append([
+                (paragraph, value[max(0, hit.start() - start):hit.end() - start])
+                for paragraph, value, start in spans
+                if start < hit.end() and start + len(value) > hit.start()
+            ])
+    return matches
+
+
+def count_text_matches(document, source_ref, old_text, *, normalize_whitespace=False) -> int:
+    return len(_text_matches(_document_root(document), source_ref, old_text, normalize_whitespace))
+
+
+def _replace_text_match(parts, new_text):
+    if len(parts) == 1:
+        paragraph, original = parts[0]
+        return _replace_in_paragraph(paragraph, original, new_text)
+    # Keep the existing paragraph boundaries. Align them with the unchanged
+    # words rather than combining the runs or deleting paragraph formatting.
+    old = [word for _, value in parts for word in value.split()]
+    new = new_text.split()
+    boundaries = []
+    size = 0
+    for _, value in parts[:-1]:
+        size += len(value.split())
+        boundaries.append(size)
+    segments = SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+
+    def new_boundary(index):
+        for _, start, end, left, right in segments:
+            if start <= index <= end and end > start:
+                return left + round((index - start) * (right - left) / (end - start))
+        return len(new)
+
+    cuts = [0, *map(new_boundary, boundaries), len(new)]
+    # cuts на один элемент длиннее пар: strict=False здесь и ниже намеренно.
+    if any(left == right for left, right in zip(cuts, cuts[1:], strict=False)):
+        raise DocxPatchError("Новую формулировку нельзя распределить по исходным абзацам")
+    for (paragraph, original), left, right in zip(parts, cuts, cuts[1:], strict=False):
+        leading = original[:len(original) - len(original.lstrip())]
+        trailing = original[len(original.rstrip()):]
+        replaced = _replace_in_paragraph(
+            paragraph, original, leading + " ".join(new[left:right]) + trailing
+        )
+        if replaced != 1:
+            return 0
+    return 1
+
+
 def _apply_text_patches(root: ET.Element, patches: Sequence[DocxPatch]) -> None:
     for patch in patches:
-        paragraphs = _resolve_paragraphs(root, patch.source_ref)
-        matches: list[ET.Element] = []
-        for paragraph in paragraphs:
-            combined = "".join(node.text or "" for node in paragraph.iter(f"{W}t"))
-            matches.extend([paragraph] * combined.count(patch.old_text))
+        matches = _text_matches(root, patch.source_ref, patch.old_text, patch.normalize_whitespace)
         if len(matches) != 1:
             context = patch.source_ref.get("section") or patch.source_ref.get("table") or "документ"
             detail = "не найден" if not matches else "найдено неоднозначно"
             raise DocxPatchError(f"Текст {patch.old_text!r} {detail} (источник: {context})")
-        changed = _replace_in_paragraph(matches[0], patch.old_text, patch.new_text)
+        changed = _replace_text_match(matches[0], patch.new_text)
         if changed != 1:
             raise DocxPatchError(f"Не удалось заменить текст {patch.old_text!r}")
 

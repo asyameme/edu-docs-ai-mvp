@@ -84,17 +84,28 @@ def test_large_metadata_cannot_leave_tool_boundary(tool):
     large = "x" * (3 * 1024 * 1024)
 
     class Connection:
+        def __init__(self):
+            self.query = ""
+
         def __enter__(self):
             return self
 
         def __exit__(self, *_):
             return None
 
-        def execute(self, *_):
+        def execute(self, query, *_):
+            self.query = query
             return self
 
+        def fetchone(self):
+            # Сначала метод читает версию (review/confirmation), затем последнюю
+            # проверку; обе могут вернуть пустоту.
+            if "FROM program_versions" in self.query:
+                return ({},)
+            return None
+
         def fetchall(self):
-            return [(uuid4(), large, large, "warning", "open", {})]
+            return [(uuid4(), uuid4(), large, large, "warning", "open", {})]
 
     class Pool:
         def connection(self):

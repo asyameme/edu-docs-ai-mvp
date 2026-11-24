@@ -23,6 +23,7 @@ from uuid import UUID
 
 from pydantic import JsonValue
 
+from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH
 from app.domain import SnapshotV2
 from worker.agent.contracts import ChangeProposal
 from worker.generation.patches import FieldChange, FieldEvidence, SourceEvidence
@@ -163,6 +164,20 @@ def _evidence_links(snapshot: SnapshotV2, kind: TargetKind, target_id: UUID, fie
     ]
 
 
+def workload_targets(proposal: ChangeProposal) -> set[UUID]:
+    targets = set()
+    for change in proposal.changes:
+        if change.target_kind != "entity":
+            continue
+        try:
+            path = normalize_field_path(change.field_path)
+        except ProposalApplicationError:
+            continue
+        if path == HOURS_TOTAL_PATH or path.startswith(HOURS_COMPONENT_PREFIX):
+            targets.add(change.target_id)
+    return targets
+
+
 def plan_approved_changes(snapshot: SnapshotV2, proposal: ChangeProposal) -> list[ApprovedChange]:
     """Проверить предложение целиком против снимка и вернуть правки к применению.
 
@@ -200,6 +215,14 @@ def plan_approved_changes(snapshot: SnapshotV2, proposal: ChangeProposal) -> lis
                 f"{label} {field_path}: нет записанных свидетельств источника, "
                 "правку нельзя отобразить в документы"
             )
+            continue
+        if any(link.observed_value.get("calculated") for link in links):
+            errors.append("Общий объём вычисляется из отдельных граф нагрузки. Измените эти графы.")
+            continue
+        if field_path.startswith(HOURS_COMPONENT_PREFIX) and any(
+            link.observed_value.get("cell_text") is not None for link in links
+        ) and (type(change.new_value) is not int or change.new_value < 0):
+            errors.append("Часы нагрузки должны быть целым неотрицательным числом")
             continue
         evidence_refs = {link.source_ref_id for link in links}
         # Агент приводит в обоснование и источник-эталон (например, строку
@@ -260,6 +283,11 @@ def apply_change(snapshot: SnapshotV2, change: ApprovedChange) -> SnapshotV2:
         value[int(last)] = change.new_value
     else:
         value[last] = change.new_value
+    if (
+        change.target_kind == "entity" and target.kind == "curriculum_item"
+        and change.field_path.startswith(HOURS_COMPONENT_PREFIX)
+    ):
+        attributes["hours_total"] = sum(attributes["hours_by_kind"].values())
     members[target_index] = target.model_copy(update={"attributes": attributes})
     return snapshot.model_copy(update={field: members})
 

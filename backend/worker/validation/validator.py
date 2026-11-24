@@ -867,6 +867,7 @@ def _competency_coverage(
     rule: Mapping[str, Any],
     docs: Sequence[Document],
     semantic_evaluator: SemanticEvaluator | None = None,
+    competency_code: str | None = None,
 ) -> RuleResult:
     """R-09: полнота покрытия проверяется только при подтверждённом полном УП."""
     curriculum = _role_docs(docs,"curriculum")
@@ -877,6 +878,8 @@ def _competency_coverage(
         required = _records(program_doc, "$.competencies[*]")
         for competency in required:
             code = competency.get("code")
+            if competency_code is not None and code != competency_code:
+                continue
             related = [
                 document
                 for document in curriculum
@@ -918,6 +921,7 @@ def _competency_coverage(
         coverage_docs,
         llm_config=rule.get("llm", {}),
         evaluator=semantic_evaluator,
+        competency_code=competency_code,
     )
     checks += semantic_checks
     findings.extend(Finding(**item) for item in semantic_findings)
@@ -1181,14 +1185,56 @@ def _competency_link_differences(group, *, aliases=None):
                     "record_index": i, "expected_codes": sorted(codes),
                 })
             context = ", ".join(map(str, sorted(semesters)))
+            matched_per_semester = defaultdict(int)
+            for _, _, row in matched:
+                matched_per_semester[row["semester"]] += 1
+            missing_semesters = sorted(
+                semester for semester in semesters if matched_per_semester[semester] == 0
+            )
+            ambiguous_semesters = sorted(
+                semester for semester in semesters if matched_per_semester[semester] > 1
+            )
+            plan_rows_without_codes = sorted({
+                row["semester"] for target, (_, _, row) in zip(plan_targets, matched, strict=True)
+                if not target["expected_codes"]
+            })
             if (len(matched) != len(semesters)
                     or {row["semester"] for _, _, row in matched} != semesters
                     or not all(target["expected_codes"] for target in plan_targets)
                     or not doc_codes):
+                reasons = []
+                if missing_semesters:
+                    reasons.append(
+                        "в учебном плане не найдены подходящие строки за семестры "
+                        + ", ".join(map(str, missing_semesters))
+                    )
+                if ambiguous_semesters:
+                    reasons.append(
+                        "в учебном плане найдено несколько подходящих строк за семестры "
+                        + ", ".join(map(str, ambiguous_semesters))
+                    )
+                if plan_rows_without_codes:
+                    reasons.append(
+                        "в учебном плане не указаны коды компетенций за семестры "
+                        + ", ".join(map(str, plan_rows_without_codes))
+                    )
+                if not doc_codes:
+                    role = "РПД" if doc.role == "rpd" else "РПП"
+                    reasons.append(f"в {role} не указаны связи этой дисциплины с компетенциями")
+                if not reasons:
+                    reasons.append("записи нельзя однозначно сопоставить между документами")
                 findings.append(Finding(
                     "competency_links_incomplete", "needs_review",
-                    f"Недостаточно однозначных связей для сверки компетенций «{name}» (семестры: {context}).",
-                    {"source_refs": refs},
+                    f"Не удалось сравнить коды компетенций для «{name}» (семестры: "
+                    f"{context}): {'; '.join(reasons)}. Это означает, что проверке не "
+                    "хватило данных; различие между списками не установлено.",
+                    {
+                        "source_refs": refs,
+                        "missing_semesters": missing_semesters,
+                        "ambiguous_semesters": ambiguous_semesters,
+                        "plan_rows_without_competency_codes": plan_rows_without_codes,
+                        "document_has_no_competency_links": not doc_codes,
+                    },
                 ))
                 continue
             if {aliases.get(code, code) for code in plan_codes} == {
@@ -1412,13 +1458,14 @@ def run_validation(
     semantic_evaluator: SemanticEvaluator | None = None,
     rule_codes: Sequence[str] | None = None,
     document_ids: Sequence[str] | None = None,
+    competency_code: str | None = None,
 ) -> ValidationReport:
     """Проверить документы либо проекцию актуальной версии графа выбранной фазой.
 
     Для graph_validation вызывающая сторона должна передать JSON-проекции той
     версии графа, которую проверяет, а не исходный, уже устаревший пакет.
-    ``document_ids`` ограничивает ручную семантическую проверку РПД (R-11)
-    выбранными документами пакета.
+    Вручную R-11 проверяет одну РПД из ``document_ids``, а R-09 — только
+    ``competency_code`` по всем связанным источникам программы.
     """
     if phase not in VALIDATION_PHASES:
         raise ValidationError(f"Неизвестная фаза валидации: {phase}")
@@ -1442,6 +1489,20 @@ def run_validation(
             raise ValidationError(
                 "Нельзя запустить вручную правила: " + ", ".join(sorted(invalid_codes))
             )
+    if document_ids is not None or "R-11" in (requested_rule_codes or ()):
+        if requested_rule_codes != {"R-11"} or not document_ids or len(document_ids) != 1 or competency_code is not None:
+            raise ValidationError("Для R-11 укажите одну РПД")
+        if not any(doc.role == "rpd" and str(doc.document_id) == str(document_ids[0]) for doc in docs):
+            raise ValidationError("Выбранная РПД не найдена во входных документах")
+    if competency_code is not None or "R-09" in (requested_rule_codes or ()):
+        if requested_rule_codes != {"R-09"} or not competency_code or document_ids is not None:
+            raise ValidationError("Для R-09 укажите одну компетенцию")
+        if not any(
+            row.get("code") == competency_code
+            for doc in docs if doc.role in {"ckmv", "characteristic"}
+            for row in _records(doc, "$.competencies[*]")
+        ):
+            raise ValidationError("Выбранная компетенция не найдена в характеристике или ЦКМВ")
     results = []
     for rule in config.get("rules", []):
         if rule["status"] not in RUNNABLE_RULE_STATUSES:
@@ -1457,6 +1518,8 @@ def run_validation(
             raise ValidationError(f"Нет обработчика типа {rule.get('type')!r}")
         if rule.get("type") == "semantic_rpd_alignment":
             results.append(handler(rule, docs, semantic_evaluator, document_ids))
+        elif rule.get("type") == "competency_coverage":
+            results.append(handler(rule, docs, semantic_evaluator, competency_code))
         elif rule.get("type") in SEMANTIC_RULE_TYPES:
             results.append(handler(rule, docs, semantic_evaluator))
         else:

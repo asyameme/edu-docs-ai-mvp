@@ -441,7 +441,7 @@
                 "format": "uuid",
                 "type": "string"
               },
-              "maxItems": 4,
+              "maxItems": 1,
               "minItems": 1,
               "type": "array"
             },
@@ -451,6 +451,20 @@
           ],
           "default": null,
           "title": "Document Ids"
+        },
+        "competency_code": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Competency Code"
         }
       },
       "required": [
@@ -651,6 +665,21 @@
           "title": "Hours Total",
           "type": "integer"
         },
+        "workload_cells": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/CurriculumWorkloadCell"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workload Cells"
+        },
         "block": {
           "title": "Block",
           "type": "string"
@@ -766,6 +795,31 @@
         "meta"
       ],
       "title": "CurriculumOutput",
+      "type": "object"
+    },
+    "CurriculumWorkloadCell": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/backend__contracts__document_v2__models__SourceRefV2"
+        },
+        "hours": {
+          "minimum": 0,
+          "title": "Hours",
+          "type": "integer"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ref",
+        "hours",
+        "text"
+      ],
+      "title": "CurriculumWorkloadCell",
       "type": "object"
     },
     "Discipline": {
@@ -2801,6 +2855,46 @@
       "title": "SemesterWorkload",
       "type": "object"
     },
+    "SharedIndicatorTextMutation": {
+      "additionalProperties": false,
+      "description": "Controls how one source phrase shared by several indicators is written.",
+      "properties": {
+        "op": {
+          "const": "set_shared_indicator_text",
+          "title": "Op",
+          "type": "string"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "indicator_indices": {
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 2,
+          "title": "Indicator Indices",
+          "type": "array"
+        },
+        "action": {
+          "enum": [
+            "keep",
+            "split"
+          ],
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "document_id",
+        "indicator_indices",
+        "action"
+      ],
+      "title": "SharedIndicatorTextMutation",
+      "type": "object"
+    },
     "SnapshotV2": {
       "additionalProperties": false,
       "properties": {
@@ -2942,6 +3036,9 @@
               },
               {
                 "$ref": "#/$defs/CompetencyLinksMutation"
+              },
+              {
+                "$ref": "#/$defs/SharedIndicatorTextMutation"
               }
             ]
           },

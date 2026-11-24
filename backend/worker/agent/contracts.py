@@ -33,6 +33,13 @@ class EntitySearchResult(BaseModel):
     hits: list[EntitySearchHit] = Field(default_factory=list)
 
 
+class WorkloadField(BaseModel):
+    label: str
+    hours: int
+    field_path: str
+    source_ref_id: UUID
+
+
 class EntityReadResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -41,6 +48,8 @@ class EntityReadResult(BaseModel):
     truncated: bool = False
     relations: list[RelationV2] = Field(default_factory=list)
     source_refs: list[SourceRefV2] = Field(default_factory=list)
+    hours_total_write_error: str | None = None
+    editable_workload: list[WorkloadField] = Field(default_factory=list)
 
 
 class SourceFragment(BaseModel):
@@ -69,7 +78,7 @@ class ValidationFinding(BaseModel):
     rule_code: str
     type: str
     severity: Literal["warning", "blocking"]
-    status: Literal["open", "needs_review"]
+    status: Literal["open", "needs_review", "accepted", "resolved"]
     details: dict[str, JsonValue]
 
 

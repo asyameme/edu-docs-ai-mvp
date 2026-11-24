@@ -349,6 +349,7 @@ def evaluate_competency_coverage(
     *,
     llm_config: Mapping[str, Any],
     evaluator: SemanticEvaluator | None = None,
+    competency_code: str | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Сверяет каждую обязательную компетенцию с полным набором связанных курсов.
 
@@ -367,7 +368,8 @@ def evaluate_competency_coverage(
         for document in catalogs:
             for row in _rows(document, "competencies"):
                 code = row.get("code")
-                if isinstance(code, str) and code.strip() and row.get("formulation"):
+                if (isinstance(code, str) and code.strip() and row.get("formulation")
+                        and (competency_code is None or code == competency_code)):
                     value = (document, row)
                     if not any(
                         old_doc is document and old_row.get("formulation") == row.get("formulation")
