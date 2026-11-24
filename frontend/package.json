@@ -9,7 +9,8 @@
     "test:diagnostics": "node --experimental-strip-types --test tests/diagnostics.test.mjs",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:level-variants": "node --experimental-strip-types --test tests/level-variants.test.mjs"
   },
   "dependencies": {
     "react": "^19.3.0",

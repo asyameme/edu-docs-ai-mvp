@@ -17,6 +17,7 @@ import {
   type VersionRead,
 } from "./api";
 import { signatureForProgram, type ProgramSignature } from "./signature";
+import { levelOnlyVariantTargets } from "./levelVariants";
 import { ruleDisplayLabel } from "./diagnostics";
 
 const emptySession: ImportSession = { programId: "", jobId: "" };
@@ -930,48 +931,13 @@ export function useImportJob() {
     }
   }
 
-  // Уровень освоения («Базовый», «Средний», …) в скобках — служебная пометка
-  // ЦКМВ: одни документы её приводят, другие нет, содержание совпадает.
-  const LEVEL_NOTE = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/i;
-  const LEVEL_NOTE_ALL = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/gi;
-
-  function variantLabelText(label: string): string {
-    return label.replace(/^Выбрать значение из документов:\s*/i, "").trim();
-  }
-
-  function variantBaseText(label: string): string {
-    return variantLabelText(label)
-      .replace(LEVEL_NOTE_ALL, "")
-      .replaceAll("ё", "е")
-      .toLocaleLowerCase("ru")
-      .replace(/\s+/g, " ")
-      .trim()
-      .replace(/[.,;:!?]+$/, "")
-      .trim();
-  }
-
-  function variantHasLevel(label: string): boolean {
-    return LEVEL_NOTE.test(variantLabelText(label));
-  }
-
   async function decideLevelOnlyVariants(): Promise<number | null> {
     const current = sessionRef.current;
     if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return null;
     const details = reviewDetails;
     if (!details) return 0;
 
-    const targets: Array<{ conflictId: string; variantId: string }> = [];
-    for (const issue of details.issues) {
-      if (!issue.requires_decision || issue.decision || issue.variants.length < 2) continue;
-
-      const bases = new Set(issue.variants.map((variant) => variantBaseText(variant.label)));
-      if (bases.size !== 1) continue;
-
-      const withLevel = issue.variants.filter((variant) => variantHasLevel(variant.label));
-      if (withLevel.length !== 1) continue;
-
-      targets.push({ conflictId: issue.id, variantId: withLevel[0].id });
-    }
+    const targets = levelOnlyVariantTargets(details.issues);
 
     if (targets.length === 0) return 0;
     const signature = signatureForProgram(signatureRef.current, current.programId);
