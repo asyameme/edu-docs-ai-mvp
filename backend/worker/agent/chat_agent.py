@@ -24,11 +24,21 @@ from .contracts import (
 from .llm_journal import journalled
 from .read_port import EntityKind, get_worker_read_port
 
-# Qwen на vLLM по умолчанию размышляет: тратит лимит токенов на reasoning и
-# возвращает пустой ответ. Тот же костыль, что в validation/semantic_llm.py.
-MODEL_SETTINGS = OpenAIChatModelSettings(
-    extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-)
+
+def _chat_model_settings(model_name: str) -> OpenAIChatModelSettings:
+    """Размышления модели — главная причина долгих ответов в чате.
+
+    Qwen на vLLM размышляет по умолчанию и тратит лимит токенов на reasoning
+    (костыль как в validation/semantic_llm.py). Kimi K3 размышляет подолгу на
+    каждом шаге агентного цикла — просим низкие усилия, как в валидации.
+    """
+
+    name = (model_name or "").lower()
+    if "kimi" in name or "k3" in name:
+        return OpenAIChatModelSettings(extra_body={"reasoning_effort": "low"})
+    return OpenAIChatModelSettings(
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+    )
 
 INSTRUCTIONS = """
 Ты чат-агент системы поддержки документации образовательной программы.
@@ -137,7 +147,7 @@ def create_chat_agent(
                 },
             )
         ],
-        model_settings=MODEL_SETTINGS,
+        model_settings=_chat_model_settings(getattr(model, "model_name", "")),
         retries=2,
     )
 

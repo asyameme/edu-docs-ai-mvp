@@ -15,7 +15,7 @@ from pydantic_ai.models.test import TestModel
 
 from app.domain import Entity, SourceRefV2
 from worker.agent import read_port as read_port_module
-from worker.agent.chat_agent import INSTRUCTIONS, MODEL_SETTINGS, create_chat_agent
+from worker.agent.chat_agent import INSTRUCTIONS, _chat_model_settings, create_chat_agent
 from worker.agent.contracts import (
     Answer,
     ChangeProposal,
@@ -183,7 +183,12 @@ def test_scripted_change_proposal_passes_union_validation(fake_port):
 
 
 def test_model_settings_disable_qwen_thinking():
-    assert MODEL_SETTINGS["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert _chat_model_settings("qwen3.6-35b-32k")["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+    # Kimi K3: низкие усилия размышления — иначе ответ занимает минуты.
+    assert _chat_model_settings("k3")["extra_body"] == {"reasoning_effort": "low"}
+    assert _chat_model_settings("Kimi-K3-Thinking")["extra_body"] == {"reasoning_effort": "low"}
 
 
 def test_instructions_cover_key_behaviour():
