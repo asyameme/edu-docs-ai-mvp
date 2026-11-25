@@ -314,6 +314,16 @@ def evaluate_rpd_alignment(
     batch_size = llm_config.get("max_outcomes_per_request", 20)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
         batch_size = 20
+    max_requests = llm_config.get("max_requests_per_document", 3)
+    if (
+        not isinstance(max_requests, int)
+        or isinstance(max_requests, bool)
+        or not 1 <= max_requests <= 3
+    ):
+        max_requests = 3
+    # R-11 is launched for one selected RPD. Keep its model calls bounded even
+    # when that document contains more outcomes than the usual 20-per-request.
+    batch_size = max(batch_size, (len(model_outcomes) + max_requests - 1) // max_requests)
 
     for batch_number, start in enumerate(range(0, len(model_outcomes), batch_size), 1):
         batch = model_outcomes[start : start + batch_size]

@@ -565,9 +565,11 @@ def _result_fields(
 
 def _extract_observation(
     part: Mapping[str, Any], config: Mapping[str, Any], evaluator: SemanticEvaluator | None,
+    *, retry_invalid: bool = True,
 ) -> dict[str, Any]:
     allowed = _citable_ids(part["evidence"])
-    for prompt in (EXTRACT_PROMPT, EXTRACT_RETRY_PROMPT):
+    prompts = (EXTRACT_PROMPT, EXTRACT_RETRY_PROMPT) if retry_invalid else (EXTRACT_PROMPT,)
+    for prompt in prompts:
         result = evaluate_semantic_payload(part, config, system_prompt=prompt, evaluator=evaluator)
         summary = result.get("summary") if isinstance(result, Mapping) else None
         if isinstance(summary, str) and summary.strip():
@@ -580,6 +582,7 @@ def _extract_observation(
 def _synthesize_coverage(
     group: Mapping[str, Any], payload: Mapping[str, Any], allowed: set[str],
     config: Mapping[str, Any], evaluator: SemanticEvaluator | None,
+    *, retry_invalid: bool = True,
 ) -> Mapping[str, Any]:
     group_id = group["group_id"]
     response = evaluate_semantic_payload(
@@ -588,6 +591,8 @@ def _synthesize_coverage(
     rows = _result_rows(response, {group_id}).get(group_id, [])
     if len(rows) == 1 and _result_fields(rows[0], allowed) is not None:
         return response
+    if not retry_invalid:
+        return response
     return evaluate_semantic_payload(
         payload, config, system_prompt=SYNTHESIS_RETRY_PROMPT, evaluator=evaluator,
     )
@@ -595,10 +600,32 @@ def _synthesize_coverage(
 
 def _evaluate_large_group(
     group: Mapping[str, Any], config: Mapping[str, Any], evaluator: SemanticEvaluator | None,
+    *, max_requests: int | None = None,
 ) -> tuple[Mapping[str, Any], set[str]]:
     observations = group["evidence"]
     if not observations:
         raise CoverageRequestTooLarge
+    if max_requests is not None:
+        # A targeted manual R-09 check allows at most four evidence summaries
+        # plus one final assessment.
+        parts = list(_observation_batches(group, observations, config))
+        if len(parts) + 1 > max_requests:
+            raise CoverageRequestTooLarge
+        observations = [
+            _extract_observation(part, config, evaluator, retry_invalid=False)
+            for part in parts
+        ]
+        payload = _coverage_payload([_group_part(group, observations)])
+        if estimate_prompt_tokens(payload, SYNTHESIS_PROMPT, config) > _prompt_limit(config):
+            raise CoverageRequestTooLarge
+        allowed = _citable_ids(observations)
+        return (
+            _synthesize_coverage(
+                group, payload, allowed, config, evaluator, retry_invalid=False,
+            ),
+            allowed,
+        )
+
     summarizing = False
     while True:
         parts = list(_observation_batches(group, observations, config))
@@ -765,8 +792,16 @@ def evaluate_competency_coverage(
         citable = {group["group_id"]: _citable_ids(group["evidence"]) for group in batch}
         try:
             if needs_split:
+                max_requests = llm_config.get("max_requests_per_competency", 3)
+                if (
+                    not isinstance(max_requests, int)
+                    or isinstance(max_requests, bool)
+                    or not 1 <= max_requests <= 5
+                ):
+                    max_requests = 5
                 response, citable[batch[0]["group_id"]] = _evaluate_large_group(
                     batch[0], llm_config, evaluator,
+                    max_requests=max_requests if competency_code is not None else None,
                 )
             else:
                 response = evaluate_semantic_payload(

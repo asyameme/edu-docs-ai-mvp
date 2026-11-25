@@ -3,10 +3,10 @@
 import asyncio
 import hashlib
 from collections import Counter
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_core import to_json
 
@@ -15,7 +15,7 @@ from app.errors import DomainError
 from app.repository import Repository
 from app.review_contract import CheckCreate, CheckResult
 from app.review_projection import project_legacy_review_result
-from app.review_repository import ReviewRepository
+from app.review_repository import ReviewRepository, manual_check_targets
 from worker.agent.contracts import ChatDeps
 
 MAX_CHAT_TOOL_PAYLOAD_BYTES = 64 * 1024
@@ -85,6 +85,23 @@ class ChatCheckIssue(BaseModel):
     source_ref_ids: list[UUID]
 
 
+class ChatCheckTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: UUID | None = None
+    competency_code: str | None = None
+    label: str
+
+
+class ChatCheckTargets(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_code: Literal["R-09", "R-11"]
+    query: str
+    targets: list[ChatCheckTarget]
+    truncated: bool = False
+
+
 _STATUS_WORDS = (
     ("passed", "пройдено"),
     ("failed", "с замечаниями"),
@@ -128,6 +145,9 @@ class ChatCheckResult(BaseModel):
     version_id: UUID
     input_version_id: UUID
     output_version_id: UUID | None = None
+    scope_rule_code: Literal["R-09", "R-11"] | None = None
+    document_id: UUID | None = None
+    competency_code: str | None = None
     status: Literal["pending", "completed", "partial", "failed"]
     message: str | None = None
     coverage: list[ChatCheckCoverage]
@@ -146,26 +166,126 @@ class ChatValidationTools:
     def __init__(self, pool):
         self.pool = pool
 
-    def _review_for_version(self, program_id: UUID, version_id: UUID):
+    def _ready_snapshot(self, program_id: UUID, version_id: UUID):
         row = Repository(self.pool).version(program_id, version_id)
         snapshot = SnapshotV2.model_validate(row["snapshot"])
         if snapshot.review is None:
             raise DomainError(409, "У выбранной версии нет подготовки для проверки")
         if not snapshot.review.graph_ready:
             raise DomainError(409, "Нельзя проверить версию до сборки графа")
-        return snapshot.review.review_id
+        return snapshot, snapshot.review.review_id
 
-    def request_check(self, program_id: UUID, version_id: UUID, request_id: str) -> ChatCheckResult:
+    def _review_for_version(self, program_id: UUID, version_id: UUID):
+        _, review_id = self._ready_snapshot(program_id, version_id)
+        return review_id
+
+    def _manual_targets(self, program_id: UUID, version_id: UUID):
+        snapshot, review_id = self._ready_snapshot(program_id, version_id)
+        review = ReviewRepository(self.pool).job(program_id, review_id)
+        if review["parameters"].get("purpose") != "prepare":
+            raise DomainError(409, "Не найдена подготовка исходных документов")
+        documents = review["parameters"].get("input", {}).get("documents")
+        if not isinstance(documents, list):
+            raise DomainError(503, "Не удалось прочитать исходные документы проверки")
+        return manual_check_targets(snapshot, documents)
+
+    @staticmethod
+    def _search_key(value: str) -> str:
+        return " ".join(value.casefold().replace("ё", "е").split())
+
+    def list_targets(
+        self,
+        program_id: UUID,
+        version_id: UUID,
+        rule_code: Literal["R-09", "R-11"],
+        query: str,
+    ) -> ChatCheckTargets:
+        """Находит доступные цели точечной проверки по словам пользователя."""
+
+        needle = self._search_key(query.strip())
+        if not needle:
+            raise DomainError(422, "Укажите код компетенции или название РПД для поиска")
+        available = self._manual_targets(program_id, version_id)
+        targets: list[ChatCheckTarget] = []
+        if rule_code == "R-09":
+            for item in available["competencies"]:
+                code = str(item["code"])
+                formulation = str(item.get("formulation") or "")
+                if needle in self._search_key(code) or needle in self._search_key(formulation):
+                    label = f"{code} — {formulation}" if formulation else code
+                    targets.append(ChatCheckTarget(competency_code=code, label=label[:700]))
+        else:
+            for item in available["rpd"]:
+                name = str(item["name"])
+                identity = str(item["document_id"])
+                if needle in self._search_key(name) or needle == identity.casefold():
+                    targets.append(
+                        ChatCheckTarget(
+                            document_id=UUID(identity),
+                            label=name[:300],
+                        )
+                    )
+        return ChatCheckTargets(
+            rule_code=rule_code,
+            query=query.strip(),
+            targets=targets[:20],
+            truncated=len(targets) > 20,
+        )
+
+    def request_check(
+        self,
+        program_id: UUID,
+        version_id: UUID,
+        request_id: str,
+        *,
+        rule_code: Literal["R-09", "R-11"] | None = None,
+        competency_code: str | None = None,
+        document_id: UUID | None = None,
+    ) -> ChatCheckResult:
         """Создаёт идемпотентную job для конкретного вызова инструмента агента."""
 
         if not request_id:
             raise ValueError("Для проверки чата требуется стабильный идентификатор вызова")
         review_id = self._review_for_version(program_id, version_id)
+        if rule_code is None:
+            if competency_code is not None or document_id is not None:
+                raise DomainError(422, "Для точечной проверки укажите правило R-09 или R-11")
+            check_request = CheckCreate(version_id=version_id)
+        elif rule_code == "R-09":
+            if not competency_code or document_id is not None:
+                raise DomainError(422, "Для R-09 укажите ровно одну компетенцию")
+            available = self._manual_targets(program_id, version_id)
+            if not any(item["code"] == competency_code for item in available["competencies"]):
+                raise DomainError(
+                    422,
+                    "Компетенция не найдена в доступном списке; сначала найди её "
+                    "через list_program_check_targets.",
+                )
+            check_request = CheckCreate(
+                version_id=version_id,
+                rule_codes=["R-09"],
+                competency_code=competency_code,
+            )
+        else:
+            if document_id is None or competency_code is not None:
+                raise DomainError(422, "Для R-11 укажите ровно одну РПД")
+            available = self._manual_targets(program_id, version_id)
+            if not any(UUID(str(item["document_id"])) == document_id for item in available["rpd"]):
+                raise DomainError(
+                    422,
+                    "РПД не найдена в выбранном пакете; сначала найди её "
+                    "через list_program_check_targets.",
+                )
+            check_request = CheckCreate(
+                version_id=version_id,
+                rule_codes=["R-11"],
+                document_ids=[document_id],
+            )
         request_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
         job_id = ReviewRepository(self.pool).create(
             program_id,
             f"chat-agent-check:{program_id}:{version_id}:{request_hash}",
-            CheckCreate(version_id=version_id),
+            check_request,
             purpose="check",
             review_id=review_id,
             allow_historical=True,
@@ -269,6 +389,15 @@ class ChatValidationTools:
                 output_version_id=(
                     UUID(str(job["output_version_id"])) if job.get("output_version_id") else None
                 ),
+                scope_rule_code=(
+                    (job["parameters"].get("manual_rule_codes") or [None])[0]
+                    if job["parameters"].get("manual_rule_codes") else None
+                ),
+                document_id=(
+                    UUID(str((job["parameters"].get("manual_document_ids") or [None])[0]))
+                    if job["parameters"].get("manual_document_ids") else None
+                ),
+                competency_code=job["parameters"].get("manual_competency_code"),
                 status=status,
                 message=message,
                 coverage=coverage,
@@ -304,14 +433,36 @@ def register_chat_validation_tools(agent: Agent) -> None:
     """Добавляет backend-инструменты существующему агенту, не меняя ML-модуль."""
 
     @agent.tool
-    async def request_program_check(ctx: RunContext[ChatDeps]) -> ChatCheckResult:
-        """Запускает проверку правил для версии программы, закреплённой за чатом.
+    async def list_program_check_targets(
+        ctx: RunContext[ChatDeps],
+        rule_code: Literal["R-09", "R-11"],
+        query: Annotated[str, Field(min_length=1, max_length=300)],
+    ) -> ChatCheckTargets:
+        """Находит точные цели для проверки R-09 или R-11 по коду/названию."""
 
-        Используй инструмент по явной просьбе проверить или перепроверить программу.
-        Проверка асинхронная. Если статус pending, сообщи об этом и запомни
-        check_job_id для следующего вызова read_program_check. Статус completed
-        означает только завершение вычисления; он не подтверждает прохождение правил.
-        Не делай вывод о прохождении до read_program_check и поля all_rules_passed=true.
+        deps = ctx.deps
+        return await asyncio.to_thread(
+            get_chat_validation_tools().list_targets,
+            deps.program_id,
+            deps.version_id,
+            rule_code,
+            query,
+        )
+
+    @agent.tool
+    async def request_program_check(
+        ctx: RunContext[ChatDeps],
+        rule_code: Literal["R-09", "R-11"] | None = None,
+        competency_code: Annotated[str | None, Field(max_length=200)] = None,
+        document_id: UUID | None = None,
+    ) -> ChatCheckResult:
+        """Запускает общую проверку или точечную R-09/R-11 по выбранной цели.
+
+        Для общей проверки оставь все параметры выбора пустыми. Для R-09 передай
+        точный competency_code из list_program_check_targets, для R-11 — точный
+        document_id оттуда же. Вызывай по явной просьбе пользователя. Проверка
+        асинхронная; при pending запомни check_job_id для read_program_check.
+        completed означает завершение, но не прохождение правил.
         """
 
         deps = ctx.deps
@@ -321,6 +472,9 @@ def register_chat_validation_tools(agent: Agent) -> None:
             deps.program_id,
             deps.version_id,
             request_id,
+            rule_code=rule_code,
+            competency_code=competency_code,
+            document_id=document_id,
         )
 
     @agent.tool
