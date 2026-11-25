@@ -322,7 +322,7 @@ function GenerationScreen({
                 <h2 id="generation-documents-title">Состав пакета</h2>
                 <p>
                   {fileCount
-                    ? `Документы программы · ${formatCount(fileCount, "файл", "файла", "файлов")}`
+                    ? `${formatCount(fileCount, "файл", "файла", "файлов")} в пакете: ${formatCount(fileCount - 1, "документ DOCX", "документа DOCX", "документов DOCX")} + 1 создаваемая матрица XLSX`
                     : isConfirmed ? "Состав определяется по подтверждённой версии" : "Состав появится после подтверждения версии"}
                 </p>
               </div>

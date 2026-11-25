@@ -20,6 +20,10 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
 DOCUMENT_PART = "word/document.xml"
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+# В таблицах текст одного индикатора может идти сразу за кодом следующего.
+_INDICATOR_CODE_PREFIX = re.compile(
+    r"[А-ЯA-Z][А-ЯA-Z0-9]*(?:-[А-ЯA-Z0-9]+)+(?:\.\d+)+(?:$|[^А-ЯA-Z0-9.])"
+)
 
 
 class DocxPatchError(ValueError):
@@ -360,13 +364,16 @@ def _text_matches(root, source_ref, old_text, normalize_whitespace):
             position += len(value) + 1
         joined = "\n".join(value for _, value, _ in spans)
         for hit in pattern.finditer(joined):
-            # A normalized case must still match a complete word at its edges.
-            # Only a letter next to a letter means the match cuts a word in
-            # half; a digit next to a letter is the usual glued «УК-1.1Текст»
-            # code boundary and must not reject the match.
+            # Совпадение после нормализации должно сохранять границы полного слова.
+            # Буква рядом с буквой обычно означает фрагмент внутри слова; цифра
+            # рядом с буквой допустима для склеенного кода «УК-1.1Текст».
+            # В ячейке следующий код индикатора может примыкать к полной
+            # формулировке без пробела.
+            right_suffix = joined[hit.end():]
+            right_is_indicator_code = bool(_INDICATOR_CODE_PREFIX.match(right_suffix))
             if (hit.start() and words[0][0].isalpha() and joined[hit.start() - 1].isalpha()
                     or hit.end() < len(joined) and words[-1][-1].isalpha()
-                    and joined[hit.end()].isalpha()):
+                    and joined[hit.end()].isalpha() and not right_is_indicator_code):
                 continue
             matches.append([
                 (paragraph, value[max(0, hit.start() - start):hit.end() - start])

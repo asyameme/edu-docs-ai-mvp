@@ -43,6 +43,7 @@ export function useImportJob() {
   const [signatureSaving, setSignatureSaving] = useState(false);
   const [signature, setSignature] = useState<ProgramSignature | null>(null);
   const [session, setSession] = useState(initial.current);
+  const [openingProgram, setOpeningProgram] = useState(true);
   const [program, setProgram] = useState<ProgramRead | null>(null);
   const [job, setJob] = useState<ImportJob | null>(null);
   const [reviewJob, setReviewJob] = useState<ReviewJob | null>(null);
@@ -290,6 +291,7 @@ export function useImportJob() {
   ]);
 
   useEffect(() => {
+    setOpeningProgram(true);
     signatureRef.current = null;
     setSignature(null);
     setProgram(null);
@@ -361,7 +363,7 @@ export function useImportJob() {
         setNotice(error instanceof Error ? error.message : "Не удалось открыть программу");
       }
     };
-    void openProgram();
+    void openProgram().finally(() => { if (active) setOpeningProgram(false); });
     return () => { active = false; };
   }, [session.programId, applyProgramState, loadReviewDetails, openProgramState, resetStaleSession]);
 
@@ -1196,6 +1198,7 @@ export function useImportJob() {
   return {
     programId: session.programId,
     sessionVerified,
+    openingProgram,
     versionId: session.versionId ?? "",
     program,
     signature: signatureForProgram(signature, session.programId),

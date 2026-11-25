@@ -1405,7 +1405,11 @@ function App() {
     requestAnimationFrame(() => sourceReturnFocusRef.current?.focus());
   }
 
-  const pageStatus = isDemoMode && parsedProgram
+  const restoringProgram = !isDemoMode && (processing.openingProgram ||
+    Boolean(hasUploadedFiles && !processing.notice && (!processing.sessionVerified ||
+      (processing.reviewJob?.status === "completed" && !processing.reviewDetails))));
+
+  const pageStatus = restoringProgram ? "Загружаем состояние программы…" : isDemoMode && parsedProgram
     ? `Версия ${versionNumber} · подтверждена`
     : isConfirmed
       ? `Версия ${versionNumber} · подтверждена`
@@ -1420,7 +1424,7 @@ function App() {
   return (
     <div className="app-shell">
       <div className="workspace">
-        <main className="main-content">
+        <main className={`main-content${activeScreen === "Чат" ? " main-content--chat" : ""}`}>
           <header className="app-header">
             <nav className="section-navigation" aria-label="Разделы приложения">
               {navigation.map((item) => (
@@ -1514,7 +1518,7 @@ function App() {
                 <span className="file-count">
                   {hasUploadedFiles
                     ? processing.job?.files.length
-                      ? formatFileCount(processing.job.files.length)
+                      ? `${formatFileCount(processing.job.files.length)} импорта${processing.job.files.every((file) => /\.docx$/i.test(file.member_name)) ? " (DOCX)" : ""}`
                       : "1 ZIP-архив"
                     : isDemoMode && parsedProgram
                       ? formatFileCount(parsedProgram.documentCount)
@@ -1569,7 +1573,7 @@ function App() {
                     <p className="processing-subtitle">
                       {parsedProgram
                         ? `Все ${formatFileCount(parsedProgram.documentCount)} обработаны. Проверьте расхождения перед подтверждением.`
-                        : "Проверка начнётся после загрузки, распаковки и парсинга архива."}
+                        : restoringProgram ? "Загружаем сохранённые результаты обработки и сверки…" : "Проверка начнётся после загрузки, распаковки и парсинга архива."}
                     </p>
                   </div>
                   {parsedProgram ? (
@@ -1577,7 +1581,7 @@ function App() {
                       {unresolvedCount > 0 ? `Решений ожидают: ${unresolvedCount} · ` : ""}{formatIssueSummary(parsedProgram.issues)}
                     </span>
                   ) : (
-                    <span className="status-pill status-pill--muted">Ожидает обработки</span>
+                    <span className="status-pill status-pill--muted">{restoringProgram ? "Загружаем состояние…" : "Ожидает обработки"}</span>
                   )}
                 </div>
                 {processing.reviewDetails && (
@@ -1928,7 +1932,7 @@ function App() {
                               <span className="variant-accordion-copy">
                                 <strong>{finding.title}</strong>
                                 <span>{isChoiceFinding && finding.choices.length > 0
-                                  ? `${finding.choices.length} ${formatCountWithWords(finding.choices.length, "вариант", "варианта", "вариантов")}`
+                                  ? formatCountWithWords(finding.choices.length, "вариант", "варианта", "вариантов")
                                   : `Расхождение ${index + 1} из ${visibleFindings.length}`}</span>
                               </span>
                               <span className={`finding-status${isResolved || finding.customDecision ? " finding-status--resolved" : isSavingChoice ? " finding-status--saving" : ""}`}>
