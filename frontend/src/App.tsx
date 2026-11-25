@@ -1755,7 +1755,11 @@ function App() {
                         <div className="optional-rule-checks-heading">
                           <div>
                             <h3 id="optional-rule-checks-title">Дополнительные проверки</h3>
-                            <p>Запустите их отдельно после сверки документов. Результаты помогут найти возможные пробелы, но не мешают подтвердить версию.</p>
+                            <p>
+                              Запустите их отдельно после сверки документов — доступны
+                              в том числе после подтверждения версии; результаты
+                              ни на что не влияют и не блокируют подтверждение.
+                            </p>
                           </div>
                         </div>
                         <div className="optional-rule-check-grid">
@@ -1809,7 +1813,7 @@ function App() {
                                       <select
                                         id={`${code}-scope`}
                                         value={target}
-                                        disabled={!options.length || isConfirmed || !processing.optionalChecksReady ||
+                                        disabled={!options.length || !processing.optionalChecksReady ||
                                           processing.reviewBusy || optionalCheckIsRunning}
                                         onChange={(event) => chooseTarget(event.target.value)}
                                       >
@@ -1825,7 +1829,7 @@ function App() {
                                       className="secondary-button"
                                       type="button"
                                       disabled={
-                                        !target || isConfirmed || !processing.optionalChecksReady || processing.reviewBusy ||
+                                        !target || !processing.optionalChecksReady || processing.reviewBusy ||
                                         checkIsRunning || optionalCheckIsRunning
                                       }
                                       onClick={() => void processing.runOptionalRuleCheck(code, target)}
