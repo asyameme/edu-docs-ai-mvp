@@ -1906,6 +1906,7 @@ function App() {
                         )}
                       </div>
                     )}
+                    {!graphReady && (
                     <div className="finding-list finding-accordion">
                       {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранной категории нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Подробности о формулировках индикаторов доступны ниже." : findingFilter === "R-11" ? "Эта проверка не предлагает готовый вариант: её замечания нужно оценить специалисту." : "Попробуйте другую категорию."}</p>}
                       {visibleFindings.map((finding, index) => {
@@ -2068,6 +2069,12 @@ function App() {
                         );
                       })}
                     </div>
+                    )}
+                    {graphReady && (
+                      <p className="competency-empty-state" role="status">
+                        Ответы сохранены в версии. Оставшиеся замечания проверки — ниже, в диагностике и предупреждениях.
+                      </p>
+                    )}
 
                     {!isDemoMode && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
                       <div className="processing-caption" role="status">
