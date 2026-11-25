@@ -308,8 +308,8 @@ rules:
       reasoning_effort: low
       temperature: 1
       max_groups_per_request: 6
-      max_prompt_tokens: 12000
-      max_requests_per_competency: 3
+      max_prompt_tokens: 24000
+      max_requests_per_competency: 5
       rate_limit_retries: 5
       rate_limit_retry_delay_seconds: 5
       rate_limit_max_retry_delay_seconds: 300

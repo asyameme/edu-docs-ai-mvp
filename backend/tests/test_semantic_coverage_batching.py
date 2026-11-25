@@ -119,14 +119,18 @@ def test_small_coverage_uses_one_request():
     assert called == [coverage.SYSTEM_PROMPT]
 
 
-def test_targeted_coverage_uses_two_summaries_and_one_final_request(monkeypatch):
+@pytest.mark.parametrize(
+    ("topic_count", "expected_requests"),
+    [(1, 3), (5, 5)],
+)
+def test_targeted_coverage_respects_five_request_budget(
+    monkeypatch, topic_count, expected_requests,
+):
     def prompt_size(body, prompt, _config):
         if prompt == coverage.SYSTEM_PROMPT:
-            return 5000  # Force the targeted path through evidence summarization.
+            return 5000
         if prompt in {coverage.EXTRACT_PROMPT, coverage.EXTRACT_RETRY_PROMPT}:
             return 2000 * len(body["evidence"])
-        if prompt in {coverage.SYNTHESIS_PROMPT, coverage.SYNTHESIS_RETRY_PROMPT}:
-            return 2000
         return 2000
 
     monkeypatch.setattr(coverage, "estimate_prompt_tokens", prompt_size)
@@ -149,16 +153,37 @@ def test_targeted_coverage_uses_two_summaries_and_one_final_request(monkeypatch)
         }]}
 
     result = coverage.evaluate_competency_coverage(
-        _documents(topics=["Тема"]),
-        llm_config=CONFIG,
+        _documents(topics=[f"Тема {index}" for index in range(topic_count)]),
+        llm_config=CONFIG | {"max_requests_per_competency": 5},
         evaluator=evaluator,
         competency_code=CODE,
     )
 
     assert result == (1, [])
-    assert calls.count(coverage.EXTRACT_PROMPT) == 2
+    assert calls.count(coverage.EXTRACT_PROMPT) == expected_requests - 1
     assert calls.count(coverage.SYNTHESIS_PROMPT) == 1
-    assert len(calls) == 3
+    assert len(calls) == expected_requests
+
+
+def test_targeted_coverage_does_not_fan_out_past_five_requests():
+    calls = []
+
+    def evaluator(body, options):
+        calls.append(options["_system_prompt"])
+        return {"summary": "Наблюдение", "evidence_ids": [body["evidence"][0]["id"]]}
+
+    checks, findings = coverage.evaluate_competency_coverage(
+        _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(10)]),
+        llm_config=CONFIG,
+        evaluator=evaluator,
+        competency_code=CODE,
+    )
+
+    assert checks == 1
+    assert len(calls) <= 5
+    assert [finding["code"] for finding in findings] == [
+        "competency_coverage_request_too_large"
+    ]
 
 
 def test_large_coverage_rejects_citations_from_outside_chunk():

@@ -606,8 +606,8 @@ def _evaluate_large_group(
     if not observations:
         raise CoverageRequestTooLarge
     if max_requests is not None:
-        # A targeted manual R-09 check must not fan out into a request per source
-        # document. Allow at most two evidence summaries plus one final assessment.
+        # A targeted manual R-09 check allows at most four evidence summaries
+        # plus one final assessment.
         parts = list(_observation_batches(group, observations, config))
         if len(parts) + 1 > max_requests:
             raise CoverageRequestTooLarge
@@ -796,9 +796,9 @@ def evaluate_competency_coverage(
                 if (
                     not isinstance(max_requests, int)
                     or isinstance(max_requests, bool)
-                    or not 1 <= max_requests <= 3
+                    or not 1 <= max_requests <= 5
                 ):
-                    max_requests = 3
+                    max_requests = 5
                 response, citable[batch[0]["group_id"]] = _evaluate_large_group(
                     batch[0], llm_config, evaluator,
                     max_requests=max_requests if competency_code is not None else None,
