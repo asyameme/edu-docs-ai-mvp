@@ -48,11 +48,6 @@ export function ImportProgress({ programId, job, busy, onRetry }: Props) {
         <summary>Замечания парсера · {issueSummary}</summary>
         <DiagnosticList items={issues} />
       </details>}
-      {["completed", "partial"].includes(job.status) && <p>
-        <a href={`/api/v1/programs/${programId}/imports/${job.id}/result`} target="_blank"
-          rel="noreferrer">Открыть результаты парсинга</a>
-        <br />JSON документов сохранены отдельно; граф программы будет собран после согласования.
-      </p>}
       {["failed", "partial"].includes(job.status) && job.files.some(f => f.status === "failed") &&
         <button className="primary-button" type="button" disabled={busy} onClick={() => void onRetry()}>
           Повторить неудачные файлы</button>}
