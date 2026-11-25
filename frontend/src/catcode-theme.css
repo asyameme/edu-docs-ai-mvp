@@ -765,3 +765,6 @@ h1 {
 .main-content--chat .chat-transcript { height: 100%; min-height: 0; overflow-y: auto; }
 .main-content--chat .chat-quick-actions,
 .main-content--chat .chat-composer { flex-shrink: 0; }
+
+/* Смена вкладки не меняет ширину страницы при исчезновении полосы прокрутки. */
+html { scrollbar-gutter: stable; }
