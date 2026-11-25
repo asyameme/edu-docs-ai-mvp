@@ -511,7 +511,6 @@ function GenerationScreen({
                     Скачать пакет
                   </a>
                 )}
-                {!isDemoMode && <a href="#generation-report-title">Посмотреть отчёт о сборке</a>}
               </>
             ) : (
               <div className="generation-empty-result">
