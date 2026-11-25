@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.domain import Contract
 from app.errors import DomainError
 from app.program_api import OperationKey
+from app.temporal_rpc import temporal_rpc
 from worker.agent.contracts import ChatOutput
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/chat", tags=["Chat"])
@@ -275,11 +276,10 @@ async def run_events(
                 yield failed_event(run_id)
                 return
             try:
-                description = await asyncio.wait_for(
+                description = await temporal_rpc(
                     request.app.state.resources.temporal.get_workflow_handle(
                         f"chat-{run_id}"
                     ).describe(rpc_timeout=timedelta(seconds=3)),
-                    timeout=3,
                 )
             except RPCError as error:
                 if error.status == RPCStatusCode.NOT_FOUND:

@@ -30,6 +30,7 @@ from app.review_contract import (
 from app.review_logic import digest
 from app.review_projection import project_legacy_review_result
 from app.review_repository import ReviewRepository
+from app.temporal_rpc import temporal_rpc
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}", tags=["Reviews"])
 _VERSION_READ_SERIALIZER = TypeAdapter(VersionRead)
@@ -88,7 +89,7 @@ async def job_state(repo, client, program_id, job_id):
             raise DomainError(503, "Пространство имён анализа недоступно")
         handle = client.get_workflow_handle(row["workflow_id"])
         try:
-            description = await handle.describe(rpc_timeout=timedelta(seconds=3))
+            description = await temporal_rpc(handle.describe(rpc_timeout=timedelta(seconds=3)))
             if description.status not in {
                 WorkflowExecutionStatus.RUNNING,
                 WorkflowExecutionStatus.COMPLETED,
@@ -97,8 +98,10 @@ async def job_state(repo, client, program_id, job_id):
                     status="failed", message="Процесс прерван в Temporal; создайте новый запрос"
                 )
             else:
-                state = await handle.query(
-                    "review_progress", result_type=dict, rpc_timeout=timedelta(seconds=3)
+                state = await temporal_rpc(
+                    handle.query(
+                        "review_progress", result_type=dict, rpc_timeout=timedelta(seconds=3)
+                    )
                 )
                 if state["status"] in {"completed", "failed", "conflict"}:
                     fresh = await asyncio.to_thread(repo.job, program_id, job_id)

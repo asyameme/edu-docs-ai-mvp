@@ -324,6 +324,7 @@ def test_completed_sse_uses_saved_result_without_temporal_history(monkeypatch):
 
 
 def test_dispatcher_pages_past_one_hundred_pending_turns():
+    stop = asyncio.Event()
     records = [
         (uuid4(), f"chat-{index}", datetime(2026, 1, 1, tzinfo=UTC) + timedelta(microseconds=index))
         for index in range(101)
@@ -353,18 +354,10 @@ def test_dispatcher_pages_past_one_hundred_pending_turns():
 
         async def start_workflow(self, *_args, **kwargs):
             self.started.append(kwargs["id"])
-
-    class Stop:
-        checks = 0
-
-        def is_set(self):
-            self.checks += 1
-            return self.checks > 1
-
-        async def wait(self):
-            return None
+            if len(self.started) == len(records):
+                stop.set()
 
     client = Client()
-    asyncio.run(dispatch_chats(client, Repository(), "audit", Stop()))
+    asyncio.run(dispatch_chats(client, Repository(), "audit", stop))
 
     assert len(client.started) == 101
