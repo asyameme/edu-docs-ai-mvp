@@ -521,7 +521,7 @@ def test_rpd_rows_of_removed_competency_are_deleted_and_renumbered():
     assert _other_parts(result) == _other_parts(docx)
 
 
-def test_new_competency_in_rpd_is_left_for_a_manual_edit():
+def test_new_competency_without_any_sources_is_left_for_a_manual_edit():
     snapshot = _snapshot_with_decisions(
         _links_change(
             RPD_DOCUMENT, "disciplines", 0, ("ПКП-МО-2",), ("ПКП-МО-2", "ПКП-РГ-5")
@@ -548,8 +548,8 @@ def test_new_competency_in_rpd_is_left_for_a_manual_edit():
 
     assert documents[0].row_removals == ()
     assert notes == [
-        "РПД.docx (Технологии MLOps): добавьте компетенцию ПКП-РГ-5 вручную — система "
-        "не составляет результаты обучения и индикаторы для дисциплины"
+        "РПД.docx (Технологии MLOps): добавьте компетенцию ПКП-РГ-5 вручную — в программе "
+        "нет её индикаторов и результатов"
     ]
 
 

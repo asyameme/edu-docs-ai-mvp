@@ -2,7 +2,7 @@
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from backend.contracts.document_v2.graph import EducationalGraph, GraphEdge, GraphNode
 from backend.contracts.document_v2.models import SourceRefV2
@@ -15,7 +15,6 @@ from worker.generation import (
     CONFLICT,
     FieldChange,
     RowRemoval,
-    SourceDocx,
 )
 from worker.generation.docx_patch import (
     DocxPatch,
@@ -25,7 +24,9 @@ from worker.generation.docx_patch import (
     read_area_text,
     read_row_cells,
 )
-from worker.generation.patches import with_document_changes
+from worker.generation.generator import SourceDocx
+from worker.generation.patches import RowInsertion, with_document_changes
+from worker.parser.common import normalize_competency_code
 from worker.parser.results import extract_indicators
 from worker.validation.validator import competency_links_for_row
 
@@ -358,8 +359,237 @@ def _edit_plan_codes(documents, source, edit, table, row, notes, where):
     return with_document_changes(documents, source.document_id, patches=[patch])
 
 
-def _edit_discipline_rows(documents, source, output, edit, notes, where):
-    """РПД: компетенция — строка таблицы результатов обучения и строки оценочных средств."""
+_KIND_HEADERS = {"знать": "знает:", "уметь": "умеет:", "владеть": "владеет:"}
+
+
+@dataclass(frozen=True, slots=True)
+class CompetencyRowContent:
+    """Содержание новой строки компетенции, собранное по источникам в графе.
+
+    ``source_label`` называет документ-источник набора; ``complete`` — False,
+    когда результаты обучения для этой дисциплины нигде не записаны и их
+    составляет человек (индикаторы при этом переносятся).
+    """
+
+    formulation: str
+    indicators: tuple[dict, ...]
+    outcomes: tuple[dict, ...]
+    tools: tuple[str, ...]
+    source_label: str
+    complete: bool
+
+
+def _doc_records(output, key, code):
+    return [
+        item for item in output.get(key, [])
+        if str(item.get("code") or "") == code
+        or str(item.get("competency_code") or "") == code
+    ]
+
+
+def _doc_label(output):
+    return (output.get("meta") or {}).get("file_name") or "?"
+
+
+def _ordered_unique(records, key_of, wanted):
+    seen, result = set(), []
+    for record in records:
+        key = key_of(record)
+        if key in wanted and key not in seen:
+            seen.add(key)
+            result.append(record)
+    return result
+
+
+def _formulation_of(output, code):
+    for item in output.get("competencies", []):
+        if str(item.get("code") or "") == code and item.get("formulation"):
+            return str(item["formulation"]).strip()
+    return ""
+
+
+def _set_from_sibling(parsed_documents, target_output, target_id, code):
+    """Набор из другого документа той же дисциплины (пара ТОП/Стандарт на слоте)."""
+    names = {d.get("name") for d in target_output.get("disciplines", [])}
+    for document_id, output in parsed_documents.items():
+        if document_id == target_id:
+            continue
+        if (output.get("meta") or {}).get("doc_type") not in {"RPD", "RPP"}:
+            continue
+        if not names & {d.get("name") for d in output.get("disciplines", [])}:
+            continue
+        if not _doc_records(output, "competencies", code):
+            continue
+        indicator_codes = {
+            str(r.get("dst_key")) for r in output.get("relations", [])
+            if r.get("kind") == "имеет" and str(r.get("src_key")) == code
+        }
+        indicators = _ordered_unique(
+            output.get("indicators", []), lambda i: str(i.get("code") or ""), indicator_codes
+        )
+        outcome_ids = {
+            str(r.get("dst_key")) for r in output.get("relations", [])
+            if r.get("kind") == "включает" and str(r.get("src_key")) == code
+        }
+        outcomes = _ordered_unique(
+            output.get("learning_outcomes", []), lambda o: str(o.get("local_id") or ""),
+            outcome_ids,
+        )
+        tools = tuple(dict.fromkeys(
+            str(r.get("dst_key")) for r in output.get("relations", [])
+            if r.get("kind") == "проверяется" and str(r.get("src_key")) in indicator_codes
+        ))
+        return CompetencyRowContent(
+            formulation=_formulation_of(output, code),
+            indicators=tuple(indicators), outcomes=tuple(outcomes), tools=tools,
+            source_label=f"одноимённой дисциплины в «{_doc_label(output)}»",
+            complete=True,
+        )
+    return None
+
+
+def _set_from_ckmv(parsed_documents, code):
+    """Канонический набор из картотеки ЦКМВ."""
+    for output in parsed_documents.values():
+        if (output.get("meta") or {}).get("doc_type") != "CKMV":
+            continue
+        indicators = [
+            item for item in output.get("indicators", [])
+            if str(item.get("competency_code") or "") == code and item.get("text")
+        ]
+        if not indicators:
+            continue
+        codes = {str(item.get("code")) for item in indicators}
+        outcome_ids = {
+            str(link.get("learning_outcome_id"))
+            for link in output.get("indicator_outcome_links", [])
+            if str(link.get("indicator_code")) in codes
+        }
+        outcomes = _ordered_unique(
+            output.get("learning_outcomes", []), lambda o: str(o.get("local_id") or ""),
+            outcome_ids,
+        )
+        return CompetencyRowContent(
+            formulation=_formulation_of(output, code),
+            indicators=tuple(indicators), outcomes=tuple(outcomes), tools=(),
+            source_label="картотеки ЦКМВ", complete=True,
+        )
+    return None
+
+
+def _set_from_program(parsed_documents, code):
+    """Индикаторы из всех документов программы; результаты — не выдумываем."""
+    texts: dict[str, dict[str, int]] = {}
+    for output in parsed_documents.values():
+        if (output.get("meta") or {}).get("doc_type") not in {"RPD", "RPP", "CKMV"}:
+            continue
+        for item in output.get("indicators", []):
+            if str(item.get("competency_code") or "") != code or not item.get("text"):
+                continue
+            entry = texts.setdefault(str(item.get("code")), {})
+            text = str(item.get("text"))
+            entry[text] = entry.get(text, 0) + 1
+    if not texts:
+        return None
+    indicators = tuple(
+        {"code": indicator_code, "text": max(text_counts, key=text_counts.get)}
+        for indicator_code, text_counts in sorted(texts.items())
+    )
+    return CompetencyRowContent(
+        formulation="", indicators=indicators, outcomes=(), tools=(),
+        source_label="индикаторов программы (объединение по документам)",
+        complete=False,
+    )
+
+
+def _competency_formulation(parsed_documents, code):
+    """Формулировка по приоритету источников; после R-07 она в документах едина."""
+    priority = ("CKMV", "CHARACTERISTIC", "CURRICULUM", "RPD", "RPP")
+    by_type: dict[str, list] = {}
+    for output in parsed_documents.values():
+        by_type.setdefault((output.get("meta") or {}).get("doc_type") or "?", []).append(output)
+    for doc_type in priority:
+        for output in by_type.get(doc_type, []):
+            formulation = _formulation_of(output, code)
+            if formulation:
+                return formulation
+    return ""
+
+
+def _competency_row_content(parsed_documents, target_output, target_id, code):
+    """Набор для новой строки: сиблинг дисциплины → ЦКМВ → объединение программы."""
+    sibling = _set_from_sibling(parsed_documents, target_output, target_id, code)
+    if sibling:
+        return sibling
+    ckmv = _set_from_ckmv(parsed_documents, code)
+    if ckmv:
+        return ckmv
+    fallback = _set_from_program(parsed_documents, code)
+    if fallback is not None:
+        return replace(
+            fallback,
+            formulation=(
+                _competency_formulation(parsed_documents, code)
+                or _formulation_of(target_output, code)
+            ),
+        )
+    return None
+
+
+def _outcome_lines(outcomes):
+    if not outcomes:
+        return ("знает:", "умеет:")
+    grouped: dict[str, list] = {}
+    for outcome in outcomes:
+        kind = str(outcome.get("kind") or "знать").strip().casefold()
+        grouped.setdefault(kind, []).append(outcome)
+    lines = []
+    for kind, group in grouped.items():
+        lines.append(_KIND_HEADERS.get(kind, f"{kind}:"))
+        for outcome in group:
+            code = str(outcome.get("code") or "").strip()
+            text = str(outcome.get("text") or "").strip()
+            if code and text.startswith(code):
+                body = normalize_competency_code(code) + text[len(code):]
+            elif code and text:
+                body = f"{normalize_competency_code(code)}. {text}"
+            else:
+                body = text or code
+            lines.append(f"• {body}")
+    return tuple(lines)
+
+
+def _results_table_of(output):
+    """Таблица результатов и строка-шаблон по координатам компетенций."""
+    locations = [
+        _row_coordinates(item.get("source_ref"))
+        for item in output.get("competencies", [])
+    ]
+    return _single_table(locations)
+
+
+def _assessment_table_of(output):
+    """Таблица КИМ и строка-шаблон по координатам связей «проверяется»."""
+    locations = [
+        _row_coordinates(relation.get("source_ref"))
+        for relation in output.get("relations", [])
+        if relation.get("kind") == "проверяется"
+    ]
+    return _single_table(locations)
+
+
+def _single_table(locations):
+    locations = [location for location in locations if location]
+    if not locations:
+        return None
+    tables = {table for table, _ in locations}
+    if len(tables) != 1:
+        return None
+    return tables.pop(), max(row for _, row in locations)
+
+
+def _edit_discipline_rows(documents, source, output, edit, notes, where, parsed_documents):
+    """РПД: компетенция — строка таблицы результатов и строки оценочных средств."""
     def code_at(record, key):
         return str(record.get(key) or ""), _row_coordinates(record.get("source_ref"))
 
@@ -406,12 +636,62 @@ def _edit_discipline_rows(documents, source, output, edit, notes, where):
         documents = with_document_changes(
             documents, source.document_id, row_removals=removals.values()
         )
-    # Содержание новой компетенции (результаты обучения, индикаторы) относится
-    # к дисциплине и нигде не записано: его составляет человек.
+
+    # Новая компетенция: набор берётся из графа по источникам (сиблинг
+    # дисциплины → картотека ЦКМВ → объединение программы), а не составляется.
+    insertions: list[RowInsertion] = []
+    results_table = _results_table_of(output)
+    assessment_table = _assessment_table_of(output)
+    target_tools = tuple(dict.fromkeys(
+        str(tool.get("name")) for tool in output.get("assessment_tools", []) if tool.get("name")
+    ))
     for code in edit.added:
-        notes.append(
-            f"{where}: добавьте компетенцию {code} вручную — система не составляет "
-            "результаты обучения и индикаторы для дисциплины"
+        content = _competency_row_content(parsed_documents, output, edit.document_id, code)
+        if content is None or not (content.indicators or content.outcomes):
+            notes.append(
+                f"{where}: добавьте компетенцию {code} вручную — в программе нет её "
+                "индикаторов и результатов"
+            )
+            continue
+        if results_table is None:
+            notes.append(
+                f"{where}: нет координат таблицы результатов — компетенцию {code} "
+                "добавьте вручную"
+            )
+            continue
+        formulation = content.formulation or _competency_formulation(parsed_documents, code)
+        table, template_row = results_table
+        insertions.append(RowInsertion(
+            {"table": table, "row": template_row},
+            (
+                (f"{code}. {formulation}".rstrip(". "),),
+                _outcome_lines(content.outcomes),
+                tuple(f"{item['code']}. {item['text']}" for item in content.indicators),
+            ),
+        ))
+        tools = content.tools or target_tools
+        if assessment_table is not None and content.indicators:
+            kim_table, kim_template = assessment_table
+            for item in content.indicators:
+                insertions.append(RowInsertion(
+                    {"table": kim_table, "row": kim_template},
+                    (("0",), (f"{item['code']}. {item['text']}",), tools or ("",)),
+                ))
+        if content.complete:
+            notes.append(
+                f"{where}: добавлена компетенция {code} — строка результатов и "
+                f"{len(content.indicators)} строк КИМ составлены из {content.source_label}; "
+                "проверьте содержание"
+            )
+        else:
+            notes.append(
+                f"{where}: добавлена компетенция {code} — индикаторы перенесены из "
+                f"{content.source_label}; результаты обучения (знает/умеет) составьте "
+                "для этой дисциплины"
+            )
+    if insertions:
+        documents = with_document_changes(
+            documents, source.document_id, row_insertions=insertions
         )
     return documents
 
@@ -446,8 +726,22 @@ def apply_competency_list_edits(documents, edits, parsed_documents, notes) -> li
         if edit.is_plan:
             result = _edit_plan_codes(result, source, edit, table, row_number, notes, where)
         else:
-            result = _edit_discipline_rows(result, source, output, edit, notes, where)
+            result = _edit_discipline_rows(
+                result, source, output, edit, notes, where, parsed_documents
+            )
     return result
+
+
+_FIELD_LABELS = {
+    "hours_total": "общий объём часов",
+    "credit_units": "зачётные единицы",
+    "hours_by_kind": "часы по видам нагрузки",
+    "formulation": "формулировка",
+    "code": "код",
+    "name": "название",
+    "text": "текст",
+    "semester": "семестр",
+}
 
 
 _FIELD_LABELS = {

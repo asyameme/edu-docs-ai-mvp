@@ -31,10 +31,11 @@ from worker.generation.patches import FieldChange, FieldEvidence, SourceEvidence
 TargetKind = Literal["entity", "relation"]
 
 # Импорт пока не записывает единицу измерения в observed_value (app/document_adapter).
-# Без юнита патч искал бы «108» вместо «108 ч.» и не находил текст в документе.
-# Юнит в свидетельстве всегда приоритетен; фолбэк — только по имени поля.
+# Часы в тексте РПД обычно идут с «ч», поэтому для них нужен фолбэк. ЗЕТ в
+# таблицах учебной работы находятся в отдельной колонке: в ячейке стоит число,
+# а единица задана заголовком. Добавлять «ЗЕТ» к числу при поиске нельзя.
+# Юнит из свидетельства всегда приоритетен; фолбэк — только для часов.
 _UNIT_BY_FIELD_PREFIX = (("hours", "ч"),)
-_UNIT_BY_FIELD = {"credit_units": "ЗЕТ"}
 
 
 def _fallback_unit(field_path: str) -> str | None:
@@ -42,7 +43,7 @@ def _fallback_unit(field_path: str) -> str | None:
     for prefix, unit in _UNIT_BY_FIELD_PREFIX:
         if tail.startswith(prefix):
             return unit
-    return _UNIT_BY_FIELD.get(tail)
+    return None
 
 
 class ProposalApplicationError(ValueError):

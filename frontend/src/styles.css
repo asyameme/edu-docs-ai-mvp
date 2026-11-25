@@ -1392,6 +1392,10 @@ h1 {
   color: #68737d;
 }
 
+.plan-result-note--error {
+  color: #a33b32;
+}
+
 .validation-card {
   padding: 12px;
   margin-top: 13px;
