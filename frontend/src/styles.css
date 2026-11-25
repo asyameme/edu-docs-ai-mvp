@@ -1392,6 +1392,10 @@ h1 {
   color: #68737d;
 }
 
+.plan-result-note--error {
+  color: #a33b32;
+}
+
 .validation-card {
   padding: 12px;
   margin-top: 13px;
@@ -4415,7 +4419,7 @@ textarea:focus-visible {
 
 .optional-rule-check-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 
@@ -4591,6 +4595,4 @@ textarea:focus-visible {
   color: #9b4545;
 }
 
-@media (max-width: 720px) {
-  .optional-rule-check-grid { grid-template-columns: 1fr; }
-}
+

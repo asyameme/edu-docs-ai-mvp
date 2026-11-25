@@ -3,10 +3,12 @@
 from .docx_patch import (
     DocxPatch,
     DocxPatchError,
+    RowInsertion,
     RowRemoval,
     patch_docx_bytes,
     read_area_text,
     read_row_cells,
+    insert_table_rows,
     remove_table_rows,
 )
 from .generator import SourceDocx, generate_docx_package, generate_program_package
@@ -54,6 +56,7 @@ __all__ = [
     "MatrixRow",
     "OriginalDocument",
     "PlannedPatch",
+    "RowInsertion",
     "RowRemoval",
     "SourceDocx",
     "SourceEvidence",
@@ -71,6 +74,7 @@ __all__ = [
     "read_area_text",
     "read_matrix_xlsx",
     "read_row_cells",
+    "insert_table_rows",
     "remove_table_rows",
     "resolve_planned_patches",
     "with_document_changes",

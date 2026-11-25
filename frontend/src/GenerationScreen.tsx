@@ -23,6 +23,7 @@ type GenerationScreenProps = {
   isDemoMode: boolean;
   checkReport: CheckReport | null;
   issues: Diagnostic[];
+  freshIssueIds: string[] | null;
   reviewNotice: string;
   acceptedWarnings: number;
 };
@@ -108,6 +109,7 @@ function GenerationScreen({
   isDemoMode,
   checkReport,
   issues,
+  freshIssueIds,
   reviewNotice,
   acceptedWarnings,
 }: GenerationScreenProps) {
@@ -236,23 +238,29 @@ function GenerationScreen({
           : "Готов к запуску";
   const statuses = countByStatus(checkReport?.coverage ?? []);
   const changedDocuments = job?.applied.length ?? 0;
-  const warningCount = issues.filter((issue) => issue.severity === "warning").length;
-  const hasWarnings = warningCount > 0;
-  const showIssues = !isDemoMode && issues.length > 0;
+  const freshIssueIdSet = new Set(freshIssueIds ?? []);
+  const freshIssues = freshIssueIds === null ? [] : issues.filter((issue) => freshIssueIdSet.has(issue.id));
+  const warningCount = checkReport?.issues.filter((issue) => issue.severity === "warning").length ?? 0;
+  const freshWarningCount = freshIssues.filter((issue) => issue.severity === "warning").length;
+  const hasFreshWarnings = freshWarningCount > 0;
+  const showIssues = !isDemoMode && freshIssues.length > 0;
+  const freshnessPending = !isDemoMode && review.kind === "ready" && Boolean(checkReport) && freshIssueIds === null;
   const startButton = (
     <button
       className="primary-button generation-start-button"
       type="button"
-      disabled={review.kind === "blocked" || isRunning || starting}
+      disabled={review.kind === "blocked" || isRunning || starting || freshnessPending}
       onClick={() => { void startGeneration(); }}
     >
       {starting
         ? isConfirmed ? "Запускаем сборку…" : "Подтверждаем версию…"
         : isRunning
           ? "Собираем пакет…"
+          : freshnessPending
+            ? "Обновляем замечания…"
           : isConfirmed
             ? isCompleted ? "Сформировать новый пакет" : "Сформировать пакет"
-            : hasWarnings ? "Принять замечания и сформировать пакет" : "Подтвердить и сформировать пакет"}
+            : hasFreshWarnings ? "Принять новые замечания и сформировать пакет" : "Подтвердить и сформировать пакет"}
     </button>
   );
 
@@ -279,7 +287,7 @@ function GenerationScreen({
               ? review.reason
               : isConfirmed
                 ? "Сформируем документы на основе подтверждённой версии программы."
-                : hasWarnings
+                : hasFreshWarnings
                   ? "Просмотрите оставшиеся замечания перед сборкой пакета."
                   : "Проверка завершена, версию можно подтвердить и собрать пакет."}
           </p>
@@ -298,19 +306,28 @@ function GenerationScreen({
         <section className="generation-section generation-review card" aria-labelledby="generation-issues-title">
           <div className="generation-section-heading">
             <div>
-              <h2 id="generation-issues-title">{isConfirmed ? "Принятые предупреждения" : "Оставшиеся замечания"}</h2>
-              <p>Результаты проверки текущей версии программы</p>
+              <h2 id="generation-issues-title">{isConfirmed ? "Новые замечания проверки" : "Новые замечания"}</h2>
+              <p>Показаны замечания, которых не было в предыдущей подтверждённой проверке.</p>
             </div>
           </div>
-          <DiagnosticList items={issues} />
+          <DiagnosticList items={freshIssues} />
           {!isConfirmed && (
             <div className="generation-review-action">
-              {hasWarnings && review.kind !== "blocked" && (
-                <p>Кнопка принимает все предупреждения текущей проверки ({warningCount}) и запускает сборку.</p>
+              {hasFreshWarnings && review.kind !== "blocked" && (
+                <p>Новые предупреждения: {freshWarningCount}. Всего в текущей проверке предупреждений: {warningCount}; ранее принятые здесь не повторяются.</p>
               )}
               {startButton}
             </div>
           )}
+        </section>
+      )}
+
+      {!isDemoMode && checkReport && freshnessPending && (
+        <p className="generation-note" role="status">Сверяем результаты с предыдущей подтверждённой проверкой…</p>
+      )}
+      {!isDemoMode && checkReport && freshIssueIds !== null && freshIssues.length === 0 && (
+        <section className="generation-section generation-review card" aria-label="Новые замечания">
+          <p className="generation-empty-metrics">Новых замечаний нет. Все замечания текущей проверки уже встречались в предыдущей подтверждённой версии или отсутствуют.</p>
         </section>
       )}
 
@@ -424,9 +441,9 @@ function GenerationScreen({
                   <small>{isConfirmed ? "учтены при подтверждении" : "подробности в списке замечаний"}</small>
                 </article>
                 <article className="generation-metric generation-metric--review">
-                  <span>{isConfirmed ? "Принятые предупреждения" : "Предупреждения"}</span>
-                  <strong>{isConfirmed ? acceptedWarnings : warningCount}</strong>
-                  <small>{isConfirmed ? "записей учтено" : "в текущей проверке"}</small>
+                  <span>{isConfirmed ? "Принятые предупреждения" : "Новые предупреждения"}</span>
+                  <strong>{isConfirmed ? acceptedWarnings : freshWarningCount}</strong>
+                  <small>{isConfirmed ? "записей учтено" : `${warningCount} всего в текущей проверке`}</small>
                 </article>
               </div>
             ) : (

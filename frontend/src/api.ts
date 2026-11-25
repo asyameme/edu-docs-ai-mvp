@@ -220,6 +220,7 @@ export type ReviewDetails = {
   confirmed: boolean;
   confirmation: { accepted_warning_ids: string[]; author: string | null } | null;
   check_job_id: string | null;
+  fresh_issue_ids: string[];
   check_report: CheckReport | null;
   graph_build: GraphBuildJob | null;
   manual_check_targets?: {

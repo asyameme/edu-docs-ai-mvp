@@ -22,6 +22,15 @@ import { ruleDisplayLabel } from "./diagnostics";
 
 const emptySession: ImportSession = { programId: "", jobId: "" };
 
+type OptionalRuleLaunch = {
+  ruleCode: OptionalRuleCode;
+  versionId: string;
+} & ({ status: "submitting" } | { status: "failed"; message: string });
+
+type ChatProposalAcceptance =
+  | { accepted: true }
+  | { accepted: false; message: string };
+
 function operationHeaders(idempotencyKey: string = crypto.randomUUID()): HeadersInit {
   return {
     "Content-Type": "application/json",
@@ -53,6 +62,7 @@ export function useImportJob() {
   const reviewDetailsLoadsRef = useRef(new Map<string, Promise<ReviewDetails>>());
   const [checkJob, setCheckJob] = useState<CheckJob | null>(null);
   const [optionalRuleChecks, setOptionalRuleChecks] = useState<Partial<Record<OptionalRuleCode, CheckJob>>>({});
+  const [optionalRuleLaunch, setOptionalRuleLaunch] = useState<OptionalRuleLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -579,7 +589,7 @@ export function useImportJob() {
     let retryTimer: ReturnType<typeof setTimeout>;
     const recoverCurrentPrepare = async (failed: ReviewJob) => {
       const current = sessionRef.current;
-      if (!current.programId || !current.jobId) return;
+      if (!current.programId || !current.jobId || current.reviewId !== failed.review_id) return;
       setNotice("Сверка устарела. Восстанавливаем актуальный результат…");
       try {
         const latest = await api<ProgramRead>(`/api/v1/programs/${current.programId}`);
@@ -587,6 +597,7 @@ export function useImportJob() {
           `/api/v1/programs/${current.programId}/versions/${latest.current_version_id}/review?limit=1&offset=0`,
         );
         const savedReview = details.version.snapshot.review;
+        if (!active) return;
         if (
           !savedReview?.review_id ||
           savedReview.import_job_id !== current.jobId ||
@@ -611,10 +622,14 @@ export function useImportJob() {
           analysisVersionId: savedReview.analysis_version_id ?? recovered.analysis_version_id ?? undefined,
         });
         setReviewJob(recovered);
-        setNotice("");
+        setNotice(failed.status === "failed"
+          ? "Повторная сверка не завершилась. Показана последняя сохранённая сверка."
+          : "");
       } catch (error) {
         if (!active) return;
-        setNotice(error instanceof Error ? error.message : "Не удалось восстановить актуальную сверку");
+        setNotice(error instanceof ApiError && error.status === 404
+          ? failed.message || "Не удалось подготовить сверку"
+          : error instanceof Error ? error.message : "Не удалось восстановить актуальную сверку");
       }
     };
     const receive = (next: ReviewJob) => {
@@ -630,7 +645,7 @@ export function useImportJob() {
           .catch((error: unknown) => {
             if (active) setNotice(error instanceof Error ? error.message : "Не удалось обновить версию программы");
           });
-      } else if (next.status === "conflict" && next.purpose === "prepare") {
+      } else if ((next.status === "failed" || next.status === "conflict") && next.purpose === "prepare") {
         void recoverCurrentPrepare(next);
       } else if (next.status === "failed" || next.status === "conflict") {
         setNotice(next.message || "Не удалось подготовить сверку");
@@ -1008,17 +1023,25 @@ export function useImportJob() {
     }
   }
 
-  async function acceptChatProposal(sessionId: string, turnId: string, expectedVersionId: string) {
+  async function acceptChatProposal(
+    sessionId: string,
+    turnId: string,
+    expectedVersionId: string,
+  ): Promise<ChatProposalAcceptance> {
     const current = sessionRef.current;
-    if (reviewBusyRef.current || !current.programId || !current.versionId || !current.reviewId) return false;
+    const reject = (message: string): ChatProposalAcceptance => {
+      setNotice(message);
+      return { accepted: false, message };
+    };
+    if (reviewBusyRef.current || !current.programId || !current.versionId || !current.reviewId) {
+      return reject("Не удалось применить план: программа ещё не готова к изменениям.");
+    }
     if (current.versionId !== expectedVersionId) {
-      setNotice("Версия программы изменилась. Обновите предложение в чате перед применением.");
-      return false;
+      return reject("Версия программы изменилась. Обновите предложение в чате перед применением.");
     }
     const signature = signatureForProgram(signatureRef.current, current.programId);
     if (!signature) {
-      setNotice("Укажите подпись для этой программы кнопкой над программой.");
-      return false;
+      return reject("Укажите подпись для этой программы кнопкой над программой.");
     }
     reviewBusyRef.current = true;
     setReviewBusy(true);
@@ -1038,11 +1061,16 @@ export function useImportJob() {
       });
       setCheckJob(null);
       setNotice("");
-      await loadReviewDetails(accepted.version.id, current.programId);
-      return true;
+      try {
+        await loadReviewDetails(accepted.version.id, current.programId);
+      } catch (error) {
+        setNotice(error instanceof Error
+          ? `План применён, но не удалось обновить данные на экране: ${error.message}`
+          : "План применён, но не удалось обновить данные на экране.");
+      }
+      return { accepted: true };
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось применить предложение агента");
-      return false;
+      return reject(error instanceof Error ? error.message : "Не удалось применить предложение агента");
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
@@ -1071,6 +1099,13 @@ export function useImportJob() {
     }
   }, [updateSession]);
 
+  const optionalChecksReady = Boolean(
+    reviewJob?.status === "completed" &&
+    reviewJob.review_id === session.reviewId &&
+    reviewDetails?.version.id === session.versionId &&
+    reviewDetails?.version.snapshot.review?.review_id === session.reviewId,
+  );
+
   async function runOptionalRuleCheck(ruleCode: OptionalRuleCode, target: string) {
     const current = sessionRef.current;
     const currentDetails = reviewDetails;
@@ -1081,13 +1116,17 @@ export function useImportJob() {
       checkJob && ["pending", "processing"].includes(checkJob.status),
     );
     if (
-      !target || reviewBusyRef.current || anotherCheckRunning || standardCheckRunning ||
+      !target || !optionalChecksReady || reviewBusyRef.current || anotherCheckRunning || standardCheckRunning ||
       !current.programId || !current.reviewId || !current.versionId ||
       !currentDetails || currentDetails.version.id !== current.versionId ||
+      currentDetails.version.snapshot.review?.review_id !== current.reviewId ||
       currentDetails.version.snapshot.review?.graph_ready !== true || currentDetails.confirmed
     ) return;
     reviewBusyRef.current = true;
     setReviewBusy(true);
+    setOptionalRuleLaunch({ status: "submitting", ruleCode, versionId: current.versionId });
+    const isCurrentVersion = () => sessionRef.current.programId === current.programId &&
+      sessionRef.current.reviewId === current.reviewId && sessionRef.current.versionId === current.versionId;
     try {
       const next = await api<ReviewJob>(
         `/api/v1/programs/${current.programId}/reviews/${current.reviewId}/checks`,
@@ -1101,8 +1140,9 @@ export function useImportJob() {
           }),
         },
       );
+      if (!isCurrentVersion()) return;
       const optionalRuleCheckJobIds = {
-        ...(current.optionalRuleCheckJobIds ?? {}),
+        ...(sessionRef.current.optionalRuleCheckJobIds ?? {}),
         [ruleCode]: next.id,
       };
       setOptionalRuleChecks((checks) => ({
@@ -1112,8 +1152,12 @@ export function useImportJob() {
       updateSession({ optionalRuleCheckJobIds });
       setNotice("");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : `Не удалось запустить проверку «${ruleDisplayLabel(ruleCode).toLocaleLowerCase("ru")}»`);
+      if (isCurrentVersion()) {
+        const message = error instanceof Error ? error.message : "Не удалось запустить проверку";
+        setOptionalRuleLaunch({ status: "failed", ruleCode, versionId: current.versionId, message });
+      }
     } finally {
+      setOptionalRuleLaunch((launch) => launch?.status === "submitting" ? null : launch);
       reviewBusyRef.current = false;
       setReviewBusy(false);
     }
@@ -1210,6 +1254,8 @@ export function useImportJob() {
     graphBuildJob,
     checkJob,
     optionalRuleChecks,
+    optionalChecksReady,
+    optionalRuleLaunch: optionalRuleLaunch?.versionId === session.versionId ? optionalRuleLaunch : null,
     busy,
     reviewBusy,
     notice,
