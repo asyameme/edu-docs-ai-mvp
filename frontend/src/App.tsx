@@ -218,6 +218,20 @@ function waitForChatOutput(programId: string, runId: string): Promise<ChatOutput
       }
     });
     stream.addEventListener("failed", () => finish(new Error("Агент не смог выполнить запрос. Попробуйте ещё раз.")));
+    stream.addEventListener("unavailable", (event) => {
+      let message = "Состояние запроса временно недоступно. Обновите страницу позже, чтобы получить результат.";
+      if (event instanceof MessageEvent) {
+        try {
+          const data: unknown = JSON.parse(event.data);
+          if (data && typeof data === "object" && "message" in data && typeof data.message === "string") {
+            message = data.message;
+          }
+        } catch {
+          // Если сервер прислал неверный формат, покажем безопасное сообщение по умолчанию.
+        }
+      }
+      finish(new Error(message));
+    });
     stream.addEventListener("error", () => {
       if (stream.readyState === EventSource.CLOSED) finish(new Error("Соединение с чатом потеряно."));
     });

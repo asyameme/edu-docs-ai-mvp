@@ -14,6 +14,7 @@ from app.chat_workflow import (
     ChatWorkflow,
     conversation_from_turns,
 )
+from app.temporal_rpc import DELIVERY_TIMEOUT_SECONDS, temporal_rpc
 
 
 async def dispatch_chats(client, repo, queue, stop):
@@ -25,27 +26,39 @@ async def dispatch_chats(client, repo, queue, stop):
                 if not batch:
                     break
                 for turn_id, workflow_id, created_at in batch:
+                    if stop.is_set():
+                        return
                     after = (created_at, turn_id)
                     payload = await asyncio.to_thread(repo.turn_input, turn_id)
-                    turns = await asyncio.to_thread(repo.prior_turns, payload, MAX_CHAT_HISTORY_TURNS)
+                    turns = await asyncio.to_thread(
+                        repo.prior_turns, payload, MAX_CHAT_HISTORY_TURNS
+                    )
                     conversation = conversation_from_turns(payload["session_id"], turns)
                     try:
-                        await client.start_workflow(
-                            ChatWorkflow.run,
-                            {
-                                "turn": str(turn_id),
-                                "text": payload["user_text"],
-                                "program_id": str(payload["program_id"]),
-                                "version_id": str(payload["version_id"]),
-                                "conversation": ConversationTypeAdapter.dump_json(conversation).decode(),
-                            },
-                            id=workflow_id,
-                            task_queue=queue,
-                            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-                            execution_timeout=timedelta(minutes=15),
+                        await temporal_rpc(
+                            client.start_workflow(
+                                ChatWorkflow.run,
+                                {
+                                    "turn": str(turn_id),
+                                    "text": payload["user_text"],
+                                    "program_id": str(payload["program_id"]),
+                                    "version_id": str(payload["version_id"]),
+                                    "conversation": ConversationTypeAdapter.dump_json(
+                                        conversation
+                                    ).decode(),
+                                },
+                                id=workflow_id,
+                                task_queue=queue,
+                                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                                execution_timeout=timedelta(minutes=15),
+                            ),
+                            timeout=DELIVERY_TIMEOUT_SECONDS,
                         )
                     except WorkflowAlreadyStartedError:
-                        description = await client.get_workflow_handle(workflow_id).describe()
+                        description = await temporal_rpc(
+                            client.get_workflow_handle(workflow_id).describe(),
+                            timeout=DELIVERY_TIMEOUT_SECONDS,
+                        )
                         if description.status.name != "RUNNING":
                             await asyncio.to_thread(repo.fail, turn_id)
         except Exception:

@@ -7,6 +7,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.import_repository import workflow_attempt
+from app.temporal_rpc import DELIVERY_TIMEOUT_SECONDS, temporal_rpc
 from app.workflows import ImportWorkflow, LegacyImportWorkflow
 
 
@@ -15,13 +16,18 @@ async def dispatch_imports(client, repo, queue, stop):
         try:
             pending = await asyncio.to_thread(repo.pending)
             for job_id, workflow_id, legacy in pending:
+                if stop.is_set():
+                    return
                 try:
-                    await client.start_workflow(
-                        LegacyImportWorkflow.run if legacy else ImportWorkflow.run,
-                        {"job_id": str(job_id), "attempt": workflow_attempt(workflow_id)},
-                        id=workflow_id,
-                        task_queue=queue,
-                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                    await temporal_rpc(
+                        client.start_workflow(
+                            LegacyImportWorkflow.run if legacy else ImportWorkflow.run,
+                            {"job_id": str(job_id), "attempt": workflow_attempt(workflow_id)},
+                            id=workflow_id,
+                            task_queue=queue,
+                            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                        ),
+                        timeout=DELIVERY_TIMEOUT_SECONDS,
                     )
                 except WorkflowAlreadyStartedError:
                     pass

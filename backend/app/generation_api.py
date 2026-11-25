@@ -14,6 +14,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.errors import DomainError
 from app.generation_repository import GenerationRepository
 from app.program_api import Limit, Offset, OperationKey, RepoDep
+from app.temporal_rpc import temporal_rpc
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/generation", tags=["Generation"])
 
@@ -83,12 +84,16 @@ async def generation_status(jobs, temporal, program_id, job_id):
     if temporal.namespace != result["_namespace"]:
         raise DomainError(503, "Пространство имён генерации недоступно")
     try:
-        state = await temporal.get_workflow_handle(result["_workflow_id"]).describe(
-            rpc_timeout=timedelta(seconds=3)
+        state = await temporal_rpc(
+            temporal.get_workflow_handle(result["_workflow_id"]).describe(
+                rpc_timeout=timedelta(seconds=3)
+            )
         )
     except RPCError as error:
         if error.status == RPCStatusCode.NOT_FOUND:
             return result
+        raise DomainError(503, "Текущий статус генерации временно недоступен") from error
+    except TimeoutError as error:
         raise DomainError(503, "Текущий статус генерации временно недоступен") from error
     if state.status == WorkflowExecutionStatus.RUNNING:
         result["status"] = "processing"

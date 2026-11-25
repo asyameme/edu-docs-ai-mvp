@@ -7,6 +7,7 @@ from temporalio.client import WorkflowExecutionStatus, WorkflowQueryFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.errors import DomainError
+from app.temporal_rpc import temporal_rpc
 
 RPC_TIMEOUT = timedelta(seconds=3)
 
@@ -39,7 +40,7 @@ async def read_status(repo, client, program_id, job_id):
         raise DomainError(503, "Пространство имён задачи недоступно в текущей конфигурации")
     handle = client.get_workflow_handle(job["_workflow_id"])
     try:
-        description = await handle.describe(rpc_timeout=RPC_TIMEOUT)
+        description = await temporal_rpc(handle.describe(rpc_timeout=RPC_TIMEOUT))
         if description.status not in {
             WorkflowExecutionStatus.RUNNING,
             WorkflowExecutionStatus.COMPLETED,
@@ -49,7 +50,7 @@ async def read_status(repo, client, program_id, job_id):
             return job
         if job["_legacy"]:
             # Старые истории V1 не переписываются: считаем завершённые этапы по их событиям.
-            history = await asyncio.wait_for(handle.fetch_history(), timeout=3)
+            history = await temporal_rpc(handle.fetch_history())
             scheduled, done = {}, 0
             for event in history.events:
                 if event.HasField("activity_task_scheduled_event_attributes"):
@@ -64,7 +65,9 @@ async def read_status(repo, client, program_id, job_id):
                 final = await asyncio.to_thread(repo.read, program_id, job_id)
                 return final if final["_terminal"] else interrupted(final)
         else:
-            state = await handle.query("import_progress", result_type=dict, rpc_timeout=RPC_TIMEOUT)
+            state = await temporal_rpc(
+                handle.query("import_progress", result_type=dict, rpc_timeout=RPC_TIMEOUT)
+            )
             if state.get("status") in {"completed", "partial", "failed"}:
                 fresh = await asyncio.to_thread(repo.read, program_id, job_id)
                 if fresh["_workflow_id"] != job["_workflow_id"]:

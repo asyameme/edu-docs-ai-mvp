@@ -1,8 +1,9 @@
 """HTTP API сессий и ходов чата; прогресс отдаётся через SSE."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 from app.chat_repository import ChatRepository
 from app.chat_write import ChatWriteRepository
@@ -17,12 +19,15 @@ from app.config import get_settings
 from app.domain import Contract
 from app.errors import DomainError
 from app.program_api import OperationKey
+from app.temporal_rpc import temporal_rpc
 from worker.agent.contracts import ChatOutput
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/chat", tags=["Chat"])
 TurnStatus = Literal["pending", "completed", "failed"]
 ChatResult = Annotated[ChatOutput, Field(discriminator="kind")]
 RESULT_ADAPTER = TypeAdapter(ChatResult)
+MAX_TEMPORAL_NOT_FOUND_RETRIES = 15
+logger = logging.getLogger(__name__)
 
 
 class SessionCreate(Contract):
@@ -99,6 +104,14 @@ class ChatFailureData(BaseModel):
     message: str = "Не удалось выполнить запрос. Попробуйте отправить его ещё раз."
 
 
+class ChatUnavailableData(BaseModel):
+    run_id: UUID
+    message: str = (
+        "Состояние запроса временно недоступно. "
+        "Обновите страницу позже, чтобы получить результат."
+    )
+
+
 class ChatStatusEvent(BaseModel):
     id: UUID
     event: Literal["status"]
@@ -117,8 +130,15 @@ class ChatFailedEvent(BaseModel):
     data: ChatFailureData
 
 
+class ChatUnavailableEvent(BaseModel):
+    id: UUID
+    event: Literal["unavailable"]
+    data: ChatUnavailableData
+
+
 ChatEvent = Annotated[
-    ChatStatusEvent | ChatCompletedEvent | ChatFailedEvent, Field(discriminator="event")
+    ChatStatusEvent | ChatCompletedEvent | ChatFailedEvent | ChatUnavailableEvent,
+    Field(discriminator="event"),
 ]
 
 
@@ -156,6 +176,12 @@ def completed_event(run_id: UUID, result) -> ServerSentEvent:
 
 def failed_event(run_id: UUID) -> ServerSentEvent:
     return ServerSentEvent(id=str(run_id), event="failed", data=ChatFailureData(run_id=run_id))
+
+
+def unavailable_event(run_id: UUID) -> ServerSentEvent:
+    return ServerSentEvent(
+        id=str(run_id), event="unavailable", data=ChatUnavailableData(run_id=run_id)
+    )
 
 
 @router.post(
@@ -236,8 +262,10 @@ async def run_events(
     session_id: Annotated[UUID, Depends(checked_run_session)],
 ) -> AsyncIterator[ServerSentEvent]:
     repository = repo(request)
+    temporal_not_found_retries = 0
 
     async def events():
+        nonlocal temporal_not_found_retries
         while not await request.is_disconnected():
             state = await asyncio.to_thread(repository.session, program_id, session_id)
             turn = next(item for item in state["turns"] if item["id"] == run_id)
@@ -248,33 +276,52 @@ async def run_events(
                 yield failed_event(run_id)
                 return
             try:
-                description = await request.app.state.resources.temporal.get_workflow_handle(
-                    f"chat-{run_id}"
-                ).describe()
-                if description.status == WorkflowExecutionStatus.RUNNING:
-                    status = "processing"
-                elif description.status in {
-                    WorkflowExecutionStatus.COMPLETED,
-                    WorkflowExecutionStatus.FAILED,
-                    WorkflowExecutionStatus.CANCELED,
-                    WorkflowExecutionStatus.TERMINATED,
-                    WorkflowExecutionStatus.TIMED_OUT,
-                    WorkflowExecutionStatus.CONTINUED_AS_NEW,
-                }:
-                    state = await asyncio.to_thread(repository.session, program_id, session_id)
-                    turn = next(item for item in state["turns"] if item["id"] == run_id)
-                    if turn["status"] == "completed":
-                        yield completed_event(run_id, turn["result"])
-                        return
-                    if turn["status"] == "failed":
-                        yield failed_event(run_id)
-                        return
-                    await asyncio.to_thread(repository.fail, run_id)
+                description = await temporal_rpc(
+                    request.app.state.resources.temporal.get_workflow_handle(
+                        f"chat-{run_id}"
+                    ).describe(rpc_timeout=timedelta(seconds=3)),
+                )
+            except RPCError as error:
+                if error.status == RPCStatusCode.NOT_FOUND:
+                    temporal_not_found_retries += 1
+                    if temporal_not_found_retries < MAX_TEMPORAL_NOT_FOUND_RETRIES:
+                        yield ServerSentEvent(
+                            id=str(run_id),
+                            event="status",
+                            data=ChatStatusData(run_id=run_id, status="pending"),
+                        )
+                        await asyncio.sleep(1)
+                        continue
+                logger.warning("Статус чата в Temporal недоступен: %s", error.status.name)
+                yield unavailable_event(run_id)
+                return
+            except Exception as error:
+                logger.warning("Ошибка чтения статуса чата в Temporal: %s", type(error).__name__)
+                yield unavailable_event(run_id)
+                return
+            temporal_not_found_retries = 0
+            if description.status == WorkflowExecutionStatus.RUNNING:
+                status = "processing"
+            elif description.status in {
+                WorkflowExecutionStatus.COMPLETED,
+                WorkflowExecutionStatus.FAILED,
+                WorkflowExecutionStatus.CANCELED,
+                WorkflowExecutionStatus.TERMINATED,
+                WorkflowExecutionStatus.TIMED_OUT,
+                WorkflowExecutionStatus.CONTINUED_AS_NEW,
+            }:
+                state = await asyncio.to_thread(repository.session, program_id, session_id)
+                turn = next(item for item in state["turns"] if item["id"] == run_id)
+                if turn["status"] == "completed":
+                    yield completed_event(run_id, turn["result"])
+                    return
+                if turn["status"] == "failed":
                     yield failed_event(run_id)
                     return
-                else:
-                    status = "pending"
-            except Exception:
+                await asyncio.to_thread(repository.fail, run_id)
+                yield failed_event(run_id)
+                return
+            else:
                 status = "pending"
             yield ServerSentEvent(
                 id=str(run_id),
