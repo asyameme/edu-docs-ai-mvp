@@ -243,7 +243,7 @@ class ReviewRepository:
         )
 
     @staticmethod
-    def checked_snapshot(row, review_id, *, require_graph=True):
+    def checked_snapshot(row, review_id, *, require_graph=True, allow_confirmed=False):
         if row["snapshot"].get("schema_version") != 2:
             raise DomainError(404, "Версия не принадлежит подготовке")
         snapshot = SnapshotV2.model_validate(row["snapshot"])
@@ -251,7 +251,7 @@ class ReviewRepository:
             raise DomainError(404, "Версия не принадлежит этой подготовке")
         if require_graph and not snapshot.review.graph_ready:
             raise DomainError(409, "Граф ещё не собран из выбранных значений документов")
-        if snapshot.review.confirmation:
+        if snapshot.review.confirmation and not allow_confirmed:
             raise DomainError(409, "Подтверждённая версия неизменяема; создайте новую подготовку")
         return snapshot
 
@@ -595,8 +595,11 @@ class ReviewRepository:
                     ).fetchone()
                 )
                 if snapshot_override is None:
+                    # Ручные семантические проверки доступны и на подтверждённой
+                    # версии: их результаты привязаны к задаче и версию не меняют.
                     snapshot = self.checked_snapshot(
-                        self.version(cur, program_id, body.version_id), review_id
+                        self.version(cur, program_id, body.version_id), review_id,
+                        allow_confirmed=bool(getattr(body, "rule_codes", None)),
                     )
                 else:
                     snapshot = snapshot_override
@@ -1354,7 +1357,9 @@ class ReviewRepository:
                 if item.severity == "warning" and str(item.id) not in inherited_warning_ids
             }
             accepted = set(body.accepted_warning_ids)
-            if accepted not in (warnings, fresh_warnings) or len(accepted) != len(body.accepted_warning_ids):
+            if accepted not in (warnings, fresh_warnings) or len(accepted) != len(
+                body.accepted_warning_ids
+            ):
                 raise DomainError(409, "Нужно явно принять актуальные предупреждения")
             hash_before = checked_snapshot_hash
             before_snapshot = snapshot

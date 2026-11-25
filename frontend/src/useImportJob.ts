@@ -1120,7 +1120,7 @@ export function useImportJob() {
       !current.programId || !current.reviewId || !current.versionId ||
       !currentDetails || currentDetails.version.id !== current.versionId ||
       currentDetails.version.snapshot.review?.review_id !== current.reviewId ||
-      currentDetails.version.snapshot.review?.graph_ready !== true || currentDetails.confirmed
+      currentDetails.version.snapshot.review?.graph_ready !== true
     ) return;
     reviewBusyRef.current = true;
     setReviewBusy(true);
