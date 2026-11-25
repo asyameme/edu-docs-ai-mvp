@@ -24,10 +24,12 @@ from typing import Literal
 from .docx_patch import (
     DocxPatch,
     DocxPatchError,
+    RowInsertion,
     RowRemoval,
     count_text_matches,
     patch_docx_bytes,
     read_area_text,
+    read_row_cells,
 )
 from .generator import SourceDocx
 from .package import DocumentType
@@ -347,6 +349,23 @@ def locate_observed_value(document: bytes, patch: PlannedPatch) -> tuple[dict, i
             raise DocxPatchError("Для нагрузки нужны точные координаты ячейки")
         texts = [text.strip() for text in read_area_text(document, source_ref) if text.strip()]
         return dict(source_ref), int(texts == [patch.old_text])
+    if (
+        source_ref.get("table") is not None
+        and source_ref.get("row") is not None
+        and source_ref.get("col") is None
+    ):
+        # Некоторые парсеры сохраняют строку таблицы, но теряют столбец.
+        # Если ровно одна ячейка строки содержит всё значение целиком, сузим
+        # область до неё: иначе число «4» ошибочно совпадёт внутри «24» и «40».
+        cells = read_row_cells(document, source_ref["table"], source_ref["row"])
+        exact_columns = [
+            index for index, text in enumerate(cells, start=1)
+            if text.strip() == patch.old_text
+        ]
+        if len(exact_columns) == 1:
+            cell_ref = {**source_ref, "col": exact_columns[0]}
+            occurrences = count_text_matches(document, cell_ref, patch.old_text)
+            return cell_ref, occurrences
     options = {"normalize_whitespace": _is_formulation(patch)}
     occurrences = count_text_matches(document, source_ref, patch.old_text, **options)
     if occurrences == 0 and source_ref.get("col") is not None:
@@ -426,11 +445,13 @@ def with_document_changes(
     *,
     patches: Sequence[DocxPatch] = (),
     row_removals: Sequence[RowRemoval] = (),
+    row_insertions: Sequence[RowInsertion] = (),
 ) -> list[SourceDocx]:
     """Return the documents with extra changes added to one of them.
 
-    Text patches and row removals of the same document are applied together:
-    patches first, then the removals, both against the original coordinates.
+    Text patches, row removals and row insertions of the same document are
+    applied together in this order, all against the original coordinates:
+    insertions append at the end of their table and shift nothing.
     """
 
     return [
@@ -438,6 +459,7 @@ def with_document_changes(
             document,
             patches=document.patches + tuple(patches),
             row_removals=document.row_removals + tuple(row_removals),
+            row_insertions=document.row_insertions + tuple(row_insertions),
         )
         if document.document_id == document_id
         else document

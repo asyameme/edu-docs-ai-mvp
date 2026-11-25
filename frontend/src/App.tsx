@@ -615,6 +615,8 @@ type ChatScreenProps = {
   hasSignature: boolean;
   canUseChat: boolean;
   isBusy: boolean;
+  applyingPlanId: string | null;
+  planErrors: Record<string, string>;
   statusMessage: string;
   messages: ChatMessage[];
   draft: string;
@@ -641,6 +643,8 @@ function ChatScreen({
   hasSignature,
   canUseChat,
   isBusy,
+  applyingPlanId,
+  planErrors,
   statusMessage,
   messages,
   draft,
@@ -789,7 +793,7 @@ function ChatScreen({
                                   || message.plan.unresolvedQuestions.length > 0}
                               onClick={() => { void onApplyPlan(message.id); }}
                             >
-                              Применить план
+                              {applyingPlanId === message.id ? "Применяем…" : "Применить план"}
                             </button>
                             {message.plan.kind === "demo" && <button
                               type="button"
@@ -799,6 +803,7 @@ function ChatScreen({
                               Отмена
                             </button>}
                           </div>
+                          {planErrors[message.id] && <p className="plan-result-note plan-result-note--error" role="alert">Не удалось применить план: {planErrors[message.id]}</p>}
                         </>
                       ) : message.plan.status === "cancelled" ? (
                         <p className="plan-result-note">План отменён, изменения не внесены.</p>
@@ -1001,6 +1006,8 @@ function App() {
   const [chatAvailability, setChatAvailability] = useState<"loading" | "available" | "unavailable">("loading");
   const [chatSession, setChatSession] = useState<ChatSessionHistoryRead | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
+  const [applyingPlanId, setApplyingPlanId] = useState<string | null>(null);
+  const [chatPlanErrors, setChatPlanErrors] = useState<Record<string, string>>({});
   const [chatStatusMessage, setChatStatusMessage] = useState("Подключаем чат с агентом…");
   const [signatureDraft, setSignatureDraft] = useState("");
   const [signatureEditing, setSignatureEditing] = useState(false);
@@ -1099,6 +1106,10 @@ function App() {
       ? processing.reviewDetails?.check_report ?? null
       : null
   );
+  const generationFreshIssueIds = processing.reviewDetails?.version.id === processing.versionId &&
+    (!currentCheckReport || processing.reviewDetails.check_job_id === processing.checkJob?.id)
+    ? processing.reviewDetails.fresh_issue_ids
+    : null;
   const generationBlockReason = !graphReady
     ? "Завершите сверку документов в разделе «Программа»."
     : unresolvedCount > 0
@@ -1118,7 +1129,15 @@ function App() {
       ? { kind: "blocked", reason: generationBlockReason }
       : {
         kind: "ready",
-        confirm: () => processing.confirm(checkWarnings.map((warning) => warning.id), processing.versionId),
+        confirm: () => {
+          const freshIds = generationFreshIssueIds === null
+            ? null
+            : new Set(generationFreshIssueIds);
+          const warningsToAccept = checkWarnings
+            .filter((warning) => freshIds === null || freshIds.has(warning.id))
+            .map((warning) => warning.id);
+          return processing.confirm(warningsToAccept, processing.versionId);
+        },
       };
 
   useEffect(() => {
@@ -1373,16 +1392,31 @@ function App() {
       )));
       return;
     }
-    if (!chatSession) return;
-    const accepted = await processing.acceptChatProposal(
-      chatSession.id, plan.turnId, plan.expectedVersionId,
-    );
-    if (accepted) {
-      setChatMessages((current) => current.map((item) => (
-        item.id === messageId && item.plan?.kind === "proposal"
-          ? { ...item, plan: { ...item.plan, status: "applied" } }
-          : item
-      )));
+    setChatPlanErrors((current) => {
+      const next = { ...current };
+      delete next[messageId];
+      return next;
+    });
+    if (!chatSession) {
+      setChatPlanErrors((current) => ({ ...current, [messageId]: "Чат отключён. Обновите страницу и попробуйте ещё раз." }));
+      return;
+    }
+    setApplyingPlanId(messageId);
+    try {
+      const result = await processing.acceptChatProposal(
+        chatSession.id, plan.turnId, plan.expectedVersionId,
+      );
+      if (result.accepted) {
+        setChatMessages((current) => current.map((item) => (
+          item.id === messageId && item.plan?.kind === "proposal"
+            ? { ...item, plan: { ...item.plan, status: "applied" } }
+            : item
+        )));
+      } else {
+        setChatPlanErrors((current) => ({ ...current, [messageId]: result.message }));
+      }
+    } finally {
+      setApplyingPlanId((current) => current === messageId ? null : current);
     }
   }
 
@@ -1476,6 +1510,8 @@ function App() {
                 hasSignature={Boolean(processing.signature)}
                 canUseChat={isDemoMode ? hasReconciliation : canUseLiveChat}
                 isBusy={chatBusy || processing.reviewBusy}
+                applyingPlanId={applyingPlanId}
+                planErrors={chatPlanErrors}
                 statusMessage={chatStatus}
                 messages={chatMessages}
                 draft={chatDraft}
@@ -1495,6 +1531,7 @@ function App() {
                 isDemoMode={isDemoMode}
                 checkReport={generationCheckReport}
                 issues={(generationCheckReport?.issues ?? []).map(checkIssueDiagnostic)}
+                freshIssueIds={generationFreshIssueIds}
                 reviewNotice={processing.notice}
                 acceptedWarnings={
                   processing.reviewDetails?.confirmation?.accepted_warning_ids.length ?? 0
@@ -1741,7 +1778,9 @@ function App() {
                             const chooseTarget = isRpdCheck ? setRpdDocumentId : setCoverageCompetencyCode;
                             const previous = processing.optionalRuleChecks[code];
                             const previousTarget = isRpdCheck ? previous?.document_ids?.[0] : previous?.competency_code;
-                            const check = previousTarget ? previous : undefined;
+                            const launch = processing.optionalRuleLaunch?.ruleCode === code
+                              ? processing.optionalRuleLaunch : null;
+                            const check = previousTarget && !launch ? previous : undefined;
                             const targetLabel = options.find((option) => option.value === previousTarget)?.label
                               ?? previousTarget;
                             const running = Boolean(check && ["pending", "processing"].includes(check.status));
@@ -1770,7 +1809,8 @@ function App() {
                                       <select
                                         id={`${code}-scope`}
                                         value={target}
-                                        disabled={!options.length || isConfirmed || processing.reviewBusy || optionalCheckIsRunning}
+                                        disabled={!options.length || isConfirmed || !processing.optionalChecksReady ||
+                                          processing.reviewBusy || optionalCheckIsRunning}
                                         onChange={(event) => chooseTarget(event.target.value)}
                                       >
                                         <option value="">{isRpdCheck ? "Выберите одну РПД" : "Выберите одну компетенцию"}</option>
@@ -1785,16 +1825,24 @@ function App() {
                                       className="secondary-button"
                                       type="button"
                                       disabled={
-                                        !target || isConfirmed || processing.reviewBusy ||
+                                        !target || isConfirmed || !processing.optionalChecksReady || processing.reviewBusy ||
                                         checkIsRunning || optionalCheckIsRunning
                                       }
                                       onClick={() => void processing.runOptionalRuleCheck(code, target)}
                                     >
-                                      {running ? "Проверка выполняется…" : isRpdCheck ? "Проверить выбранную РПД" : "Проверить выбранную компетенцию"}
+                                      {launch?.status === "submitting" ? "Запускаем проверку…"
+                                        : running ? "Проверка выполняется…"
+                                        : isRpdCheck ? "Проверить выбранную РПД" : "Проверить выбранную компетенцию"}
                                     </button>
                                 </div>
-                                {targetLabel && <p className="optional-rule-check-status">Последний запуск: {targetLabel}</p>}
-                                {check?.status === "failed" || check?.status === "conflict" ? (
+                                {check && targetLabel && <p className="optional-rule-check-status">Последний запуск: {targetLabel}</p>}
+                                {launch?.status === "failed" ? (
+                                  <p className="optional-rule-check-status optional-rule-check-status--error" role="alert">
+                                    {launch.message}
+                                  </p>
+                                ) : launch?.status === "submitting" ? (
+                                  <p className="optional-rule-check-status" role="status">Отправляем запрос на проверку.</p>
+                                ) : check?.status === "failed" || check?.status === "conflict" ? (
                                   <p className="optional-rule-check-status optional-rule-check-status--error" role="alert">
                                     {check.message || "Не удалось завершить проверку."}
                                   </p>
@@ -1802,8 +1850,11 @@ function App() {
                                   <p className={`optional-rule-check-status validation-coverage-status--${coverage.status}`} role="status">
                                     {coverageStatusLabel(coverage.status)}{coverage.reason ? ` · ${coverage.reason}` : ""}
                                   </p>
-                                ) : check?.status === "pending" || check?.status === "processing" ? (
-                                  <p className="optional-rule-check-status" role="status">Задание поставлено в очередь.</p>
+                                ) : running ? (
+                                  <p className="optional-rule-check-status" role="status">
+                                    {check?.status === "pending" ? "Задание поставлено в очередь."
+                                      : "Проверяем документы. Это может занять несколько минут."}
+                                  </p>
                                 ) : null}
                                 {code === "R-11" && diagnostics.length > 0 && (
                                   <ul className="r11-explanations" aria-label="Пояснения модели к результатам проверки">

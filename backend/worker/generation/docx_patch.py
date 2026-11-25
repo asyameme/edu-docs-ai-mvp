@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from io import BytesIO
@@ -578,6 +579,136 @@ def remove_table_rows(
             _renumber_rows(table)
 
     return _rewrite_document_xml(document, transform), tuple(kept)
+
+
+@dataclass(frozen=True, slots=True)
+class RowInsertion:
+    """Append one row to a table, copying the formatting of a template row.
+
+    ``source_ref`` addresses the table (one-based ``table``) and the template
+    row (``row``); if that row is gone after earlier changes, the last row of
+    the table is used as the template. ``cells`` holds one list of paragraph
+    lines per column; each line becomes one paragraph carrying the formatting
+    of the template paragraph of its column.
+    """
+
+    source_ref: Mapping[str, object]
+    cells: tuple[tuple[str, ...], ...]
+
+
+_REVIEW_MARKS = {f"{W}highlight", f"{W}commentReference"}
+
+
+def _paragraph_template(cell: ET.Element) -> ET.Element:
+    """Копия первого абзаца ячейки с одним текстовым прогоном внутри.
+
+    Пометки рецензирования (жёлтая заливка, комментарии) с копии снимаются:
+    шаблон может оказаться авторской пометкой-заготовкой, а новая строка —
+    обычный текст документа.
+    """
+
+    for paragraph in cell.findall(f"{W}p"):
+        runs = paragraph.findall(f"{W}r")
+        holders = [run for run in runs if run.find(f"{W}t") is not None]
+        if not holders:
+            continue
+        template = deepcopy(paragraph)
+        kept_run = None
+        for run in template.findall(f"{W}r"):
+            if run.find(f"{W}t") is None:
+                template.remove(run)
+            elif kept_run is None:
+                kept_run = run
+            else:
+                template.remove(run)
+        properties = kept_run.find(f"{W}rPr")
+        if properties is not None:
+            for mark in list(properties):
+                if mark.tag in _REVIEW_MARKS:
+                    properties.remove(mark)
+        text_nodes = kept_run.findall(f"{W}t")
+        for node in text_nodes[1:]:
+            kept_run.remove(node)
+        return template
+    raise DocxPatchError("В ячейке-шаблоне нет абзаца с текстом")
+
+
+def _fill_cell(cell: ET.Element, lines: Sequence[str]) -> None:
+    template = _paragraph_template(cell)
+    for paragraph in cell.findall(f"{W}p"):
+        cell.remove(paragraph)
+    for line in lines or ("",):
+        paragraph = deepcopy(template)
+        node = paragraph.find(f"{W}r").find(f"{W}t")
+        _set_text(node, line)
+        cell.append(paragraph)
+
+
+def insert_table_rows(document: bytes, insertions: Sequence[RowInsertion]) -> bytes:
+    """Return a DOCX copy with new rows appended to the listed tables.
+
+    Coordinates reference the original tables; insertions append at the end,
+    so they never shift the rows other changes address. A numbering column,
+    when the table has one, is renumbered without gaps afterwards.
+    """
+
+    _validate_docx(document)
+    if not insertions:
+        return document
+
+    def transform(root: ET.Element) -> None:
+        body = root.find(f"{W}body")
+        if body is None:
+            raise DocxPatchError("В DOCX не найдено тело документа")
+        tables = body.findall(f"{W}tbl")
+        touched: list[ET.Element] = []
+        counters: dict[int, int | None] = {}
+        for insertion in insertions:
+            table_number = _positive_int(insertion.source_ref.get("table"), "table")
+            if table_number > len(tables):
+                raise DocxPatchError(
+                    f"Таблица #{table_number} из source_ref не найдена; "
+                    f"в документе {len(tables)} таблиц"
+                )
+            rows = tables[table_number - 1].findall(f"{W}tr")
+            if table_number not in counters:
+                numbers = [
+                    int(_cell_texts(row)[0]) for row in rows[1:]
+                    if _NUMBERED_CELL.fullmatch(_cell_texts(row)[0] or "")
+                ]
+                counters[table_number] = max(numbers) + 1 if numbers else None
+            if not rows:
+                raise DocxPatchError(f"Таблица #{table_number} не содержит строк")
+            template_number = _positive_int(
+                insertion.source_ref.get("row") or len(rows), "row"
+            )
+            template = rows[min(template_number, len(rows)) - 1]
+            template_cells = template.findall(f"{W}tc")
+            if len(template_cells) != len(insertion.cells):
+                raise DocxPatchError(
+                    f"Строка-шаблон таблицы #{table_number} содержит "
+                    f"{len(template_cells)} ячеек, новая строка — {len(insertion.cells)}"
+                )
+            row = deepcopy(template)
+            for cell, lines in zip(row.findall(f"{W}tc"), insertion.cells, strict=True):
+                _fill_cell(cell, lines)
+            # Нумерация вставленной строки продолжением существующей: общий
+            # пересчёт не срабатывает, когда у части строк столбец пуст
+            # (объединённые ячейки), а «0» в готовом документе заметен.
+            first = row.findall(f"{W}tc")
+            if first and _NUMBERED_CELL.fullmatch(_cell_texts(row)[0] or "0"):
+                if counters[table_number] is not None:
+                    _fill_cell(first[0], (str(counters[table_number]),))
+                    counters[table_number] += 1
+                else:
+                    _fill_cell(first[0], ("",))
+            tables[table_number - 1].append(row)
+            if tables[table_number - 1] not in touched:
+                touched.append(tables[table_number - 1])
+        for table in touched:
+            _renumber_rows(table)
+
+    return _rewrite_document_xml(document, transform)
 
 
 def _document_root(document: bytes) -> ET.Element:

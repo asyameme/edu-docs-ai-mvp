@@ -1,6 +1,7 @@
 """Бизнес-задачи анализа, неизменяемые решения и подтверждение выбранной версии."""
 
 import json
+from collections import Counter
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -29,6 +30,67 @@ from app.review_projection import (
     project_prepare_report,
 )
 from app.review_storage import insert_issues, insert_version, previous_version
+
+
+def _stable_issue_fingerprint(issue):
+    """Identity of a finding across versions/check jobs, excluding generated IDs."""
+
+    def without_version_ids(value):
+        if isinstance(value, dict):
+            return {
+                key: without_version_ids(item)
+                for key, item in value.items()
+                if key not in {"id", "source_ref_ids"}
+            }
+        if isinstance(value, list):
+            return [without_version_ids(item) for item in value]
+        return value
+
+    return digest(without_version_ids(issue))
+
+
+def _issue_freshness(cur, program_id, review_id, latest_check):
+    """Return new finding IDs and accepted warning IDs inherited from last version."""
+    current_issues = latest_check["report"].get("result", {}).get("issues", [])
+    latest_check_id = str(latest_check["id"])
+    previous = cur.execute(
+        """SELECT review FROM program_versions
+           WHERE program_id=%s AND review->>'review_id'=%s
+             AND review->'confirmation' IS NOT NULL
+             AND review->'confirmation'->>'check_job_id'<>%s
+           ORDER BY number DESC LIMIT 1""",
+        (program_id, str(review_id), latest_check_id),
+    ).fetchone()
+    if previous is None:
+        return [str(issue["id"]) for issue in current_issues], set()
+
+    confirmation = (previous["review"] or {}).get("confirmation") or {}
+    accepted_ids = set(map(str, confirmation.get("accepted_warning_ids", [])))
+    prior_check = cur.execute(
+        "SELECT report FROM processing_jobs WHERE id=%s AND program_id=%s AND type='validate'",
+        (confirmation.get("check_job_id"), program_id),
+    ).fetchone()
+    prior_issues = (
+        prior_check["report"].get("result", {}).get("issues", [])
+        if prior_check else []
+    )
+    prior_fingerprints = Counter(
+        _stable_issue_fingerprint(issue)
+        for issue in prior_issues
+        if str(issue.get("id")) in accepted_ids
+    )
+
+    fresh = []
+    inherited_warnings = set()
+    for issue in current_issues:
+        fingerprint = _stable_issue_fingerprint(issue)
+        if prior_fingerprints[fingerprint]:
+            prior_fingerprints[fingerprint] -= 1
+            if issue.get("severity") == "warning":
+                inherited_warnings.add(str(issue["id"]))
+        else:
+            fresh.append(str(issue["id"]))
+    return fresh, inherited_warnings
 
 
 def manual_check_targets(snapshot, documents):
@@ -1284,8 +1346,15 @@ class ReviewRepository:
             if any(item.requires_decision or item.severity == "blocking" for item in result.issues):
                 raise DomainError(409, "Остались блокирующие замечания или новые конфликты")
             warnings = {item.id for item in result.issues if item.severity == "warning"}
+            _, inherited_warning_ids = _issue_freshness(
+                cur, program_id, review_id, checked
+            )
+            fresh_warnings = {
+                item.id for item in result.issues
+                if item.severity == "warning" and str(item.id) not in inherited_warning_ids
+            }
             accepted = set(body.accepted_warning_ids)
-            if accepted != warnings or len(accepted) != len(body.accepted_warning_ids):
+            if accepted not in (warnings, fresh_warnings) or len(accepted) != len(body.accepted_warning_ids):
                 raise DomainError(409, "Нужно явно принять актуальные предупреждения")
             hash_before = checked_snapshot_hash
             before_snapshot = snapshot
@@ -1293,7 +1362,9 @@ class ReviewRepository:
                 checked_version_id=current,
                 check_job_id=body.check_job_id,
                 content_hash=hash_before,
-                accepted_warning_ids=body.accepted_warning_ids,
+                # Предупреждения, уже принятые в предыдущей подтверждённой версии,
+                # остаются принятыми, пока их содержимое не изменилось.
+                accepted_warning_ids=sorted(warnings, key=str),
                 confirmed_at=datetime.now(UTC),
                 author=body.signature,
             )
@@ -1371,6 +1442,10 @@ class ReviewRepository:
                    WHERE program_id=%s AND job_id=ANY(%s) ORDER BY created_at,id""",
                 (program_id, job_ids),
             ).fetchall()
+            fresh_issue_ids = (
+                _issue_freshness(cur, program_id, snapshot.review.review_id, latest)[0]
+                if latest else []
+            )
         issues = []
         for item in stored:
             details = item["details"]
@@ -1447,6 +1522,7 @@ class ReviewRepository:
             "confirmed": snapshot.review.confirmation is not None,
             "confirmation": snapshot.review.confirmation,
             "check_job_id": latest["id"] if latest else None,
+            "fresh_issue_ids": fresh_issue_ids,
             "check_report": (
                 project_legacy_review_result(latest["report"]["result"])
                 if latest

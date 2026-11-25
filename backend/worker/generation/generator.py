@@ -10,7 +10,9 @@ from backend.contracts.document_v2.graph import EducationalGraph
 from .docx_patch import (
     DocxPatch,
     DocxPatchError,
+    RowInsertion,
     RowRemoval,
+    insert_table_rows,
     patch_docx_bytes,
     remove_table_rows,
 )
@@ -30,7 +32,8 @@ class SourceDocx:
 
     Text ``patches`` replace values in place. ``row_removals`` delete whole
     table rows (a competency taken out of a discipline) after the text patches,
-    because their coordinates refer to the original document.
+    and ``row_insertions`` append new rows (a competency added to a discipline),
+    all against the coordinates of the original document.
     """
 
     document_type: DocumentType
@@ -38,6 +41,7 @@ class SourceDocx:
     content: bytes
     patches: tuple[DocxPatch, ...] = ()
     row_removals: tuple[RowRemoval, ...] = ()
+    row_insertions: tuple[RowInsertion, ...] = ()
     # Идентификатор исходного документа пакета; нужен, чтобы добавить правки
     # к уже собранному документу (with_document_changes).
     document_id: str = ""
@@ -95,12 +99,29 @@ def _render_docx_documents(
                     f"{source.file_name}: строка не удалена ({item}) — исправьте вручную"
                     for item in kept
                 )
-        if applied is not None and (replaced or removed):
+        inserted = 0
+        if source.row_insertions:
+            unique = {
+                (item.source_ref.get("table"), item.cells): item
+                for item in source.row_insertions
+            }
+            try:
+                content = insert_table_rows(content, tuple(unique.values()))
+                inserted = len(unique)
+            except DocxPatchError as error:
+                if notes is None:
+                    raise
+                notes.append(
+                    f"{source.file_name}: строка не добавлена ({error}) — исправьте вручную"
+                )
+        if applied is not None and (replaced or removed or inserted):
             parts = []
             if replaced:
                 parts.append(f"заменено значений: {replaced}")
             if removed:
                 parts.append(f"удалено строк таблиц: {removed}")
+            if inserted:
+                parts.append(f"добавлено строк таблиц: {inserted}")
             applied.append(f"{source.file_name} — " + ", ".join(parts))
         generated.append(
             GeneratedDocx(
