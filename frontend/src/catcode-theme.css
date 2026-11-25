@@ -742,3 +742,26 @@ h1 {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Поле ввода остаётся видимым; прокручивается только история сообщений. */
+.main-content--chat {
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.main-content--chat .app-header { flex-shrink: 0; }
+.main-content--chat .content-column {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 16px;
+}
+.main-content--chat .program-signature { flex-shrink: 0; }
+.main-content--chat .page-heading { flex-shrink: 0; }
+.main-content--chat .chat-panel { flex: 1; height: auto; min-height: 0; }
+.main-content--chat .chat-transcript { height: 100%; min-height: 0; overflow-y: auto; }
+.main-content--chat .chat-quick-actions,
+.main-content--chat .chat-composer { flex-shrink: 0; }
