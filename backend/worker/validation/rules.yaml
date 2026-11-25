@@ -206,6 +206,7 @@ rules:
       timeout_seconds: 180
       max_completion_tokens: 8000
       max_outcomes_per_request: 20
+      max_requests_per_document: 3
       response_format:
         type: json_object
       reasoning_effort: low
@@ -308,6 +309,7 @@ rules:
       temperature: 1
       max_groups_per_request: 6
       max_prompt_tokens: 12000
+      max_requests_per_competency: 3
       rate_limit_retries: 5
       rate_limit_retry_delay_seconds: 5
       rate_limit_max_retry_delay_seconds: 300

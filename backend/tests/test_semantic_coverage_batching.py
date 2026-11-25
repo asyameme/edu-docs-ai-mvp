@@ -89,7 +89,7 @@ def test_large_coverage_checks_all_chunks_and_preserves_original_source():
         }]}
 
     checks, findings = coverage.evaluate_competency_coverage(
-        _documents(topics=topics), llm_config=CONFIG, evaluator=evaluator, competency_code=CODE,
+        _documents(topics=topics), llm_config=CONFIG, evaluator=evaluator,
     )
 
     assert checks == 1 and len(observed) > 1
@@ -117,6 +117,48 @@ def test_small_coverage_uses_one_request():
 
     assert result == (1, [])
     assert called == [coverage.SYSTEM_PROMPT]
+
+
+def test_targeted_coverage_uses_two_summaries_and_one_final_request(monkeypatch):
+    def prompt_size(body, prompt, _config):
+        if prompt == coverage.SYSTEM_PROMPT:
+            return 5000  # Force the targeted path through evidence summarization.
+        if prompt in {coverage.EXTRACT_PROMPT, coverage.EXTRACT_RETRY_PROMPT}:
+            return 2000 * len(body["evidence"])
+        if prompt in {coverage.SYNTHESIS_PROMPT, coverage.SYNTHESIS_RETRY_PROMPT}:
+            return 2000
+        return 2000
+
+    monkeypatch.setattr(coverage, "estimate_prompt_tokens", prompt_size)
+    calls = []
+
+    def evaluator(body, options):
+        prompt = options["_system_prompt"]
+        calls.append(prompt)
+        if prompt == coverage.EXTRACT_PROMPT:
+            evidence_ids = [item["id"] for item in body["evidence"]]
+            return {"summary": "Краткая выжимка", "evidence_ids": evidence_ids[:1]}
+
+        group = body["competency_groups"][0]
+        evidence_id = group["evidence"][0]["evidence_ids"][0]
+        return {"results": [{
+            "group_id": group["group_id"],
+            "status": "supported",
+            "reason": "Найдены подтверждающие материалы",
+            "evidence_ids": [evidence_id],
+        }]}
+
+    result = coverage.evaluate_competency_coverage(
+        _documents(topics=["Тема"]),
+        llm_config=CONFIG,
+        evaluator=evaluator,
+        competency_code=CODE,
+    )
+
+    assert result == (1, [])
+    assert calls.count(coverage.EXTRACT_PROMPT) == 2
+    assert calls.count(coverage.SYNTHESIS_PROMPT) == 1
+    assert len(calls) == 3
 
 
 def test_large_coverage_rejects_citations_from_outside_chunk():

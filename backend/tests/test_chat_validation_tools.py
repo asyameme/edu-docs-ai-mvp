@@ -9,7 +9,7 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 import app.chat_validation as chat_validation
-from app.domain import SnapshotV2
+from app.domain import Entity, SnapshotV2, SourceRefV2
 from app.errors import DomainError
 from app.repository import Repository
 from app.review_contract import CheckResult
@@ -151,6 +151,156 @@ def test_request_check_rejects_version_without_ready_graph(monkeypatch):
     assert error.value.status == 409
 
 
+def _manual_check_fixture(monkeypatch):
+    program_id, version_id, review_id = uuid4(), uuid4(), uuid4()
+    rpd_id, catalogue_id = uuid4(), uuid4()
+    rpd_ref_id, catalogue_ref_id = uuid4(), uuid4()
+    snapshot = SnapshotV2(
+        document_ids=[rpd_id, catalogue_id],
+        source_refs=[
+            SourceRefV2(id=rpd_ref_id, document_id=rpd_id, locator="title"),
+            SourceRefV2(id=catalogue_ref_id, document_id=catalogue_id, locator="table:1;row:2"),
+        ],
+        entities=[
+            Entity(
+                id=uuid4(),
+                kind="competency",
+                attributes={"code": "ПКП-ППК-ДА3", "formulation": "Анализирует данные"},
+                source_ref_ids=[catalogue_ref_id],
+            )
+        ],
+        review={
+            "review_id": review_id,
+            "import_job_id": uuid4(),
+            "analysis_version_id": uuid4(),
+            "graph_ready": True,
+        },
+    )
+    documents = [
+        {
+            "document_id": str(rpd_id),
+            "parsed": {"meta": {"doc_type": "RPD", "file_name": "Глубокое обучение.docx"}},
+        },
+        {
+            "document_id": str(catalogue_id),
+            "parsed": {"meta": {"doc_type": "CKMV", "file_name": "ЦКМВ.docx"}},
+        },
+    ]
+    monkeypatch.setattr(
+        Repository,
+        "version",
+        lambda self, program, version: {
+            "id": version,
+            "snapshot": snapshot.model_dump(mode="json"),
+        },
+    )
+    return program_id, version_id, review_id, rpd_id, documents
+
+
+def test_list_manual_check_targets_matches_document_and_competency(monkeypatch):
+    program_id, version_id, review_id, rpd_id, documents = _manual_check_fixture(monkeypatch)
+    monkeypatch.setattr(
+        ReviewRepository,
+        "job",
+        lambda self, program, job: {
+            "parameters": {"purpose": "prepare", "input": {"documents": documents}}
+        },
+    )
+
+    tools = chat_validation.ChatValidationTools(object())
+    rpd = tools.list_targets(program_id, version_id, "R-11", "глубокое обучение")
+    competency = tools.list_targets(program_id, version_id, "R-09", "ПКП-ППК-ДА3")
+
+    assert [(item.document_id, item.label) for item in rpd.targets] == [
+        (rpd_id, "Глубокое обучение.docx")
+    ]
+    assert [(item.competency_code, item.label) for item in competency.targets] == [
+        ("ПКП-ППК-ДА3", "ПКП-ППК-ДА3 — Анализирует данные")
+    ]
+
+
+@pytest.mark.parametrize("rule_code", ["R-09", "R-11"])
+def test_request_check_creates_only_the_selected_manual_scope(monkeypatch, rule_code):
+    program_id, version_id, review_id, rpd_id, documents = _manual_check_fixture(monkeypatch)
+    job_id = uuid4()
+    target_params = (
+        {"manual_rule_codes": ["R-09"], "manual_competency_code": "ПКП-ППК-ДА3"}
+        if rule_code == "R-09"
+        else {"manual_rule_codes": ["R-11"], "manual_document_ids": [str(rpd_id)]}
+    )
+    calls = {}
+
+    def read_job(self, program, identity):
+        if identity == review_id:
+            return {"parameters": {"purpose": "prepare", "input": {"documents": documents}}}
+        return {
+            "parameters": {
+                "purpose": "check",
+                "review_id": str(review_id),
+                **target_params,
+            },
+            "input_version_id": version_id,
+            "output_version_id": None,
+            "report": {"outcome": "pending"},
+        }
+
+    monkeypatch.setattr(ReviewRepository, "job", read_job)
+    monkeypatch.setattr(
+        ReviewRepository,
+        "create",
+        lambda self, program, key, body, **kwargs: (
+            calls.update(key=key, body=body, kwargs=kwargs) or job_id
+        ),
+    )
+
+    kwargs = (
+        {"rule_code": "R-09", "competency_code": "ПКП-ППК-ДА3"}
+        if rule_code == "R-09"
+        else {"rule_code": "R-11", "document_id": rpd_id}
+    )
+    result = chat_validation.ChatValidationTools(object()).request_check(
+        program_id, version_id, "scoped-tool-call", **kwargs
+    )
+
+    assert calls["body"].version_id == version_id
+    assert calls["body"].rule_codes == [rule_code]
+    if rule_code == "R-09":
+        assert calls["body"].competency_code == "ПКП-ППК-ДА3"
+        assert calls["body"].document_ids is None
+        assert result.scope_rule_code == "R-09"
+        assert result.competency_code == "ПКП-ППК-ДА3"
+    else:
+        assert calls["body"].document_ids == [rpd_id]
+        assert calls["body"].competency_code is None
+        assert result.scope_rule_code == "R-11"
+        assert result.document_id == rpd_id
+
+
+def test_request_check_rejects_target_outside_available_manual_scope(monkeypatch):
+    program_id, version_id, review_id, _, documents = _manual_check_fixture(monkeypatch)
+    monkeypatch.setattr(
+        ReviewRepository,
+        "job",
+        lambda self, program, job: {
+            "parameters": {"purpose": "prepare", "input": {"documents": documents}}
+        },
+    )
+    monkeypatch.setattr(
+        ReviewRepository,
+        "create",
+        lambda *args, **kwargs: pytest.fail("Неизвестную цель нельзя запускать"),
+    )
+
+    with pytest.raises(DomainError, match="не найдена"):
+        chat_validation.ChatValidationTools(object()).request_check(
+            program_id,
+            version_id,
+            "bad-target-tool-call",
+            rule_code="R-09",
+            competency_code="UNKNOWN",
+        )
+
+
 def test_read_check_returns_bounded_result_for_exact_version(monkeypatch):
     program_id, version_id, review_id, job_id = (uuid4() for _ in range(4))
     monkeypatch.setattr(
@@ -257,8 +407,8 @@ def test_registered_backend_tool_is_callable_by_existing_chat_agent(monkeypatch)
     class Tools:
         calls = []
 
-        def request_check(self, program, version, request_id):
-            self.calls.append(("request", program, version, request_id))
+        def request_check(self, program, version, request_id, **scope):
+            self.calls.append(("request", program, version, request_id, scope))
             return chat_validation.ChatCheckResult(
                 check_job_id=job_id,
                 version_id=version,
