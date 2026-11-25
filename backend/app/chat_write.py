@@ -76,7 +76,8 @@ class ChatWriteRepository:
 
                 def read_source(owner, document_id):
                     return Repository.require(cur.execute(
-                        "SELECT original_name,content FROM source_documents WHERE program_id=%s AND id=%s",
+                        "SELECT original_name,content FROM source_documents "
+                        "WHERE program_id=%s AND id=%s",
                         (owner, document_id),
                     ).fetchone())
 
@@ -183,3 +184,65 @@ class ChatWriteRepository:
                     review_id=review_id, allow_historical=True, connection=conn,
                 )
         return {"version": version, "check_job_id": check_id}
+
+    def undo(self, program_id, session_id, turn_id, body, key):
+        fingerprint = digest({
+            "operation": "undo_chat_proposal", "session_id": str(session_id),
+            "turn_id": str(turn_id), "body": body.model_dump(mode="json"),
+        })
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            current = ReviewRepository.lock(cur, program_id)
+            session = Repository.require(cur.execute(
+                "SELECT id,version_id FROM chat_sessions "
+                "WHERE program_id=%s AND id=%s FOR UPDATE",
+                (program_id, session_id),
+            ).fetchone())
+            turn = Repository.require(cur.execute(
+                "SELECT status,result FROM chat_turns WHERE session_id=%s AND id=%s",
+                (session_id, turn_id),
+            ).fetchone())
+            version = previous_version(cur, program_id, key, fingerprint)
+            if version is not None:
+                cur.execute(
+                    "UPDATE chat_sessions SET version_id=%s,updated_at=now() WHERE id=%s",
+                    (version["id"], session_id),
+                )
+                return version
+            if current != body.expected_version_id or session["version_id"] != current:
+                raise DomainError(409, "Версия изменилась; обновите чат перед отменой")
+            if turn["status"] != "completed" or (turn["result"] or {}).get(
+                "kind"
+            ) != "change_proposal":
+                raise DomainError(409, "Нет завершённого предложения для отмены")
+
+            version_id = current
+            target = None
+            while version_id:
+                row = Repository.require(cur.execute(
+                    "SELECT parent_version_id,graph_snapshot(graph_state_id,review) AS snapshot "
+                    "FROM program_versions WHERE program_id=%s AND id=%s",
+                    (program_id, version_id),
+                ).fetchone())
+                snapshot = row["snapshot"]
+                decisions = (snapshot.get("review") or {}).get("decisions", [])
+                if not any(str(item.get("conflict_id")) == str(turn_id) for item in decisions):
+                    target = (version_id, snapshot)
+                    break
+                version_id = row["parent_version_id"]
+            if target is None or target[0] == current:
+                raise DomainError(409, "Предложение не найдено в истории текущей версии")
+            target_id, restored = target
+            if (restored.get("review") or {}).get("graph_ready") is False:
+                raise DomainError(409, "Нельзя восстановить версию до сборки её графа")
+            restored = {**restored, "schema_version": 2}
+            snapshot = SnapshotV2.model_validate(restored)
+            version = insert_version(
+                cur, program_id, current, uuid4(), snapshot,
+                key=key, fingerprint=fingerprint, origin="restore",
+                restore_id=target_id, actor_type="user", actor_id=body.signature,
+            )
+            cur.execute(
+                "UPDATE chat_sessions SET version_id=%s,updated_at=now() WHERE id=%s",
+                (version["id"], session_id),
+            )
+            return version

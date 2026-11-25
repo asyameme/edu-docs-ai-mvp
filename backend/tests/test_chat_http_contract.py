@@ -62,6 +62,36 @@ def test_accept_serializes_full_version_without_generic_graph_walk(monkeypatch):
     }
 
 
+def test_undo_route_returns_restored_version(monkeypatch):
+    from app.chat_write import ChatWriteRepository
+    from app.domain import SnapshotV2
+
+    program_id, session_id, turn_id, version_id = [uuid4() for _ in range(4)]
+    restored = {
+        "id": version_id,
+        "program_id": program_id,
+        "number": 4,
+        "parent_version_id": uuid4(),
+        "restored_from_version_id": uuid4(),
+        "origin": "restore",
+        "created_at": datetime.now(UTC),
+        "snapshot": SnapshotV2().model_dump(mode="json"),
+    }
+    monkeypatch.setattr(ChatWriteRepository, "undo", lambda *a, **kw: restored)
+    app = FastAPI()
+    app.state.resources = SimpleNamespace(postgres=None)
+    app.include_router(chat_api.router)
+    with TestClient(app) as http:
+        response = http.post(
+            f"/api/v1/programs/{program_id}/chat/sessions/{session_id}/runs/{turn_id}/undo",
+            json={"expected_version_id": str(uuid4()), "signature": "Проверка"},
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+    assert response.status_code == 201
+    assert response.json()["id"] == str(version_id)
+    assert response.json()["origin"] == "restore"
+
+
 @pytest.mark.parametrize("case,status", [("missing", 404), ("foreign", 404), ("invalid", 422)])
 def test_sse_validates_run_before_streaming(monkeypatch, case, status):
     class Repository:

@@ -88,10 +88,11 @@ type ChatPlan =
     kind: "proposal";
     turnId: string;
     expectedVersionId: string;
+    appliedVersionId?: string;
     title: string;
     changes: ChatProposedChange[];
     unresolvedQuestions: string[];
-    status: "pending" | "applied" | "cancelled";
+    status: "pending" | "applied" | "reverted";
   };
 
 type SourceCoordinate =
@@ -257,6 +258,8 @@ function chatOutputMessage(
   reviewDetails: ReviewDetails | null,
   job: ImportJob | null,
   accepted = false,
+  appliedVersionId?: string,
+  reverted = false,
 ): ChatMessage {
   if (result.kind === "answer") {
     return {
@@ -272,9 +275,10 @@ function chatOutputMessage(
     text: "Предложение подготовлено. Проверьте изменения перед применением.",
     plan: {
       kind: "proposal", turnId, expectedVersionId,
+      ...(accepted && appliedVersionId ? { appliedVersionId } : {}),
       title: result.summary, changes: result.changes,
       unresolvedQuestions: result.unresolved_questions,
-      status: accepted ? "applied" : "pending",
+      status: reverted ? "reverted" : accepted ? "applied" : "pending",
     },
   };
 }
@@ -285,6 +289,12 @@ function chatHistoryMessages(
   job: ImportJob | null,
 ): ChatMessage[] {
   const acceptedTurns = new Set((reviewDetails?.version.snapshot.review?.decisions ?? []).map((decision) => decision.conflict_id));
+  let latestAcceptedTurnId: string | null = null;
+  for (const turn of history.turns) {
+    if (acceptedTurns.has(turn.id) && turn.result?.kind === "change_proposal") {
+      latestAcceptedTurnId = turn.id;
+    }
+  }
 
   return history.turns.flatMap((turn: ChatTurnHistoryRead) => {
     const userMessage: ChatMessage = { id: `${turn.id}-user`, role: "user", text: turn.user_text };
@@ -297,6 +307,8 @@ function chatHistoryMessages(
     const result = turn.result;
     const agentMessage = chatOutputMessage(
       turn.id, result, history.version_id, reviewDetails, job, acceptedTurns.has(turn.id),
+      turn.id === latestAcceptedTurnId ? history.version_id : undefined,
+      turn.proposal_reverted,
     );
     return [userMessage, agentMessage];
   });
@@ -630,6 +642,7 @@ type ChatScreenProps = {
   canUseChat: boolean;
   isBusy: boolean;
   applyingPlanId: string | null;
+  revertingPlanId: string | null;
   planErrors: Record<string, string>;
   statusMessage: string;
   messages: ChatMessage[];
@@ -639,6 +652,7 @@ type ChatScreenProps = {
   onSend: (message?: string) => void | Promise<void>;
   onApplyPlan: (messageId: string) => void | Promise<void>;
   onCancelPlan: (messageId: string) => void;
+  onUndoPlan: (messageId: string) => void | Promise<void>;
   onOpenSource: (sourceRef: SourceRef) => void;
   onCloseSource: () => void;
 };
@@ -658,6 +672,7 @@ function ChatScreen({
   canUseChat,
   isBusy,
   applyingPlanId,
+  revertingPlanId,
   planErrors,
   statusMessage,
   messages,
@@ -667,6 +682,7 @@ function ChatScreen({
   onSend,
   onApplyPlan,
   onCancelPlan,
+  onUndoPlan,
   onOpenSource,
   onCloseSource,
 }: ChatScreenProps) {
@@ -766,7 +782,9 @@ function ChatScreen({
                           <h3>{message.plan.title}</h3>
                         </div>
                         <span className={`plan-status plan-status--${message.plan.status}`}>
-                          {message.plan.status === "pending" ? "Ожидает решения" : message.plan.status === "applied" ? "Применён" : "Отменён"}
+                          {message.plan.status === "pending" ? "Ожидает решения"
+                            : message.plan.status === "applied" ? "Применён"
+                              : message.plan.status === "reverted" ? "Изменения отменены" : "Отменён"}
                         </span>
                       </div>
                       {message.plan.kind === "demo" ? (
@@ -821,6 +839,8 @@ function ChatScreen({
                         </>
                       ) : message.plan.status === "cancelled" ? (
                         <p className="plan-result-note">План отменён, изменения не внесены.</p>
+                      ) : message.plan.status === "reverted" ? (
+                        <p className="plan-result-note">Изменения отменены. Программа восстановлена до версии перед этим предложением.</p>
                       ) : (
                         <div className="validation-card">
                           <div className="validation-card-heading">
@@ -836,6 +856,23 @@ function ChatScreen({
                               </li>
                             ))}
                           </ul>
+                          {message.plan.kind === "proposal" && message.plan.status === "applied" && (
+                            <div className="plan-actions">
+                              <button
+                                type="button"
+                                className="plan-cancel-button"
+                                disabled={!message.plan.appliedVersionId || !canUseChat || !hasSignature || isBusy
+                                  || currentVersionId !== message.plan.appliedVersionId}
+                                onClick={() => { void onUndoPlan(message.id); }}
+                              >
+                                {revertingPlanId === message.id ? "Отменяем…" : "Отменить изменения"}
+                              </button>
+                              {(!message.plan.appliedVersionId || currentVersionId !== message.plan.appliedVersionId) && (
+                                <p className="plan-lock-note">После этого предложения версия программы изменилась. Полный откат может убрать последующие изменения.</p>
+                              )}
+                            </div>
+                          )}
+                          {planErrors[message.id] && <p className="plan-result-note plan-result-note--error" role="alert">Не удалось отменить изменения: {planErrors[message.id]}</p>}
                         </div>
                       )}
                     </section>
@@ -1021,6 +1058,7 @@ function App() {
   const [chatSession, setChatSession] = useState<ChatSessionHistoryRead | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
   const [applyingPlanId, setApplyingPlanId] = useState<string | null>(null);
+  const [revertingPlanId, setRevertingPlanId] = useState<string | null>(null);
   const [chatPlanErrors, setChatPlanErrors] = useState<Record<string, string>>({});
   const [chatStatusMessage, setChatStatusMessage] = useState("Подключаем чат с агентом…");
   const [signatureDraft, setSignatureDraft] = useState("");
@@ -1423,7 +1461,7 @@ function App() {
       if (result.accepted) {
         setChatMessages((current) => current.map((item) => (
           item.id === messageId && item.plan?.kind === "proposal"
-            ? { ...item, plan: { ...item.plan, status: "applied" } }
+            ? { ...item, plan: { ...item.plan, status: "applied", appliedVersionId: result.appliedVersionId } }
             : item
         )));
       } else {
@@ -1434,9 +1472,42 @@ function App() {
     }
   }
 
+  async function undoChatPlan(messageId: string) {
+    const message = chatMessages.find((item) => item.id === messageId);
+    const plan = message?.plan;
+    if (plan?.kind !== "proposal" || plan.status !== "applied" || !plan.appliedVersionId) return;
+    if (!chatSession) {
+      setChatPlanErrors((current) => ({ ...current, [messageId]: "Чат отключён. Обновите страницу и попробуйте ещё раз." }));
+      return;
+    }
+    setChatPlanErrors((current) => {
+      const next = { ...current };
+      delete next[messageId];
+      return next;
+    });
+    setRevertingPlanId(messageId);
+    try {
+      const result = await processing.undoChatProposal(
+        chatSession.id, plan.turnId, plan.appliedVersionId,
+      );
+      if (result.restored) {
+        setChatStatusMessage("Изменения отменены. Восстановлена предыдущая версия программы.");
+        setChatMessages((current) => current.map((item) => (
+          item.id === messageId && item.plan?.kind === "proposal"
+            ? { ...item, plan: { ...item.plan, status: "reverted" } }
+            : item
+        )));
+      } else {
+        setChatPlanErrors((current) => ({ ...current, [messageId]: result.message }));
+      }
+    } finally {
+      setRevertingPlanId((current) => current === messageId ? null : current);
+    }
+  }
+
   function cancelChatPlan(messageId: string) {
     setChatMessages((current) => current.map((message) => (
-      message.id === messageId && message.plan?.status === "pending"
+      message.id === messageId && message.plan?.kind === "demo" && message.plan.status === "pending"
         ? { ...message, plan: { ...message.plan, status: "cancelled" } }
         : message
     )));
@@ -1525,6 +1596,7 @@ function App() {
                 canUseChat={isDemoMode ? hasReconciliation : canUseLiveChat}
                 isBusy={chatBusy || processing.reviewBusy}
                 applyingPlanId={applyingPlanId}
+                revertingPlanId={revertingPlanId}
                 planErrors={chatPlanErrors}
                 statusMessage={chatStatus}
                 messages={chatMessages}
@@ -1534,6 +1606,7 @@ function App() {
                 onSend={sendChatMessage}
                 onApplyPlan={applyChatPlan}
                 onCancelPlan={cancelChatPlan}
+                onUndoPlan={undoChatPlan}
                 onOpenSource={openChatSource}
                 onCloseSource={closeChatSource}
               />

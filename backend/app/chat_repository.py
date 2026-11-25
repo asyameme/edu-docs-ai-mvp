@@ -53,14 +53,42 @@ class ChatRepository:
                 raise DomainError(404, "Сессия чата не найдена")
             if row["graph_state_id"] is None or (row["review"] or {}).get("graph_ready") is False:
                 raise DomainError(409, "Чат станет доступен после сборки графа")
+            current_decisions = {
+                str(item["conflict_id"])
+                for item in (row["review"] or {}).get("decisions", [])
+            }
+            historical_decisions = {
+                item["conflict_id"]
+                for item in cur.execute(
+                    """WITH RECURSIVE lineage(id,parent_version_id,review) AS (
+                           SELECT id,parent_version_id,review FROM program_versions WHERE id=%s
+                           UNION ALL
+                           SELECT v.id,v.parent_version_id,v.review FROM program_versions v
+                           JOIN lineage parent ON v.id=parent.parent_version_id
+                       )
+                       SELECT DISTINCT decision->>'conflict_id' AS conflict_id
+                       FROM lineage CROSS JOIN LATERAL jsonb_array_elements(
+                           COALESCE(review->'decisions','[]'::jsonb)
+                       ) AS decisions(decision)""",
+                    (row["version_id"],),
+                ).fetchall()
+            }
             row.pop("graph_state_id")
             row.pop("review")
-            row["turns"] = cur.execute(
+            turns = cur.execute(
                 "SELECT id AS run_id,id,user_text,status,result,created_at,completed_at "
                 "FROM chat_turns "
                 "WHERE session_id=%s ORDER BY created_at,id",
                 (session_id,),
             ).fetchall()
+            for turn in turns:
+                turn["proposal_reverted"] = (
+                    turn["result"] is not None
+                    and turn["result"].get("kind") == "change_proposal"
+                    and str(turn["id"]) in historical_decisions
+                    and str(turn["id"]) not in current_decisions
+                )
+            row["turns"] = turns
             return row
 
     def sessions(self, program_id, limit=50, offset=0):
