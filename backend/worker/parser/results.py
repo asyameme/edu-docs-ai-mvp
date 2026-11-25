@@ -640,8 +640,6 @@ def extract_results_into(output, document, file_name, is_heading):
 
             cell = row.cells[column]
 
-            text = " ".join(cell.text.split())
-
             if not any(
                 cell.text.strip()
                 for cell in row.cells

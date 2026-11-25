@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 import app.chat_api as chat_api
 import worker.agent.read_adapter as read_adapter
@@ -131,7 +132,7 @@ def test_sse_serializes_events_and_rechecks_completed_state(monkeypatch):
             raise AssertionError("Успешный ход нельзя помечать как failed")
 
     class Handle:
-        async def describe(self):
+        async def describe(self, **kwargs):
             return SimpleNamespace(status=WorkflowExecutionStatus.COMPLETED)
 
     repository = Repository()
@@ -154,6 +155,143 @@ def test_sse_serializes_events_and_rechecks_completed_state(monkeypatch):
     )
     assert json.loads(data)["message"] == "Готово"
     assert "event: failed" not in response.text
+
+
+@pytest.mark.parametrize("error", [
+    TimeoutError(), RPCError("Недоступно", RPCStatusCode.UNAVAILABLE, b""),
+])
+def test_sse_reports_temporal_timeout_without_marking_turn_failed(monkeypatch, error):
+    program_id, run_id = uuid4(), uuid4()
+
+    class Repository:
+        def turn_input(self, _):
+            return {"program_id": program_id, "session_id": uuid4()}
+
+        def session(self, *_):
+            return {"turns": [{"id": run_id, "status": "pending", "result": None}]}
+
+        def fail(self, _):
+            raise AssertionError("Временный сбой Temporal не должен завершать ход")
+
+    class Handle:
+        async def describe(self, **kwargs):
+            assert kwargs["rpc_timeout"].total_seconds() == 3
+            raise error
+
+    monkeypatch.setattr(chat_api, "repo", lambda _: Repository())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.resources = SimpleNamespace(
+        temporal=SimpleNamespace(get_workflow_handle=lambda _: Handle())
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert "event: unavailable" in response.text
+    assert "event: pending" not in response.text
+    assert "Состояние запроса временно недоступно" in response.text
+
+
+def test_sse_bounds_entire_temporal_call_including_sdk_retries(monkeypatch):
+    import time
+
+    program_id, run_id = uuid4(), uuid4()
+    cancelled = []
+
+    class Repository:
+        def turn_input(self, _):
+            return {"program_id": program_id, "session_id": uuid4()}
+
+        def session(self, *_):
+            return {"turns": [{"id": run_id, "status": "pending", "result": None}]}
+
+    class Handle:
+        async def describe(self, **kwargs):
+            try:
+                await asyncio.sleep(10)
+            finally:
+                cancelled.append(True)
+
+    monkeypatch.setattr(chat_api, "repo", lambda _: Repository())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.resources = SimpleNamespace(
+        temporal=SimpleNamespace(get_workflow_handle=lambda _: Handle())
+    )
+    started = time.monotonic()
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+    assert time.monotonic() - started < 6
+    assert cancelled == [True]
+    assert "event: unavailable" in response.text
+
+
+def test_sse_bounds_temporal_workflow_not_found_wait(monkeypatch):
+    program_id, run_id = uuid4(), uuid4()
+    monkeypatch.setattr(chat_api, "MAX_TEMPORAL_NOT_FOUND_RETRIES", 2)
+
+    class Repository:
+        def turn_input(self, _):
+            return {"program_id": program_id, "session_id": uuid4()}
+
+        def session(self, *_):
+            return {"turns": [{"id": run_id, "status": "pending", "result": None}]}
+
+        def fail(self, _):
+            raise AssertionError("Не найденный workflow нельзя объявлять failed")
+
+    class Handle:
+        async def describe(self, **kwargs):
+            raise RPCError("Нет workflow", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(chat_api, "repo", lambda _: Repository())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.resources = SimpleNamespace(
+        temporal=SimpleNamespace(get_workflow_handle=lambda _: Handle())
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert response.text.count("event: status") == 1
+    assert "event: unavailable" in response.text
+    assert "event: failed" not in response.text
+
+
+def test_sse_reports_unexpected_temporal_error_without_waiting(monkeypatch):
+    program_id, run_id = uuid4(), uuid4()
+
+    class Repository:
+        def turn_input(self, _):
+            return {"program_id": program_id, "session_id": uuid4()}
+
+        def session(self, *_):
+            return {"turns": [{"id": run_id, "status": "pending", "result": None}]}
+
+        def fail(self, _):
+            raise AssertionError("Сбой чтения статуса не должен завершать ход в базе")
+
+    class Handle:
+        async def describe(self, **kwargs):
+            raise RuntimeError("Секретная внутренняя ошибка")
+
+    monkeypatch.setattr(chat_api, "repo", lambda _: Repository())
+    app = FastAPI()
+    app.include_router(router)
+    app.state.resources = SimpleNamespace(
+        temporal=SimpleNamespace(get_workflow_handle=lambda _: Handle())
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+
+    assert response.status_code == 200
+    assert "event: unavailable" in response.text
+    assert "Секретная внутренняя ошибка" not in response.text
 
 
 def test_completed_sse_uses_saved_result_without_temporal_history(monkeypatch):

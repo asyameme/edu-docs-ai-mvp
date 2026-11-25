@@ -16,7 +16,7 @@ from .common import (
 )
 from backend.contracts.document_v2.models import (
     Competency, CurriculumItem, CurriculumMeta, CurriculumOutput, CurriculumWorkloadCell, ParseIssue,
-    Relation, SourceRef,
+    Relation,
 )
 from .results import split_competency
 

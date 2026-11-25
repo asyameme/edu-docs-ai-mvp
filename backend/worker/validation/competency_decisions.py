@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from datetime import datetime, timezone
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 from uuid import uuid4
 
 from .validator import Finding
