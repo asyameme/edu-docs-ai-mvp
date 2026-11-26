@@ -180,7 +180,8 @@ export type ReviewIssue = {
   decision?: {
     variant_id: string;
     author: string | null;
-    changes?: Array<{ value?: unknown }>;
+    custom_value?: string;
+    changes?: ReviewMutation[];
   } | null;
 };
 

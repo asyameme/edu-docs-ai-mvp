@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from app.confirmation_policy import CONFIRMATION_POLICY
-from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH
+from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH, WORKLOAD_ENTITY_KINDS
 from app.document_reconciliation import apply_document_mutations
 from app.parser_document import parse_output
 from app.review_contract import DOCUMENT_MUTATION_OPS
@@ -321,7 +321,7 @@ def project_snapshot_documents(documents, snapshot):
                 if not change["field_path"].startswith("/attributes/"):
                     raise ValueError("Изменяемый путь должен находиться внутри attributes")
                 target = targets.get(key[:2])
-                if (target and target.get("kind") in {"curriculum_item", "discipline"}
+                if (target and target.get("kind") in WORKLOAD_ENTITY_KINDS
                     and key[2].startswith(HOURS_COMPONENT_PREFIX)):
                     changed_workload.add(key[:2])
                     review_attribute_fields.add((*key[:2], HOURS_TOTAL_PATH))

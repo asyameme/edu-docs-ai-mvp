@@ -125,7 +125,9 @@ def validate_document_mutation_variants(documents, variants):
         validate_document_mutations(documents, changes)
         if not changes:
             continue
-        selected = apply_document_mutations(documents, changes)
+        selected = apply_document_mutations(
+            documents, changes, copy_only_affected_documents=True
+        )
         affected = {str(change["document_id"]) for change in changes}
         for document_id in affected:
             try:
@@ -223,7 +225,13 @@ def _validate_shared_indicator_text(documents, change):
     return mutation
 
 
-def apply_document_mutations(original_documents, changes, *, relation_origins=None):
+def apply_document_mutations(
+    original_documents,
+    changes,
+    *,
+    relation_origins=None,
+    copy_only_affected_documents=False,
+):
     """Каждый полный набор решений заново накладывается на неизменённый импорт."""
     normalized, link_changes, shared = [], [], {}
     for change in changes:
@@ -264,7 +272,15 @@ def apply_document_mutations(original_documents, changes, *, relation_origins=No
             raise DomainError(422, "Нельзя заменять объект, содержащий защищённые данные")
         unique.setdefault((document_id, tuple(parts)), (document, mutation, parts))
 
-    result = deepcopy(original_documents)
+    if copy_only_affected_documents:
+        affected = {identity for identity, _ in unique}
+        affected.update(str(change["document_id"]) for change in link_changes)
+        affected.update(identity for identity, _ in shared)
+        result = dict(original_documents)
+        for identity in affected:
+            result[identity] = deepcopy(original_documents[identity])
+    else:
+        result = deepcopy(original_documents)
     aliases = {}
     kept_fields = {
         (identity, ("indicators", str(index), "text"))
