@@ -3,6 +3,13 @@
 import re
 from collections import Counter, defaultdict
 
+from backend.contracts.document_v2.models import (
+    CurriculumWorkloadCell,
+    Discipline,
+    ParseIssue,
+    SemesterWorkload,
+    SourceRef,
+)
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -13,12 +20,6 @@ from .common import (
     paragraph_indices,
     parse_workload_number,
     read_section,
-)
-from backend.contracts.document_v2.models import (
-    Discipline,
-    ParseIssue,
-    SemesterWorkload,
-    SourceRef,
 )
 
 
@@ -656,6 +657,8 @@ def build_discipline(
     }
 
     hours_by_kind = {}
+    workload_cells = {}
+    kind_cell_rows = set()
     credits = 0
     credit_found = False
     declared_hours = []
@@ -761,6 +764,11 @@ def build_discipline(
             hours_by_kind[key] = (
                 hours_by_kind.get(key, 0) + number
             )
+            if key not in workload_cells:
+                workload_cells[key] = CurriculumWorkloadCell(
+                    hours=number, text=str(item["raw"]), source_ref=ref,
+                )
+            kind_cell_rows.add((ref.table, ref.row))
 
     if not credit_found or credits < 1 or not hours_by_kind:
         problem(
@@ -806,6 +814,11 @@ def build_discipline(
             source_ref=primary_ref,
         ))
 
+    # Координаты видов достоверны, только когда все они из одной строки
+    # таблицы (итоговой или единственной); при разноске по семестрам
+    # суммарное значение вида нельзя приписать одной ячейке.
+    workload = workload_cells if len(kind_cell_rows) <= 1 else None
+
     forms, form_issues = extract_control_forms(
         document,
         file_name,
@@ -828,6 +841,7 @@ def build_discipline(
         semesters=sorted(semesters),
         credit_units=credits,
         hours_total=hours_total,
+        workload_cells=workload or None,
         hours_by_kind=hours_by_kind,
         control_forms=forms,
         source_ref=primary_ref.model_copy(update={

@@ -321,7 +321,7 @@ def project_snapshot_documents(documents, snapshot):
                 if not change["field_path"].startswith("/attributes/"):
                     raise ValueError("Изменяемый путь должен находиться внутри attributes")
                 target = targets.get(key[:2])
-                if (target and target.get("kind") == "curriculum_item"
+                if (target and target.get("kind") in {"curriculum_item", "discipline"}
                     and key[2].startswith(HOURS_COMPONENT_PREFIX)):
                     changed_workload.add(key[:2])
                     review_attribute_fields.add((*key[:2], HOURS_TOTAL_PATH))
@@ -463,11 +463,19 @@ def project_snapshot_documents(documents, snapshot):
         field_tokens = path_tokens[1:]
         if key[:2] in changed_workload and key[2] == HOURS_TOTAL_PATH:
             # Старые артефакты не содержат разбиение, но итог остаётся доступен по строке.
-            records = [row for row in document.get("curriculum_items", [])
-                       if same_locator(row.get("source_ref"), locator)]
+            records = [
+                row
+                for container in ("curriculum_items", "disciplines")
+                for row in document.get(container, [])
+                if same_locator(row.get("source_ref"), locator)
+            ]
             if len(records) == 1 and records[0].get("workload_cells"):
+                hours_by_kind = target["attributes"]["hours_by_kind"]
                 for name, cell in records[0]["workload_cells"].items():
-                    cell["hours"] = target["attributes"]["hours_by_kind"][name]
+                    cell["hours"] = hours_by_kind[name]
+                if "hours_by_kind" in records[0]:
+                    # У дисциплины РПД словарь видов хранится рядом с ячейками.
+                    records[0]["hours_by_kind"] = dict(hours_by_kind)
         values = record_values(document, locator, field_tokens)
         if len(values) == 1 and values[0] == new_value and type(values[0]) is type(new_value):
             continue

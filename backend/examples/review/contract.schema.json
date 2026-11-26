@@ -870,6 +870,21 @@
           "title": "Hours By Kind",
           "type": "object"
         },
+        "workload_cells": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/CurriculumWorkloadCell"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workload Cells"
+        },
         "control_forms": {
           "default": [],
           "items": {

@@ -104,6 +104,35 @@ class TestWorkloadVariants(unittest.TestCase):
         self.assertEqual(output.disciplines[0].hours_total, 72)
         self.assertEqual(output.disciplines[0].semesters, [4])
 
+    def test_workload_cells_capture_kind_cells_of_one_row(self):
+        output = self.parse(working_program(
+            [("ОСНОВНАЯ ТРАЕКТОРИЯ Профиль ТОП-ИТ ПРО", 5, 28, 60, 20, 1)],
+            sequential=True,
+        ))
+        discipline = output.disciplines[0]
+        self.assertEqual(discipline.hours_total, 88)
+        cells = discipline.workload_cells
+        self.assertEqual(sorted(cells), ["лекции", "сам.раб. с использованием методических материалов"])
+        lectures = cells["лекции"]
+        self.assertEqual((lectures.hours, lectures.text), (28, "28"))
+        self.assertEqual(
+            (lectures.source_ref.table, lectures.source_ref.row, lectures.source_ref.col), (2, 5, 2),
+        )
+        independent = cells["сам.раб. с использованием методических материалов"]
+        self.assertEqual((independent.hours, independent.source_ref.col), (60, 3))
+
+    def test_workload_cells_absent_when_kinds_span_semester_rows(self):
+        output = self.parse(working_program(
+            (
+                ("ТРАЕКТОРИЯ 7 СЕМЕСТРА Профиль Стандарт", 7, 8, 28, 20, 1),
+                ("ТРАЕКТОРИЯ 8 СЕМЕСТРА Профиль Стандарт", 8, 10, 62, 40, 2),
+            ),
+            sequential=True,
+        ))
+        discipline = output.disciplines[0]
+        self.assertEqual(discipline.hours_total, 108)
+        self.assertIsNone(discipline.workload_cells)
+
     def test_invalid_profile_does_not_drop_the_other_profile(self):
         profiles = (self.profiles[0], (*self.profiles[1][:-1], "2,5"))
         output = self.parse(working_program(profiles))

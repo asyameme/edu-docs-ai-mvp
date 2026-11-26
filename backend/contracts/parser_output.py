@@ -80,12 +80,23 @@ class Program(BaseEntity):
     professional_standards: list[str] = []       # профкоды из Характеристики
 
 
+class WorkloadCell(ContractModel):
+    """Ячейка таблицы нагрузки РПД: источник для правки вида нагрузки."""
+
+    hours: int = Field(ge=0, strict=True)
+    text: str = Field(min_length=1)
+    source_ref: SourceRef
+
+
 class Discipline(BaseEntity):
     name: str
     semesters: list[int]
     credit_units: int = Field(ge=1)              # ЗЕТ; 
     hours_total: int = Field(ge=0)
     hours_by_kind: dict[str, int]                # «лекции»: 62, «самостоятельная работа»: 82…
+    # Ячейки видов нагрузки, когда итог вычислен из них; координаты нужны
+    # чату для правки видов и генератору для переноса в DOCX.
+    workload_cells: dict[str, WorkloadCell] | None = None
     control_forms: list[str] = []                # «зачёт», «экзамен»
     prerequisites: list[str] = []                # названия дисциплин из раздела 1.2
 
