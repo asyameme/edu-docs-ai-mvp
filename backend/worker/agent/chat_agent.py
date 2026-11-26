@@ -13,6 +13,8 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from temporalio.common import RetryPolicy
 
+from app.chat_progress import ChatProgressCapability
+
 from .contracts import (
     ChatDeps,
     ChatOutput,
@@ -154,6 +156,7 @@ def create_chat_agent(
         output_type=ChatOutput,
         instructions=INSTRUCTIONS,
         capabilities=[
+            ChatProgressCapability(),
             ProcessHistory(processor=bound_context),
             TemporalDurability(
                 models=temporal_models,

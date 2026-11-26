@@ -16,6 +16,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from app.chat_context import CONTEXT_RESERVE_TOKENS, DEFAULT_CONTEXT_TOKENS, trim_messages
     from app.chat_model import chat_agent
+    from app.chat_progress import ChatProgressState
     from worker.agent.contracts import ChatDeps
 
 # Прежние лимиты сохранены только для воспроизведения уже начатых workflow.
@@ -137,6 +138,13 @@ def token_conversation_from_turns(session_id, turns, budget):
 @workflow.defn(name="ProgramChatWorkflowV1")
 class ChatWorkflow(PydanticAIWorkflow):
     __pydantic_ai_agents__ = [chat_agent] if chat_agent else []
+
+    def __init__(self):
+        self.chat_progress = ChatProgressState()
+
+    @workflow.query(name="chat_progress_v1")
+    def progress(self) -> dict:
+        return self.chat_progress.snapshot()
 
     @workflow.run
     async def run(self, payload: dict) -> dict:

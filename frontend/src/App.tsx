@@ -5,6 +5,7 @@ import { DiagnosticList } from "./DiagnosticList";
 import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
 import { api } from "./api";
+import { parseChatProgress, type ChatProgress } from "./chatProgress";
 import { variantDocumentIds } from "./variantDocuments";
 import type {
   ChatOutput,
@@ -120,6 +121,8 @@ type ChatMessage = {
   id: string;
   role: "agent" | "user";
   text: string;
+  pending?: boolean;
+  progressSteps?: string[];
   result?: {
     kind: "coverage";
     title: string;
@@ -195,7 +198,9 @@ function parseChatOutput(value: unknown): ChatOutput | null {
   return null;
 }
 
-function waitForChatOutput(programId: string, runId: string): Promise<ChatOutput> {
+function waitForChatOutput(
+  programId: string, runId: string, onProgress: (progress: ChatProgress) => void,
+): Promise<ChatOutput> {
   return new Promise((resolve, reject) => {
     const stream = new EventSource(`/api/v1/programs/${programId}/chat/runs/${runId}/events`);
     let timeout = 0;
@@ -206,6 +211,15 @@ function waitForChatOutput(programId: string, runId: string): Promise<ChatOutput
       else if (output) resolve(output);
       else reject(new Error("Агент вернул пустой ответ."));
     };
+    stream.addEventListener("progress", (event) => {
+      if (!(event instanceof MessageEvent)) return;
+      try {
+        const progress = parseChatProgress(JSON.parse(event.data));
+        if (progress) onProgress(progress);
+      } catch {
+        // Некорректная подсказка не мешает дождаться итогового ответа.
+      }
+    });
     stream.addEventListener("completed", (event) => {
       if (!(event instanceof MessageEvent)) {
         finish(new Error("Не удалось прочитать ответ агента."));
@@ -730,7 +744,17 @@ function ChatScreen({
                     {message.result?.kind === "coverage" && (
                       <strong className="message-result-title">{message.result.title}</strong>
                     )}
-                    {message.text && <p className="message-body">{message.text}</p>}
+                    {message.text && <p className={`message-body${message.pending ? " chat-progress" : ""}`}
+                      role={message.pending ? "status" : undefined}
+                      aria-live={message.pending ? "polite" : undefined}>
+                      {message.pending && <span className="chat-progress-spinner" aria-hidden="true" />}
+                      {message.text}
+                    </p>}
+                    {message.pending && Boolean(message.progressSteps?.length) && (
+                      <ol className="chat-progress-steps" aria-label="Действия агента">
+                        {message.progressSteps?.map((step, index) => <li key={index}>{step}</li>)}
+                      </ol>
+                    )}
                     {message.questions && <ul className="chat-clarification-questions">
                       {message.questions.map((question) => <li key={question}>{question}</li>)}
                     </ul>}
@@ -1393,7 +1417,7 @@ function App() {
     if (!canUseLiveChat || !chatSession || chatBusy || !processing.programId) return;
     const optimisticId = `message-${crypto.randomUUID()}`;
     const userMessage: ChatMessage = { id: `${optimisticId}-user`, role: "user", text };
-    const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…" };
+    const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…", pending: true };
     setChatMessages((current) => [...current, userMessage, pendingMessage]);
     setChatBusy(true);
     if (message === undefined) setChatDraft("");
@@ -1406,7 +1430,12 @@ function App() {
           body: JSON.stringify({ text }),
         },
       );
-      const output = await waitForChatOutput(processing.programId, turn.run_id);
+      setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
+        ? { ...item, text: "Запрос принят. Ожидаю ответа агента…" } : item));
+      const output = await waitForChatOutput(processing.programId, turn.run_id, (progress) => {
+        setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
+          ? { ...item, text: progress.message, progressSteps: progress.steps } : item));
+      });
       const agentMessage = chatOutputMessage(
         turn.id, output, chatSession.version_id, processing.reviewDetails, processing.job,
       );
