@@ -269,6 +269,7 @@ export type ChatTurnHistoryRead = {
   result: ChatOutput | null;
   created_at: string;
   completed_at: string | null;
+  proposal_reverted: boolean;
 };
 
 export type ChatSessionHistoryRead = ChatSessionRead & { turns: ChatTurnHistoryRead[] };

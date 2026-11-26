@@ -16,7 +16,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.chat_repository import ChatRepository
 from app.chat_write import ChatWriteRepository
 from app.config import get_settings
-from app.domain import Contract
+from app.domain import Contract, VersionRead
 from app.errors import DomainError
 from app.program_api import OperationKey
 from app.temporal_rpc import temporal_rpc
@@ -56,6 +56,20 @@ def accept_proposal(
     )
 
 
+@router.post(
+    "/sessions/{session_id}/runs/{turn_id}/undo",
+    status_code=201,
+    response_model=VersionRead,
+)
+def undo_proposal(
+    program_id: UUID, session_id: UUID, turn_id: UUID, body: ProposalAccept,
+    operation_key: OperationKey, request: Request,
+) -> VersionRead:
+    return ChatWriteRepository(request.app.state.resources.postgres).undo(
+        program_id, session_id, turn_id, body, operation_key
+    )
+
+
 class MessageCreate(Contract):
     text: str = Field(min_length=1, max_length=12000)
 
@@ -88,6 +102,7 @@ class TurnHistoryRead(TurnRead):
     result: ChatResult | None
     created_at: datetime
     completed_at: datetime | None
+    proposal_reverted: bool = False
 
 
 class SessionHistoryRead(SessionRead):

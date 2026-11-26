@@ -28,8 +28,12 @@ type OptionalRuleLaunch = {
 } & ({ status: "submitting" } | { status: "failed"; message: string });
 
 type ChatProposalAcceptance =
-  | { accepted: true }
+  | { accepted: true; appliedVersionId: string }
   | { accepted: false; message: string };
+
+type ChatProposalUndo =
+  | { restored: true; versionId: string }
+  | { restored: false; message: string };
 
 function operationHeaders(idempotencyKey: string = crypto.randomUUID()): HeadersInit {
   return {
@@ -1068,9 +1072,64 @@ export function useImportJob() {
           ? `План применён, но не удалось обновить данные на экране: ${error.message}`
           : "План применён, но не удалось обновить данные на экране.");
       }
-      return { accepted: true };
+      return { accepted: true, appliedVersionId: accepted.version.id };
     } catch (error) {
       return reject(error instanceof Error ? error.message : "Не удалось применить предложение агента");
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewBusy(false);
+    }
+  }
+
+  async function undoChatProposal(
+    chatSessionId: string,
+    turnId: string,
+    expectedCurrentVersionId: string,
+  ): Promise<ChatProposalUndo> {
+    const current = sessionRef.current;
+    const reject = (message: string): ChatProposalUndo => {
+      setNotice(message);
+      return { restored: false, message };
+    };
+    if (reviewBusyRef.current || !current.programId || !current.versionId || !current.reviewId) {
+      return reject("Не удалось отменить изменения: программа ещё не готова.");
+    }
+    if (current.versionId !== expectedCurrentVersionId) {
+      return reject("Версия программы уже изменилась. Обновите чат перед отменой.");
+    }
+    const signature = signatureForProgram(signatureRef.current, current.programId);
+    if (!signature) {
+      return reject("Укажите подпись для этой программы кнопкой над программой.");
+    }
+    reviewBusyRef.current = true;
+    setReviewBusy(true);
+    try {
+      const restored = await api<VersionRead>(
+        `/api/v1/programs/${current.programId}/chat/sessions/${chatSessionId}/runs/${turnId}/undo`,
+        {
+          method: "POST",
+          headers: operationHeaders(),
+          body: JSON.stringify({ expected_version_id: expectedCurrentVersionId, signature }),
+        },
+      );
+      updateSession({
+        versionId: restored.id,
+        reviewId: restored.snapshot.review?.review_id,
+        analysisVersionId: restored.snapshot.review?.analysis_version_id,
+        checkJobId: undefined,
+        checkVersionId: undefined,
+        prepareKey: undefined,
+      });
+      setProgram((latest) => latest?.id === current.programId
+        ? { ...latest, current_version_id: restored.id } : latest);
+      // Сохраняем уже показанный граф и чат, пока читаем сводку восстановленной версии.
+      // Иначе экран кратко показывает пустой чат и неверный номер версии по умолчанию.
+      setCheckJob(null);
+      setGraphBuildJob(null);
+      setNotice("Изменения отменены. Восстановлена предыдущая версия программы.");
+      return { restored: true, versionId: restored.id };
+    } catch (error) {
+      return reject(error instanceof Error ? error.message : "Не удалось отменить изменения");
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
@@ -1268,6 +1327,7 @@ export function useImportJob() {
     decideCustom,
     decideLevelOnlyVariants,
     acceptChatProposal,
+    undoChatProposal,
     runCheck,
     runOptionalRuleCheck,
     confirm,

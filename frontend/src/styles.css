@@ -1348,6 +1348,11 @@ h1 {
   color: #68737d;
 }
 
+.plan-status--reverted {
+  background: #e4f5e7;
+  color: #2e7042;
+}
+
 .plan-actions {
   display: flex;
   gap: 8px;
@@ -1373,7 +1378,8 @@ h1 {
   color: #53606b;
 }
 
-.plan-apply-button:disabled {
+.plan-apply-button:disabled,
+.plan-cancel-button:disabled {
   border-color: #d6dce1;
   background: #eef1f4;
   color: #7c8791;
@@ -2820,6 +2826,21 @@ h1 {
   line-height: 1.6;
 }
 
+.plan-card li > strong,
+.plan-card li > span,
+.plan-card li > small {
+  display: block;
+}
+
+.plan-card li > span,
+.plan-card li > small {
+  margin-top: 3px;
+}
+
+.plan-card li > small {
+  line-height: 1.45;
+}
+
 .entity-source,
 .message-source {
   color: #315a91;
@@ -2846,6 +2867,11 @@ h1 {
 .plan-status--cancelled {
   background: #edf0f3;
   color: #697789;
+}
+
+.plan-status--reverted {
+  background: #e7f3eb;
+  color: #316348;
 }
 
 .plan-cancel-button {
