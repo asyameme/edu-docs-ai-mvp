@@ -7,10 +7,13 @@ from uuid import UUID
 
 from pydantic import Field
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from temporalio.common import RetryPolicy
+
+from app.chat_progress import ChatProgressCapability
 
 from .contracts import (
     AgentOutput,
@@ -151,6 +154,13 @@ def create_chat_agent(
 ) -> Agent[ChatDeps, AgentOutput]:
     """Создаёт агента с необязательными алиасами моделей для backend Temporal."""
 
+    async def bound_context(ctx: RunContext[ChatDeps], messages):
+        if ctx.deps.context_tokens is None:
+            return messages
+        from app.chat_context import CONTEXT_RESERVE_TOKENS, trim_messages
+
+        return trim_messages(messages, ctx.deps.context_tokens - CONTEXT_RESERVE_TOKENS)
+
     agent = Agent(
         journalled(model),
         name="edu_program_chat_v1",
@@ -158,6 +168,8 @@ def create_chat_agent(
         output_type=AgentOutput,
         instructions=INSTRUCTIONS,
         capabilities=[
+            ChatProgressCapability(),
+            ProcessHistory(processor=bound_context),
             TemporalDurability(
                 models=temporal_models,
                 # Не даём сетевой ошибке модели бесконечно удерживать ход до лимита workflow.

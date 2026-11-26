@@ -16,6 +16,7 @@ class ChatDeps(BaseModel):
 
     program_id: UUID
     version_id: UUID
+    context_tokens: int | None = Field(default=None, ge=32_000, le=200_000)
 
 
 class EntitySearchHit(BaseModel):

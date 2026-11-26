@@ -9,11 +9,12 @@ from temporalio import activity
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from app.chat_context import CONTEXT_RESERVE_TOKENS, count_text_tokens
 from app.chat_workflow import (
-    MAX_CHAT_HISTORY_TURNS,
     ChatWorkflow,
-    conversation_from_turns,
+    token_conversation_from_turns,
 )
+from app.config import get_settings
 from app.temporal_rpc import DELIVERY_TIMEOUT_SECONDS, temporal_rpc
 
 
@@ -30,10 +31,19 @@ async def dispatch_chats(client, repo, queue, stop):
                         return
                     after = (created_at, turn_id)
                     payload = await asyncio.to_thread(repo.turn_input, turn_id)
-                    turns = await asyncio.to_thread(
-                        repo.prior_turns, payload, MAX_CHAT_HISTORY_TURNS
-                    )
-                    conversation = conversation_from_turns(payload["session_id"], turns)
+                    context_tokens = get_settings().chat_context_tokens
+                    budget = (context_tokens - CONTEXT_RESERVE_TOKENS
+                              - count_text_tokens(payload["user_text"]))
+                    turns, offset = [], 0
+                    while True:
+                        batch = await asyncio.to_thread(repo.prior_turns, payload, 100, offset)
+                        turns = batch + turns
+                        conversation = token_conversation_from_turns(
+                            payload["session_id"], turns, budget,
+                        )
+                        if len(batch) < 100 or len(conversation.messages) < len(turns) * 2:
+                            break
+                        offset += len(batch)
                     try:
                         await temporal_rpc(
                             client.start_workflow(
@@ -41,6 +51,7 @@ async def dispatch_chats(client, repo, queue, stop):
                                 {
                                     "turn": str(turn_id),
                                     "text": payload["user_text"],
+                                    "context_tokens": context_tokens,
                                     "program_id": str(payload["program_id"]),
                                     "version_id": str(payload["version_id"]),
                                     "conversation": ConversationTypeAdapter.dump_json(

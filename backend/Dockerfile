@@ -3,6 +3,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONPATH=/
 WORKDIR /workspace/backend
 COPY requirements.txt requirements-validation-llm.txt ./
 RUN pip install -r requirements.txt -r requirements-validation-llm.txt
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" && chmod -R a+rX /opt/tiktoken-cache
 RUN useradd --create-home --uid 10001 appuser
 RUN mkdir -p /data/originals /data/artifacts && chown appuser:appuser /workspace /data/originals /data/artifacts
 COPY --chown=appuser:appuser app ./app

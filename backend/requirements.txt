@@ -13,3 +13,5 @@ openpyxl==3.1.5
 rfc8785==0.1.4
 PyYAML==6.0.3
 opentelemetry-sdk==1.45.2
+
+tiktoken==0.14.0
