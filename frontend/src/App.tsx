@@ -2187,7 +2187,7 @@ function App() {
                                   {processing.reviewBusy ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
                                 </button>
                                 {isUnsaved && (
-                                  <button className="competency-cancel-button" type="button"
+                                  <button className="secondary-button" type="button"
                                     disabled={processing.reviewBusy}
                                     onClick={() => setSelectedChoices((current) => {
                                       const next = { ...current };

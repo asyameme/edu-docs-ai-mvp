@@ -15,6 +15,7 @@ from app.validation_bridge import (
     validation_ruleset,
 )
 from worker.validation.text_normalization import (
+    format_variant_formulation_text,
     normalize_variant_formulation_text,
 )
 from worker.validation.validator import load_rules
@@ -99,7 +100,7 @@ def _sources(finding, documents):
 
 
 def _variants(finding, sources, documents, issue_id):
-    """Предлагает только уже найденные значения и проверяет каждый вариант контрактом."""
+    """Группирует варианты с единым оформлением уровня и проверяет их контрактом."""
     field = _FIELDS.get(finding["code"])
     if field is None:
         return [], []
@@ -124,7 +125,12 @@ def _variants(finding, sources, documents, issue_id):
             if field in {"formulation", "text"} and isinstance(value, str)
             else digest(value)
         )
-        values.setdefault(signature, value)
+        values.setdefault(
+            signature,
+            format_variant_formulation_text(value)
+            if field in {"formulation", "text"} and isinstance(value, str)
+            else value,
+        )
     if not values:
         return [], []
     # Данные разных известных программ не должны образовывать общий выбор.
