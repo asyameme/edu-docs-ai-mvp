@@ -13,7 +13,7 @@ from test_chat_http_contract import client_for
 
 import app.chat_api as api
 from app.config import Settings
-from app.domain import Entity, RelationV2, SnapshotV2
+from app.domain import Entity, RelationV2, SnapshotV2, SourceLink, SourceRefV2
 from app.errors import DomainError
 from worker.agent.read_adapter import PostgresChatReadPort, limit_tool_payload
 from worker.agent.read_port import ChatReadPort
@@ -129,6 +129,41 @@ def test_large_metadata_cannot_leave_tool_boundary(tool):
     assert large not in str(caught.value)
 
 
+def test_discipline_hours_kinds_are_offered_as_editable_fields():
+    identity, row_ref, lecture_ref, practice_ref, document_id = [uuid4() for _ in range(5)]
+    port = PostgresChatReadPort(None)
+    port.snapshot = lambda *_: SnapshotV2(
+        document_ids=[document_id],
+        entities=[Entity(
+            id=identity, kind="discipline",
+            attributes={"name": "Глубокое обучение", "hours_total": 144,
+                        "hours_by_kind": {"лекции": 24, "практические занятия": 120}},
+        )],
+        source_refs=[
+            {"id": row_ref, "document_id": document_id, "locator": '{"row":8}'},
+            {"id": lecture_ref, "document_id": document_id, "locator": '{"row":8,"col":2}'},
+            {"id": practice_ref, "document_id": document_id, "locator": '{"row":8,"col":3}'},
+        ],
+        source_links=[
+            {"id": uuid4(), "target_kind": "entity", "target_id": identity,
+             "field_path": "/attributes/hours_by_kind/лекции", "source_ref_id": lecture_ref,
+             "observed_value": {"value": 28, "unit": None, "cell_text": "28"}},
+            {"id": uuid4(), "target_kind": "entity", "target_id": identity,
+             "field_path": "/attributes/hours_by_kind/практические занятия",
+             "source_ref_id": practice_ref,
+             "observed_value": {"value": 126, "unit": None, "cell_text": "126"}},
+        ],
+    )
+    result = asyncio.run(
+        port.read_entity(program_id=uuid4(), version_id=uuid4(), entity_id=identity)
+    )
+    assert [(field.label, field.hours, field.source_ref_id) for field in result.editable_workload] == [
+        ("лекции", 24, lecture_ref),
+        ("практические занятия", 120, practice_ref),
+    ]
+    assert result.hours_total_write_error == "Итог рассчитывается автоматически из граф нагрузки."
+
+
 @pytest.mark.parametrize(
     "attributes,query",
     [
@@ -141,6 +176,7 @@ def test_large_metadata_cannot_leave_tool_boundary(tool):
         ({"text": "ß" * 1000 + "Straße"}, "STRASSE"),
     ],
 )
+
 def test_matching_context_remains_available(attributes, query):
     identity = uuid4()
     port = PostgresChatReadPort(None)

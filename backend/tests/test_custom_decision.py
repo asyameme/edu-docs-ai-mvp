@@ -75,10 +75,7 @@ def test_custom_changes_use_the_first_variant_as_template():
     assert changes[0]["field_path"] == "/indicators/3/text"
 
 
-def test_custom_changes_are_limited_to_formulation_rules():
-    with pytest.raises(DomainError, match="только для правил формулировок"):
-        custom_decision_changes(DETAILS, "Свой код", rule_code="R-01")
-
+def test_custom_competency_code_replaces_single_difference_in_both_lists():
     links = {
         "requires_decision": True,
         "variants": [
@@ -89,17 +86,107 @@ def test_custom_changes_are_limited_to_formulation_rules():
                     {
                         "op": "set_competency_links",
                         "document_id": str(uuid4()),
-                        "collection": "disciplines",
+                        "collection": "curriculum_items",
                         "record_index": 0,
-                        "expected_codes": ["ОПК-1"],
-                        "codes": ["ОПК-2"],
+                        "expected_codes": ["ОПК-1", "ПКП-ППК-ДА1"],
+                        "codes": ["ОПК-1", "ПКП-УНК-03"],
+                    }
+                ],
+            },
+            {
+                "id": str(uuid4()),
+                "label": "Список из РПД",
+                "changes": [
+                    {
+                        "op": "set_competency_links",
+                        "document_id": str(uuid4()),
+                        "collection": "disciplines",
+                        "record_index": 1,
+                        "expected_codes": ["ОПК-1", "ПКП-УНК-03"],
+                        "codes": ["ОПК-1", "ПКП-ППК-ДА1"],
                     }
                 ],
             }
         ],
     }
+    changes = custom_decision_changes(links, "ПКП-ППК-ДА2", rule_code="R-01-graph")
+
+    assert [change["codes"] for change in changes] == [
+        ["ОПК-1", "ПКП-ППК-ДА2"],
+        ["ОПК-1", "ПКП-ППК-ДА2"],
+    ]
+    assert [change["expected_codes"] for change in changes] == [
+        ["ОПК-1", "ПКП-ППК-ДА1"],
+        ["ОПК-1", "ПКП-УНК-03"],
+    ]
+
+
+def test_custom_competency_code_adds_extra_code_to_other_list():
+    links = {
+        "variants": [
+            {
+                "label": "Список из учебного плана",
+                "changes": [{
+                    "op": "set_competency_links", "document_id": str(uuid4()),
+                    "collection": "curriculum_items", "record_index": 0,
+                    "expected_codes": ["ОПК-1", "ПКП-ППК-ДА1"],
+                    "codes": ["ОПК-1"],
+                }],
+            },
+            {
+                "label": "Список из РПД",
+                "changes": [{
+                    "op": "set_competency_links", "document_id": str(uuid4()),
+                    "collection": "disciplines", "record_index": 0,
+                    "expected_codes": ["ОПК-1"], "codes": ["ОПК-1", "ПКП-ППК-ДА1"],
+                }],
+            },
+        ],
+    }
+    changes = custom_decision_changes(links, "ПКП-ППК-ДА2", rule_code="R-01-graph")
+
+    assert [change["codes"] for change in changes] == [
+        ["ОПК-1", "ПКП-ППК-ДА2"],
+        ["ОПК-1", "ПКП-ППК-ДА2"],
+    ]
+
+
+def test_custom_competency_code_requires_one_difference_and_one_target_per_source():
+    links = {
+        "variants": [
+            {
+                "label": "Список из учебного плана",
+                "changes": [{
+                    "op": "set_competency_links", "document_id": str(uuid4()),
+                    "collection": "curriculum_items", "record_index": 0,
+                    "expected_codes": ["ОПК-1", "ПКП-1", "ПКП-2"], "codes": ["ОПК-1"],
+                }],
+            },
+            {
+                "label": "Список из РПД",
+                "changes": [{
+                    "op": "set_competency_links", "document_id": str(uuid4()),
+                    "collection": "disciplines", "record_index": 0,
+                    "expected_codes": ["ОПК-1", "ПКП-3"], "codes": ["ОПК-1"],
+                }],
+            },
+        ],
+    }
+    with pytest.raises(DomainError, match="отличается не больше одного кода"):
+        custom_decision_changes(links, "ПКП-1", rule_code="R-01-graph")
+    with pytest.raises(DomainError, match="без пробелов"):
+        custom_decision_changes(links, "ПКП 1", rule_code="R-01-graph")
+
+
+def test_custom_changes_remain_limited_for_other_rules():
+    links = {
+        "variants": [{"changes": [{"op": "set_competency_links"}]}],
+    }
     with pytest.raises(DomainError, match="только для замены текста"):
         custom_decision_changes(links, "Свой текст", rule_code="R-08-semantic")
+
+    with pytest.raises(DomainError, match="только для правил формулировок"):
+        custom_decision_changes(DETAILS, "Свой код", rule_code="R-04")
 
     with pytest.raises(DomainError, match="нет шаблона полей"):
         custom_decision_changes({"variants": []}, "Свой текст", rule_code="R-08-semantic")

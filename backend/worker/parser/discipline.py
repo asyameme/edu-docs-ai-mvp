@@ -3,6 +3,13 @@
 import re
 from collections import Counter, defaultdict
 
+from backend.contracts.document_v2.models import (
+    CurriculumWorkloadCell,
+    Discipline,
+    ParseIssue,
+    SemesterWorkload,
+    SourceRef,
+)
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -13,12 +20,6 @@ from .common import (
     paragraph_indices,
     parse_workload_number,
     read_section,
-)
-from backend.contracts.document_v2.models import (
-    Discipline,
-    ParseIssue,
-    SemesterWorkload,
-    SourceRef,
 )
 
 
@@ -518,6 +519,42 @@ def select_workload_variant(
     return selected, chosen, issues
 
 
+CANONICAL_HOURS = {
+    text.replace(" ", ""): text
+    for text in (
+        "лекции",
+        "семинары",
+        "консультации",
+        "практические занятия",
+        "лабораторные работы",
+        "контрольные работы",
+        "коллоквиумы",
+        "текущий контроль",
+        "промежуточная аттестация",
+        "итоговая аттестация",
+        "под руководством преподавателя",
+        "в присутствии преподавателя",
+        "сам.раб. с использованием методических материалов",
+        "текущий контроль (сам.раб.)",
+        "промежуточная аттестация (сам.раб.)",
+        "итоговая аттестация (сам.раб.)",
+        "в т. ч. с использованием учебно-методич. материалов",
+    )
+}
+
+
+def workload_hour_label(item):
+    key = normalize(item["label"]).replace("ё", "е")
+    key = re.sub(r"сам\.\s*раб\.", "сам.раб.", key)
+    label = CANONICAL_HOURS.get(key.replace(" ", ""))
+    group = normalize(item["group"])
+    if label and group.startswith("самостоятельная работа") and (
+        "сам.раб." not in label and "самостоятельн" not in label
+    ):
+        label += " (сам.раб.)"
+    return label
+
+
 def build_discipline(
     document,
     file_name,
@@ -632,30 +669,9 @@ def build_discipline(
     first_ref = selected[0]["source_ref"]
     primary_ref = first_ref.model_copy(update={"col": None})
 
-    canonical_hours = {
-        text.replace(" ", ""): text
-        for text in (
-            "лекции",
-            "семинары",
-            "консультации",
-            "практические занятия",
-            "лабораторные работы",
-            "контрольные работы",
-            "коллоквиумы",
-            "текущий контроль",
-            "промежуточная аттестация",
-            "итоговая аттестация",
-            "под руководством преподавателя",
-            "в присутствии преподавателя",
-            "сам.раб. с использованием методических материалов",
-            "текущий контроль (сам.раб.)",
-            "промежуточная аттестация (сам.раб.)",
-            "итоговая аттестация (сам.раб.)",
-            "в т. ч. с использованием учебно-методич. материалов",
-        )
-    }
-
     hours_by_kind = {}
+    workload_cells = {}
+    kind_cell_rows = set()
     credits = 0
     credit_found = False
     declared_hours = []
@@ -693,44 +709,23 @@ def build_discipline(
             )
             return None, [], issues
 
-        key = normalize(item["label"]).replace("\u0451", "е")
-        key = re.sub(r"сам\.\s*раб\.", "сам.раб.", key)
-        group = normalize(item["group"])
-
-        if item["kind"] == "hours":
-            canonical = canonical_hours.get(
-                key.replace(" ", "")
-            )
-
-            if canonical is None:
+        key = item["kind"]
+        if key == "hours":
+            key = workload_hour_label(item)
+            if key is None:
                 problem(
                     f"Колонка {item['label']!r} не входит "
                     "в правила суммирования часов",
                     ref,
                 )
                 return None, [], issues
-
-            key = canonical
-
-            if not group.startswith((
+            if not normalize(item["group"]).startswith((
                 "контактная работа",
                 "аудиторная работа",
                 "самостоятельная работа",
             )):
-                problem(
-                    "Неизвестная группа часов в шапке",
-                    ref,
-                )
+                problem("Неизвестная группа часов в шапке", ref)
                 return None, [], issues
-
-            if group.startswith("самостоятельная работа") and (
-                "сам.раб." not in key
-                and "самостоятельн" not in key
-            ):
-                key += " (сам.раб.)"
-
-        else:
-            key = item["kind"]
 
         scope = (
             ("итого",)
@@ -761,6 +756,11 @@ def build_discipline(
             hours_by_kind[key] = (
                 hours_by_kind.get(key, 0) + number
             )
+            if key not in workload_cells:
+                workload_cells[key] = CurriculumWorkloadCell(
+                    hours=number, text=str(item["raw"]), source_ref=ref,
+                )
+            kind_cell_rows.add((ref.table, ref.row))
 
     if not credit_found or credits < 1 or not hours_by_kind:
         problem(
@@ -806,6 +806,11 @@ def build_discipline(
             source_ref=primary_ref,
         ))
 
+    # Координаты видов достоверны, только когда все они из одной строки
+    # таблицы (итоговой или единственной); при разноске по семестрам
+    # суммарное значение вида нельзя приписать одной ячейке.
+    workload = workload_cells if len(kind_cell_rows) <= 1 else None
+
     forms, form_issues = extract_control_forms(
         document,
         file_name,
@@ -828,6 +833,7 @@ def build_discipline(
         semesters=sorted(semesters),
         credit_units=credits,
         hours_total=hours_total,
+        workload_cells=workload or None,
         hours_by_kind=hours_by_kind,
         control_forms=forms,
         source_ref=primary_ref.model_copy(update={

@@ -617,9 +617,36 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
       const decision = issue.decision;
       const knownVariant = decision && issue.variants.some((variant) => variant.id === decision.variant_id);
-      const customDecision = decision && !knownVariant
-        ? (decision.changes ?? []).map((change) => change.value).find((value) => typeof value === "string" && value.trim())
-        : undefined;
+      let customDecision: string | undefined;
+      if (decision && !knownVariant) {
+        customDecision = decision.custom_value;
+        if (!customDecision && findingRuleGroup(issue.rule_code) === "R-01") {
+          const sourceLists = new Map<string, { collection: string; expected: string[] }>();
+          for (const variant of issue.variants) {
+            for (const change of variant.changes) {
+              if (change.op !== "set_competency_links") continue;
+              const key = `${change.document_id}:${change.collection}:${change.record_index}`;
+              sourceLists.set(key, { collection: change.collection, expected: change.expected_codes });
+            }
+          }
+          const originalLists = Array.from(sourceLists.values());
+          const planCodes = originalLists.find((list) => list.collection === "curriculum_items")?.expected;
+          const documentCodes = originalLists.find((list) => list.collection === "disciplines")?.expected;
+          const selectedLists = decision.changes?.filter((change) => change.op === "set_competency_links") ?? [];
+          const selectedPlan = selectedLists.find((change) => change.collection === "curriculum_items")?.codes;
+          const selectedDocument = selectedLists.find((change) => change.collection === "disciplines")?.codes;
+          if (planCodes && documentCodes && selectedPlan && selectedDocument) {
+            const common = new Set(planCodes.filter((code) => documentCodes.includes(code)));
+            customDecision = selectedPlan.find((code) => selectedDocument.includes(code) && !common.has(code));
+          }
+        }
+        if (!customDecision) {
+          const value = (decision.changes ?? [])
+            .map((change) => change.op === "set_document_value" ? change.value : undefined)
+            .find((item) => typeof item === "string" && item.trim());
+          if (typeof value === "string") customDecision = value;
+        }
+      }
 
       return {
         id: issue.id,
@@ -627,7 +654,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
         sharedIndicatorText: issue.type === "indicator_shared_text",
         title: issue.message,
         description: choiceSummary || `Проверьте расхождение: ${ruleDisplayLabel(issue.rule_code).toLocaleLowerCase("ru")}.`,
-        selectedChoiceId: decision?.variant_id,
+        selectedChoiceId: decision ? (knownVariant ? decision.variant_id : "__custom__") : undefined,
         choices,
         customDecision: typeof customDecision === "string" ? customDecision : null,
       };
@@ -1072,6 +1099,7 @@ function App() {
   const [appliedChoices, setAppliedChoices] = useState<Record<string, string>>(chatPreviewChoices);
   const [savingFindingId, setSavingFindingId] = useState<string | null>(null);
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
+  const [choiceErrors, setChoiceErrors] = useState<Record<string, string>>({});
   const [findingFilter, setFindingFilter] = useState<FindingFilter>("all");
   const [findingStatusFilter, setFindingStatusFilter] = useState<FindingStatusFilter>("all");
   const [rpdDocumentId, setRpdDocumentId] = useState("");
@@ -1102,13 +1130,21 @@ function App() {
   const unresolvedCount = parsedProgram?.findings.filter((finding) => {
     const appliedChoice = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
     const selectedChoice = selectedChoices[finding.id];
+    if (appliedChoice === "__custom__") {
+      const currentText = (customValues[finding.id] ?? finding.customDecision ?? "").trim();
+      return (selectedChoice !== undefined && selectedChoice !== appliedChoice)
+        || !finding.customDecision
+        || currentText !== finding.customDecision.trim();
+    }
     return !appliedChoice || (selectedChoice !== undefined && selectedChoice !== appliedChoice);
   }).length ?? 0;
   const visibleFindings = (parsedProgram?.findings ?? []).filter((finding) => {
     if (findingFilter !== "all" && findingRuleGroup(finding.ruleCode) !== findingFilter) return false;
     const savedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
     const draftChoiceId = selectedChoices[finding.id];
-    const saved = Boolean(savedChoiceId && (!draftChoiceId || draftChoiceId === savedChoiceId));
+    const customTextMatches = savedChoiceId !== "__custom__"
+      || (customValues[finding.id] ?? finding.customDecision ?? "").trim() === finding.customDecision?.trim();
+    const saved = Boolean(savedChoiceId && (!draftChoiceId || draftChoiceId === savedChoiceId) && customTextMatches);
     return findingStatusFilter === "all" || (findingStatusFilter === "saved" ? saved : !saved);
   });
   const visibleIssues = (parsedProgram?.issues ?? []).filter((issue) =>
@@ -1367,22 +1403,54 @@ function App() {
   function chooseFindingChoice(findingId: string, choiceId: string) {
     // Выбор только меняет черновик. Отправка на сервер — отдельное действие.
     setSelectedChoices((current) => ({ ...current, [findingId]: choiceId }));
+    setChoiceErrors((current) => {
+      const next = { ...current };
+      delete next[findingId];
+      return next;
+    });
   }
 
-  function saveFindingChoice(findingId: string, choiceId: string) {
+  function cancelFindingChoice(findingId: string, appliedChoiceId: string | undefined) {
+    setSelectedChoices((current) => {
+      const next = { ...current };
+      if (appliedChoiceId) next[findingId] = appliedChoiceId;
+      else delete next[findingId];
+      return next;
+    });
+    const savedCustomValue = parsedProgram?.findings.find((finding) => finding.id === findingId)?.customDecision;
+    setCustomValues((current) => {
+      const next = { ...current };
+      if (savedCustomValue) next[findingId] = savedCustomValue;
+      else delete next[findingId];
+      return next;
+    });
+    setChoiceErrors((current) => {
+      const next = { ...current };
+      delete next[findingId];
+      return next;
+    });
+  }
+
+  async function saveFindingChoice(findingId: string, choiceId: string) {
     if (!choiceId || choiceId === "__reject__") return;
     if (choiceId === "__custom__") {
       const finding = parsedProgram?.findings.find((item) => item.id === findingId);
-      const text = (customValues[findingId] ?? "").trim();
+      const text = (customValues[findingId] ?? finding?.customDecision ?? "").trim();
       const group = finding ? findingRuleGroup(finding.ruleCode) : "other";
-      if (!finding || !text || (group !== "R-07" && group !== "R-08")) return;
+      if (!finding || !text || !["R-01", "R-07", "R-08"].includes(group)) return;
       if (isDemoMode) {
         // Только локальное поведение демонстрационного экрана.
         setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
         return;
       }
+      setChoiceErrors((current) => {
+        const next = { ...current };
+        delete next[findingId];
+        return next;
+      });
       setSavingFindingId(findingId);
-      void processing.decideCustom(findingId, text);
+      const error = await processing.decideCustom(findingId, text);
+      if (error) setChoiceErrors((current) => ({ ...current, [findingId]: error }));
       return;
     }
     if (isDemoMode) {
@@ -2086,7 +2154,15 @@ function App() {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
                         const selectedChoiceId = selectedChoices[finding.id] ?? appliedChoiceId ?? "";
-                        const isResolved = Boolean(appliedChoice && selectedChoiceId === appliedChoice.id);
+                        const customText = customValues[finding.id] ?? finding.customDecision ?? "";
+                        const savedCustomMatches = Boolean(
+                          !isDemoMode && appliedChoiceId === "__custom__" && finding.customDecision &&
+                          customText.trim() === finding.customDecision.trim(),
+                        );
+                        const isResolved = Boolean(
+                          (appliedChoice && selectedChoiceId === appliedChoice.id) ||
+                          (savedCustomMatches && selectedChoiceId === "__custom__"),
+                        );
                         const ruleGroup = findingRuleGroup(finding.ruleCode);
                         const isChoiceFinding = ruleGroup === "R-01" || ruleGroup === "R-07" || ruleGroup === "R-08";
                         const allowsCustomChoice = !finding.sharedIndicatorText
@@ -2097,7 +2173,6 @@ function App() {
                         const isReject = selectedChoiceId === "__reject__";
                         const isUnsaved = Boolean(selectedChoiceId && !isResolved);
                         const isSavingChoice = processing.reviewBusy && savingFindingId === finding.id;
-                        const customText = customValues[finding.id] ?? "";
 
                         return (
                           <details className={`variant-accordion-item${isResolved ? " is-resolved" : ""}`} key={finding.id} name="validator-variant-findings">
@@ -2203,7 +2278,14 @@ function App() {
                                   maxLength={4000}
                                   disabled={isConfirmed || processing.reviewBusy}
                                   placeholder={finding.ruleCode === "R-01" ? "Введите код" : "Введите формулировку"}
-                                  onChange={(event) => setCustomValues((current) => ({ ...current, [finding.id]: event.target.value }))}
+                                  onChange={(event) => {
+                                    setCustomValues((current) => ({ ...current, [finding.id]: event.target.value }));
+                                    setChoiceErrors((current) => {
+                                      const next = { ...current };
+                                      delete next[finding.id];
+                                      return next;
+                                    });
+                                  }}
                                 />
                               </div>
                             )}
@@ -2215,26 +2297,25 @@ function App() {
                                   disabled={!isUnsaved || isReject || (isCustom && !customText.trim()) || processing.reviewBusy}
                                   onClick={() => saveFindingChoice(finding.id, selectedChoiceId)}
                                 >
-                                  {processing.reviewBusy ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
+                                  {isSavingChoice ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
                                 </button>
                                 {isUnsaved && (
                                   <button className="competency-cancel-button" type="button"
                                     disabled={processing.reviewBusy}
-                                    onClick={() => setSelectedChoices((current) => {
-                                      const next = { ...current };
-                                      if (appliedChoiceId) next[finding.id] = appliedChoiceId;
-                                      else delete next[finding.id];
-                                      return next;
-                                    })}
+                                    onClick={() => cancelFindingChoice(finding.id, appliedChoiceId)}
                                   >Отменить выбор</button>
                                 )}
                                 {isResolved && <span className="competency-saved-note">Выбор сохранён в версии</span>}
+                                {choiceErrors[finding.id] && (
+                                  <p className="competency-api-note" role="alert">Не удалось сохранить выбор: {choiceErrors[finding.id]}</p>
+                                )}
                               </div>
                             )}
                             {finding.ruleCode === "R-01" && (isCustom || isReject) && (
                               <p className="competency-api-note" role="status">
-                                Сохранение {isReject ? "отклонения сопоставления" : "собственного кода"} пока недоступно:
-                                API принимает только готовый вариант. Значение остаётся черновиком.
+                                {isReject
+                                  ? "Отклонение сопоставления не меняет списки компетенций и не сохраняется как принятое решение."
+                                  : "Введите один код: он заменит единственный отличающийся код в обоих списках. При нескольких различиях выберите готовый вариант."}
                               </p>
                             )}
                             </div>

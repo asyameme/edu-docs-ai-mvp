@@ -14,6 +14,7 @@ from worker.agent.proposal_apply import (
     generation_inputs,
     normalize_field_path,
     plan_approved_changes,
+    recalculate_calculated_totals,
     touched_document_ids,
 )
 from worker.generation import (
@@ -296,3 +297,63 @@ def test_stale_evidence_against_document_bytes(snapshot):
     ]
     with pytest.raises(GenerationMappingError, match="устарело"):
         build_generation_documents(changes, links, refs, originals)
+
+
+def test_recalculate_calculated_totals_updates_stale_total():
+    """Сервер дополняет правки видов пересчитанным итогом: без арифметики модели."""
+    from app.domain import SnapshotV2
+
+    entity, row_ref, kind_ref, document_id = uuid4(), uuid4(), uuid4(), uuid4()
+    snapshot = SnapshotV2.model_validate({
+        "document_ids": [document_id],
+        "entities": [{
+            "id": entity,
+            "kind": "discipline",
+            "attributes": {
+                "name": "Глубокое обучение",
+                "hours_total": 154,
+                "hours_by_kind": {"лекции": 28, "практические занятия": 116},
+            },
+            "source_ref_ids": [row_ref],
+        }],
+        "source_refs": [
+            {"id": row_ref, "document_id": document_id, "locator": '{"row":8}'},
+            {"id": kind_ref, "document_id": document_id, "locator": '{"row":8,"col":3}'},
+        ],
+        "source_links": [
+            {"id": uuid4(), "target_kind": "entity", "target_id": entity,
+             "field_path": "/attributes/hours_total", "source_ref_id": row_ref,
+             "observed_value": {"value": 154, "calculated": True}},
+            {"id": uuid4(), "target_kind": "entity", "target_id": entity,
+             "field_path": "/attributes/hours_by_kind/практические занятия",
+             "source_ref_id": kind_ref, "observed_value": {"value": 126}},
+        ],
+    })
+    changes = [{"op": "set_attribute", "target_kind": "entity", "target_id": str(entity),
+                "field_path": "/attributes/hours_by_kind/практические занятия", "value": 116}]
+
+    extra = recalculate_calculated_totals(snapshot, changes)
+
+    assert extra == [{"op": "set_attribute", "target_kind": "entity", "target_id": str(entity),
+                      "field_path": "/attributes/hours_total", "value": 144}]
+    assert snapshot.entities[0].attributes["hours_total"] == 144
+
+
+def test_recalculate_skips_entities_without_calculated_total():
+    from app.domain import SnapshotV2
+
+    entity = uuid4()
+    snapshot = SnapshotV2.model_validate({
+        "document_ids": [uuid4()],
+        "entities": [{"id": entity, "kind": "discipline",
+                      "attributes": {"name": "Алгебра", "hours_total": 72,
+                                     "hours_by_kind": {"лекции": 72}},
+                      "source_ref_ids": []}],
+        "source_refs": [],
+        "source_links": [],
+    })
+    changes = [{"op": "set_attribute", "target_kind": "entity", "target_id": str(entity),
+                "field_path": "/attributes/hours_by_kind/лекции", "value": 70}]
+
+    assert recalculate_calculated_totals(snapshot, changes) == []
+    assert snapshot.entities[0].attributes["hours_total"] == 72

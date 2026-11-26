@@ -1,9 +1,37 @@
 """Проверки передачи настроенной модели из backend в Temporal-агента."""
 
+import asyncio
+
+from openai import AsyncOpenAI
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    UserPromptPart,
+)
+from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.providers.openai import OpenAIProvider
 from temporalio.common import RetryPolicy
 
 import app.chat_model as chat_model
 import worker.agent.chat_agent as ml_chat_agent
+
+
+def test_qwen_combines_retry_system_note_with_the_leading_system_message():
+    model = chat_model.QwenChatModel(
+        "qwen3.6-35b-32k", provider=OpenAIProvider(openai_client=AsyncOpenAI(api_key="test")),
+    )
+    messages = [
+        ModelRequest(parts=[SystemPromptPart("Инструкция"), UserPromptPart("Проверь часы")]),
+        ModelResponse(parts=[TextPart("Проверяю")]),
+        ModelRequest(parts=[SystemPromptPart("Недоверенные данные"), UserPromptPart("Повтори")]),
+    ]
+
+    mapped = asyncio.run(model._map_messages(messages, ModelRequestParameters()))
+
+    assert [message["role"] for message in mapped] == ["system", "user", "assistant", "user"]
+    assert mapped[0]["content"] == "Инструкция\n\nНедоверенные данные"
 
 
 def test_backend_registers_instrumented_models_underlying_instance(monkeypatch):
@@ -54,8 +82,8 @@ def test_ml_factory_registers_the_backend_model_alias(monkeypatch):
 
     assert agent is not None
     assert captured["model"] is model
-    capability = captured["kwargs"]["capabilities"][0]
-    assert isinstance(capability, FakeDurability)
+    capability = next(item for item in captured["kwargs"]["capabilities"]
+                      if isinstance(item, FakeDurability))
     assert capability.models is model_registry
     retry_policy = capability.model_activity_config["retry_policy"]
     assert isinstance(retry_policy, RetryPolicy)

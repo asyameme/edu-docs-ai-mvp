@@ -434,6 +434,77 @@ def test_recheck_projects_arbitrary_attribute_changes():
     assert projected[0]["parsed"]["competencies"][0]["formulation"] == "Новая формулировка"
 
 
+def test_recheck_updates_workload_cells_and_recalculates_total_for_disciplines():
+    document_id, entity_id = uuid4(), uuid4()
+    row_ref, lecture_ref, practice_ref, total_ref = [uuid4() for _ in range(4)]
+    kinds = {"лекции": 28, "практические занятия": 126}
+    new_kinds = {"лекции": 24, "практические занятия": 120}
+    parsed = payload("RPD")
+    source = {"file": "Глубокое обучение.docx"}
+    parsed["disciplines"] = [{
+        "name": "Глубокое обучение", "semesters": [5],
+        "credit_units": 4, "hours_total": 154,
+        "hours_by_kind": dict(kinds),
+        "workload_cells": {
+            "лекции": {"hours": 28, "text": "28",
+                       "source_ref": {**source, "row": 8, "col": 2}},
+            "практические занятия": {"hours": 126, "text": "126",
+                                     "source_ref": {**source, "row": 8, "col": 3}},
+        },
+        "source_ref": {**source, "row": 8},
+    }]
+    document = {"document_id": str(document_id), "parsed": parsed}
+
+    def link(field_path, ref_id):
+        return {"id": uuid4(), "target_kind": "entity", "target_id": str(entity_id),
+                "field_path": field_path, "source_ref_id": ref_id,
+                "observed_value": {"value": None}}
+
+    snapshot = SnapshotV2.model_validate({
+        "document_ids": [document_id],
+        "entities": [{"id": entity_id, "kind": "discipline",
+                      "attributes": {"name": "Глубокое обучение", "hours_total": 144,
+                                     "hours_by_kind": dict(new_kinds)},
+                      "source_ref_ids": [row_ref]}],
+        "source_refs": [
+            {"id": row_ref, "document_id": document_id,
+             "locator": '{"row":8,"file":"Глубокое обучение.docx"}'},
+            {"id": lecture_ref, "document_id": document_id,
+             "locator": '{"row":8,"col":2,"file":"Глубокое обучение.docx"}'},
+            {"id": practice_ref, "document_id": document_id,
+             "locator": '{"row":8,"col":3,"file":"Глубокое обучение.docx"}'},
+            {"id": total_ref, "document_id": document_id,
+             "locator": '{"row":8,"file":"Глубокое обучение.docx"}'},
+        ],
+        "source_links": [
+            {**link("/attributes/hours_by_kind/лекции", lecture_ref), "id": uuid4()},
+            {**link("/attributes/hours_by_kind/практические занятия", practice_ref), "id": uuid4()},
+            {**link("/attributes/hours_total", total_ref), "id": uuid4()},
+        ],
+        "review": {
+            "review_id": uuid4(), "import_job_id": uuid4(), "analysis_version_id": uuid4(),
+            "graph_ready": True, "decisions": [{
+                "conflict_id": uuid4(), "variant_id": uuid4(), "check_job_id": uuid4(),
+                "changes": [
+                    {"op": "set_attribute", "target_kind": "entity", "target_id": str(entity_id),
+                     "field_path": "/attributes/hours_by_kind/лекции", "value": 24},
+                    {"op": "set_attribute", "target_kind": "entity", "target_id": str(entity_id),
+                     "field_path": "/attributes/hours_by_kind/практические занятия", "value": 120},
+                    {"op": "set_attribute", "target_kind": "entity", "target_id": str(entity_id),
+                     "field_path": "/attributes/hours_total", "value": 144},
+                ],
+                "decided_at": "2026-11-26T00:00:00Z",
+            }],
+        },
+    })
+
+    projected = project_snapshot_documents([document], snapshot)
+    discipline = projected[0]["parsed"]["disciplines"][0]
+    assert discipline["hours_by_kind"] == new_kinds
+    assert discipline["hours_total"] == 144
+    assert {name: cell["hours"] for name, cell in discipline["workload_cells"].items()} == new_kinds
+
+
 def test_recheck_rejects_attribute_value_that_breaks_document_contract():
     document_id, entity_id, ref_id = [uuid4() for _ in range(3)]
     parsed = {
