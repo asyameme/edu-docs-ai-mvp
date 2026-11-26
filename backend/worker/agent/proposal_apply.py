@@ -15,10 +15,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import JsonValue
@@ -330,7 +330,9 @@ def workload_targets(proposal: ChangeProposal) -> set[UUID]:
     return targets
 
 
-def recalculate_calculated_totals(snapshot: SnapshotV2, changes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def recalculate_calculated_totals(
+    snapshot: SnapshotV2, changes: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
     """Пересчитать рассчитанные итоги после правок видов нагрузки.
 
     У сущностей, чей итог помечен вычисляемым (observed_value.calculated у
