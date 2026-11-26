@@ -796,9 +796,9 @@ def evaluate_competency_coverage(
                 if (
                     not isinstance(max_requests, int)
                     or isinstance(max_requests, bool)
-                    or not 1 <= max_requests <= 5
+                    or not 1 <= max_requests <= 8
                 ):
-                    max_requests = 5
+                    max_requests = 8
                 response, citable[batch[0]["group_id"]] = _evaluate_large_group(
                     batch[0], llm_config, evaluator,
                     max_requests=max_requests if competency_code is not None else None,

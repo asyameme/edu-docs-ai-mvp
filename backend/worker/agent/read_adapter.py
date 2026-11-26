@@ -204,7 +204,7 @@ class PostgresChatReadPort:
         ]
         bounded_relations = [_bounded_relation(r) for r in relations[:8]]
         workload = []
-        if entity.kind == "curriculum_item" and "hours_by_kind" in entity.attributes:
+        if entity.kind in {"curriculum_item", "discipline"} and "hours_by_kind" in entity.attributes:
             for link in snapshot.source_links:
                 if (
                     link.target_id == entity_id
