@@ -65,13 +65,14 @@ def copy_sources(snapshot, version_id):
 
 
 def custom_decision_changes(details, custom_value, *, rule_code):
-    """Изменения своего варианта: пути и исходные значения берутся из шаблона.
+    """Собирает безопасные изменения для собственного ответа на вопрос сверки.
 
-    Шаблоном служит первый готовый вариант вопроса: у всех вариантов правила
-    совпадает набор полей документов и исходные значения, различается только
-    новое значение. Свой вариант пользователя подставляется вместо него.
+    Для текстовых правил шаблоном служит первый готовый вариант. R-01 отдельно
+    выравнивает списки компетенций по введённому пользователем коду.
     """
 
+    if rule_code.startswith("R-01"):
+        return _custom_competency_link_changes(details, custom_value)
     if not rule_code.startswith(("R-07", "R-08")):
         raise DomainError(
             422, "Свой вариант доступен только для правил формулировок (R-07, R-08)"
@@ -85,6 +86,71 @@ def custom_decision_changes(details, custom_value, *, rule_code):
             422, "Свой вариант допустим только для замены текста в документах"
         )
     return [{**change, "value": custom_value} for change in template]
+
+
+def _custom_competency_link_changes(details, custom_value):
+    """Replace one differing competency code in both matched source lists."""
+    code = custom_value.strip()
+    if not code or len(code) > 200 or re.search(r"[\s,;]", code):
+        raise DomainError(422, "Введите один код компетенции без пробелов и разделителей")
+
+    source_variants = [
+        variant for variant in details.get("variants", [])
+        if str(variant.get("label", "")).startswith("Список из ")
+    ]
+    targets = {}
+    for variant in source_variants:
+        changes = variant.get("changes") or []
+        if len(changes) != 1 or changes[0].get("op") != "set_competency_links":
+            raise DomainError(422, "Не удалось однозначно определить списки для собственного кода")
+        change = changes[0]
+        key = (
+            str(change.get("document_id")),
+            change.get("collection"),
+            change.get("record_index"),
+        )
+        targets.setdefault(key, change)
+
+    plan_targets = [
+        change for change in targets.values()
+        if change.get("collection") == "curriculum_items"
+    ]
+    document_targets = [
+        change for change in targets.values()
+        if change.get("collection") == "disciplines"
+    ]
+    if len(plan_targets) != 1 or len(document_targets) != 1:
+        raise DomainError(
+            422,
+            "Свой код можно сохранить, когда найдено по одной соответствующей строке "
+            "учебного плана и РПД",
+        )
+
+    plan, document = plan_targets[0], document_targets[0]
+    plan_codes = set(plan.get("expected_codes") or [])
+    document_codes = set(document.get("expected_codes") or [])
+    common = plan_codes & document_codes
+    plan_only = plan_codes - document_codes
+    document_only = document_codes - plan_codes
+    if len(plan_only) > 1 or len(document_only) > 1 or not (plan_only or document_only):
+        raise DomainError(
+            422,
+            "Свой код можно сохранить автоматически, если в каждом списке отличается "
+            "не больше одного кода",
+        )
+    if code in common:
+        raise DomainError(
+            422,
+            "Указанный код уже есть в обоих списках; введите код вместо отличающегося",
+        )
+
+    def align(change, own_differences):
+        aligned = [code if item in own_differences else item for item in change["expected_codes"]]
+        if not own_differences:
+            aligned.append(code)
+        return {**change, "codes": aligned}
+
+    return [align(plan, plan_only), align(document, document_only)]
 
 
 def changes_in_base_sources(changes, source_snapshot, base_snapshot):

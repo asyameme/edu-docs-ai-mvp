@@ -165,7 +165,7 @@ def test_targeted_coverage_respects_five_request_budget(
     assert len(calls) == expected_requests
 
 
-def test_targeted_coverage_does_not_fan_out_past_five_requests():
+def test_targeted_coverage_does_not_fan_out_past_eight_requests():
     calls = []
 
     def evaluator(body, options):
@@ -173,14 +173,14 @@ def test_targeted_coverage_does_not_fan_out_past_five_requests():
         return {"summary": "Наблюдение", "evidence_ids": [body["evidence"][0]["id"]]}
 
     checks, findings = coverage.evaluate_competency_coverage(
-        _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(10)]),
+        _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(30)]),
         llm_config=CONFIG,
         evaluator=evaluator,
         competency_code=CODE,
     )
 
     assert checks == 1
-    assert len(calls) <= 5
+    assert len(calls) <= 8
     assert [finding["code"] for finding in findings] == [
         "competency_coverage_request_too_large"
     ]

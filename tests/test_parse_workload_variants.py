@@ -104,6 +104,91 @@ class TestWorkloadVariants(unittest.TestCase):
         self.assertEqual(output.disciplines[0].hours_total, 72)
         self.assertEqual(output.disciplines[0].semesters, [4])
 
+    def test_workload_cells_capture_kind_cells_of_one_row(self):
+        output = self.parse(working_program(
+            [("ОСНОВНАЯ ТРАЕКТОРИЯ Профиль ТОП-ИТ ПРО", 5, 28, 60, 20, 1)],
+            sequential=True,
+        ))
+        discipline = output.disciplines[0]
+        self.assertEqual(discipline.hours_total, 88)
+        cells = discipline.workload_cells
+        self.assertEqual(sorted(cells), ["лекции", "сам.раб. с использованием методических материалов"])
+        lectures = cells["лекции"]
+        self.assertEqual((lectures.hours, lectures.text), (28, "28"))
+        self.assertEqual(
+            (lectures.source_ref.table, lectures.source_ref.row, lectures.source_ref.col), (2, 5, 2),
+        )
+        independent = cells["сам.раб. с использованием методических материалов"]
+        self.assertEqual((independent.hours, independent.source_ref.col), (60, 3))
+
+    def test_workload_cells_absent_when_kinds_span_semester_rows(self):
+        output = self.parse(working_program(
+            (
+                ("ТРАЕКТОРИЯ 7 СЕМЕСТРА Профиль Стандарт", 7, 8, 28, 20, 1),
+                ("ТРАЕКТОРИЯ 8 СЕМЕСТРА Профиль Стандарт", 8, 10, 62, 40, 2),
+            ),
+            sequential=True,
+        ))
+        discipline = output.disciplines[0]
+        self.assertEqual(discipline.hours_total, 108)
+        self.assertIsNone(discipline.workload_cells)
+
+    def test_chat_aligns_only_the_inconsistent_cells_in_both_profiles(self):
+        from io import BytesIO
+        from uuid import uuid4
+
+        from app.curriculum_workload import with_editable_workload
+        from app.document_adapter import to_snapshot_v2
+        from worker.agent.contracts import ChangeProposal, RpdWorkloadAlignment
+        from worker.agent.proposal_apply import (
+            generation_inputs,
+            plan_approved_changes,
+            prepare_rpd_workload_alignment,
+        )
+        from worker.generation.docx_patch import patch_docx_bytes
+        from worker.generation.patches import plan_patches, resolve_planned_patches
+
+        profiles = (self.profiles[0], (*self.profiles[1][:2], *self.profiles[0][2:]))
+        source = working_program(profiles)
+        for row in (5, 9):
+            source.tables[1].cell(row, 1).text = "18"
+        output = self.parse(source)
+        stream = BytesIO()
+        source.save(stream)
+        original = stream.getvalue()
+        program_id, document_id = uuid4(), uuid4()
+        snapshot, _ = to_snapshot_v2(
+            program_id, [{"document_id": document_id, "output": output.model_dump(mode="json")}],
+            return_model=True,
+        )
+
+        def read_document(_program_id, _document_id):
+            return {"content": original, "original_name": "working.docx"}
+
+        proposal = prepare_rpd_workload_alignment(
+            snapshot, program_id, RpdWorkloadAlignment(
+                kind="rpd_workload_alignment", discipline_name=output.disciplines[0].name,
+                hours=36,
+            ), read_document,
+        )
+        self.assertIsInstance(proposal, ChangeProposal)
+        self.assertEqual(
+            [(change.field_path, change.expected_old_value, change.new_value)
+             for change in proposal.changes],
+            [("/attributes/hours_by_kind/лекции", 18, 8)] * 2,
+        )
+        hydrated = with_editable_workload(
+            snapshot, program_id, {change.target_id for change in proposal.changes}, read_document
+        )
+        changes = plan_approved_changes(hydrated, proposal)
+        planned = plan_patches(*generation_inputs(hydrated, changes))
+        resolved = resolve_planned_patches({str(document_id): original}, planned)
+        patched = patch_docx_bytes(original, resolved[str(document_id)])
+        self.assertEqual(len(planned[str(document_id)]), 2)
+        parsed = self.parse(Document(BytesIO(patched)))
+        self.assertEqual([(item.semesters, item.hours_total) for item in parsed.disciplines],
+                         [([3], 36), ([4], 36)])
+
     def test_invalid_profile_does_not_drop_the_other_profile(self):
         profiles = (self.profiles[0], (*self.profiles[1][:-1], "2,5"))
         output = self.parse(working_program(profiles))

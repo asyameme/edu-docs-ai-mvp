@@ -227,15 +227,24 @@ class ChatRepository:
             if any(str(item["id"]) not in source_ids for item in result.get("sources", [])):
                 raise DomainError(422, "Ответ содержит источник вне выбранной версии")
             result["sources"] = [sources[str(item["id"])] for item in result.get("sources", [])]
+        elif result.get("kind") == "rpd_workload_alignment":
+            from app.domain import SnapshotV2
+            from worker.agent.contracts import RpdWorkloadAlignment
+            from worker.agent.proposal_apply import prepare_rpd_workload_alignment
+
+            result = prepare_rpd_workload_alignment(
+                SnapshotV2.model_validate(snapshot), turn["program_id"],
+                RpdWorkloadAlignment.model_validate(result), Repository(self.pool).document_content,
+            ).model_dump(mode="json")
         elif result.get("kind") == "change_proposal":
-            from app.curriculum_workload import with_legacy_curriculum_workload
+            from app.curriculum_workload import with_editable_workload
             from app.domain import SnapshotV2
             from worker.agent.contracts import ChangeProposal
             from worker.agent.proposal_apply import workload_targets
 
             targets = workload_targets(ChangeProposal.model_validate(result))
             if targets:
-                editable = with_legacy_curriculum_workload(
+                editable = with_editable_workload(
                     SnapshotV2.model_validate(snapshot), turn["program_id"], targets,
                     Repository(self.pool).document_content,
                 )
