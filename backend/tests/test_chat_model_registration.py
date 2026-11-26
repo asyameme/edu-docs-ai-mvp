@@ -11,6 +11,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from temporalio.common import RetryPolicy
 
@@ -18,9 +19,10 @@ import app.chat_model as chat_model
 import worker.agent.chat_agent as ml_chat_agent
 
 
-def test_qwen_combines_retry_system_note_with_the_leading_system_message():
-    model = chat_model.QwenChatModel(
-        "qwen3.6-35b-32k", provider=OpenAIProvider(openai_client=AsyncOpenAI(api_key="test")),
+def test_qwen_profile_preserves_notes_without_mid_conversation_system_messages():
+    model = OpenAIChatModel(
+        "qwen3.6-35b-32k", profile=chat_model.chat_model_profile("qwen3.6-35b-32k"),
+        provider=OpenAIProvider(openai_client=AsyncOpenAI(api_key="test")),
     )
     messages = [
         ModelRequest(parts=[SystemPromptPart("Инструкция"), UserPromptPart("Проверь часы")]),
@@ -28,10 +30,19 @@ def test_qwen_combines_retry_system_note_with_the_leading_system_message():
         ModelRequest(parts=[SystemPromptPart("Недоверенные данные"), UserPromptPart("Повтори")]),
     ]
 
-    mapped = asyncio.run(model._map_messages(messages, ModelRequestParameters()))
+    parameters = ModelRequestParameters()
+    prepared = model.prepare_messages(messages, parameters)
+    mapped = asyncio.run(model._map_messages(prepared, parameters))
 
-    assert [message["role"] for message in mapped] == ["system", "user", "assistant", "user"]
-    assert mapped[0]["content"] == "Инструкция\n\nНедоверенные данные"
+    assert mapped[0]["role"] == "system"
+    assert all(message["role"] != "system" for message in mapped[1:])
+    assert "Инструкция" in str(mapped[0]["content"])
+    assert "Недоверенные данные" in str(mapped)
+    assert "Проверь часы" in str(mapped)
+    assert "Повтори" in str(mapped)
+    assert [message for message in mapped if message["role"] == "assistant"] == [
+        {"role": "assistant", "content": "Проверяю"},
+    ]
 
 
 def test_backend_registers_instrumented_models_underlying_instance(monkeypatch):

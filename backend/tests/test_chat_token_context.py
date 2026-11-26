@@ -147,9 +147,10 @@ def test_qwen_retry_does_not_insert_system_messages_after_user_history():
     import httpx
     from openai import AsyncOpenAI
     from pydantic_ai import Conversation
+    from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.openai import OpenAIProvider
 
-    from app.chat_model import QwenChatModel, chat_model_profile
+    from app.chat_model import chat_model_profile
     from worker.agent.chat_agent import create_chat_agent
     from worker.agent.contracts import ChatDeps
 
@@ -175,7 +176,7 @@ def test_qwen_retry_does_not_insert_system_messages_after_user_history():
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            model = QwenChatModel("qwen-test", profile=chat_model_profile("qwen-test"),
+            model = OpenAIChatModel("qwen-test", profile=chat_model_profile("qwen-test"),
                 provider=OpenAIProvider(openai_client=AsyncOpenAI(
                     api_key="test", base_url="https://example.invalid/v1", http_client=http)))
             result = await create_chat_agent(model).run("Продолжаем",
