@@ -1122,7 +1122,8 @@ export function useImportJob() {
       });
       setProgram((latest) => latest?.id === current.programId
         ? { ...latest, current_version_id: restored.id } : latest);
-      setReviewDetails(null);
+      // Сохраняем уже показанный граф и чат, пока читаем сводку восстановленной версии.
+      // Иначе экран кратко показывает пустой чат и неверный номер версии по умолчанию.
       setCheckJob(null);
       setGraphBuildJob(null);
       setNotice("Изменения отменены. Восстановлена предыдущая версия программы.");

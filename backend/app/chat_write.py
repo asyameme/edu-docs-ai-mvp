@@ -203,10 +203,6 @@ class ChatWriteRepository:
             ).fetchone())
             version = previous_version(cur, program_id, key, fingerprint)
             if version is not None:
-                cur.execute(
-                    "UPDATE chat_sessions SET version_id=%s,updated_at=now() WHERE id=%s",
-                    (version["id"], session_id),
-                )
                 return version
             if current != body.expected_version_id or session["version_id"] != current:
                 raise DomainError(409, "Версия изменилась; обновите чат перед отменой")

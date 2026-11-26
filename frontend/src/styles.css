@@ -2826,6 +2826,21 @@ h1 {
   line-height: 1.6;
 }
 
+.plan-card li > strong,
+.plan-card li > span,
+.plan-card li > small {
+  display: block;
+}
+
+.plan-card li > span,
+.plan-card li > small {
+  margin-top: 3px;
+}
+
+.plan-card li > small {
+  line-height: 1.45;
+}
+
 .entity-source,
 .message-source {
   color: #315a91;

@@ -2,15 +2,13 @@
 
 import os
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
-from app.chat_api import ProposalAccept
 from app.chat_repository import ChatRepository
-from app.chat_write import ChatWriteRepository
 from app.domain import Entity, ReviewDecision, ReviewState, SnapshotV2
 from app.main import app
 from app.repository import Repository
@@ -22,7 +20,7 @@ pytestmark = [
 
 
 def test_undo_chat_proposal_restores_version_and_keeps_session_ready():
-    with TestClient(app):
+    with TestClient(app) as http:
         pool = app.state.resources.postgres
         programs = Repository(pool)
         chats = ChatRepository(pool)
@@ -78,21 +76,41 @@ def test_undo_chat_proposal_restores_version_and_keeps_session_ready():
                 ),
             )
 
-        body = ProposalAccept(
-            expected_version_id=applied["id"], signature="Тестовый пользователь"
+        path = (
+            f"/api/v1/programs/{program['id']}/chat/sessions/{session['id']}"
+            f"/runs/{turn_id}/undo"
         )
+        body = {
+            "expected_version_id": str(applied["id"]),
+            "signature": "Тестовый пользователь",
+        }
         key = uuid4().hex
-        restored = ChatWriteRepository(pool).undo(
-            program["id"], session["id"], turn_id, body, key
+        response = http.post(
+            path, json=body, headers={"Idempotency-Key": key},
         )
+        assert response.status_code == 201, response.text
+        restored = response.json()
         assert restored["snapshot"]["entities"][0]["attributes"]["hours_total"] == 144
         assert restored["snapshot"]["review"]["review_id"] == str(review_id)
-        assert ChatWriteRepository(pool).undo(
-            program["id"], session["id"], turn_id, body, key
-        )["id"] == restored["id"]
+        replay = http.post(path, json=body, headers={"Idempotency-Key": key})
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["id"] == restored["id"]
 
+        later = programs.save(
+            program["id"], UUID(restored["id"]), uuid4().hex,
+            SnapshotV2.model_validate(restored["snapshot"]),
+        )
+        with pool.connection() as conn:
+            conn.execute(
+                "UPDATE chat_sessions SET version_id=%s WHERE id=%s",
+                (later["id"], session["id"]),
+            )
+        replay = http.post(path, json=body, headers={"Idempotency-Key": key})
+        assert replay.status_code == 201, replay.text
+        assert replay.json()["id"] == restored["id"]
         history = chats.session(program["id"], session["id"])
-        assert history["version_id"] == restored["id"]
+        assert history["version_id"] == later["id"]
+
         assert history["turns"][0]["proposal_reverted"] is True
         next_turn = chats.create_turn(program["id"], session["id"], uuid4().hex, "Продолжим")
         assert next_turn
