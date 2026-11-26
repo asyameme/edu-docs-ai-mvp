@@ -5,6 +5,7 @@ import { DiagnosticList } from "./DiagnosticList";
 import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
 import { api } from "./api";
+import { variantDocumentIds } from "./variantDocuments";
 import type {
   ChatOutput,
   ChatProposedChange,
@@ -531,10 +532,6 @@ function findingCategoryLabel(ruleCode?: string) {
   }
 }
 
-function findingDocuments(finding: ReconciliationFinding) {
-  return [...new Set(finding.choices.flatMap((choice) => choice.documents))];
-}
-
 function issueRuleGroup(ruleId?: string) {
   return ruleId?.match(/^R-(01|07|08|11)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
 }
@@ -596,7 +593,12 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
           changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
           changeDocumentIds.length ? changeDocumentIds : issue.source_document_ids ?? [],
         );
-        return { id: variant.id, value: shortChoiceLabel(variant.label), documents: source.documents, documentCount: source.documentCount };
+        const isTextVariant = issueRuleGroup(issue.rule_code) === "R-07"
+          || issueRuleGroup(issue.rule_code) === "R-08";
+        const documents = issue.type !== "indicator_shared_text" && variant.changes.some((change) => change.op === "set_document_value")
+          ? variantDocumentIds(variant, isTextVariant).map((id) => documentNames.get(id) ?? `Документ ${id}`)
+          : source.documents;
+        return { id: variant.id, value: shortChoiceLabel(variant.label), documents, documentCount: documents.length };
       });
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
       const decision = issue.decision;
@@ -2119,6 +2121,12 @@ function App() {
                                         </span>
                                       </span>
                                     </label>
+                                    <details className="choice-sources">
+                                      <summary>Показать документы · {choice.documents.length}</summary>
+                                      {choice.documents.length > 0
+                                        ? <ul>{choice.documents.map((document) => <li key={document}>{document}</li>)}</ul>
+                                        : <p>Документы с этим значением не найдены.</p>}
+                                    </details>
                                   </div>
                                 ))}
                                 {compareFormulations && (
@@ -2153,12 +2161,6 @@ function App() {
                                   </>
                                 )}
                               </fieldset>
-                            )}
-                            {isChoiceFinding && findingDocuments(finding).length > 0 && (
-                              <details className="choice-sources">
-                                <summary>Показать документы</summary>
-                                <ul>{findingDocuments(finding).map((document) => <li key={document}>{document}</li>)}</ul>
-                              </details>
                             )}
                             {allowsCustomChoice && isCustom && (
                               <div className="competency-custom-editor">
