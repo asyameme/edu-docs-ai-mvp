@@ -179,6 +179,56 @@ def workload_targets(proposal: ChangeProposal) -> set[UUID]:
     return targets
 
 
+def recalculate_calculated_totals(snapshot: SnapshotV2, changes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Пересчитать рассчитанные итоги после правок видов нагрузки.
+
+    У сущностей, чей итог помечен вычисляемым (observed_value.calculated у
+    связи hours_total), значение итога — сумма видов. Модель может
+    предложить только правки видов: сервер дополняет их пересчитанным
+    итогом, чтобы граф, проекция документа и генерация остались
+    согласованными без арифметики модели.
+
+    Мутирует снимок (обновляет hours_total) и возвращает дополнительные
+    правки для записи в решение.
+    """
+
+    touched = set()
+    for change in changes:
+        if str(change.get("field_path", "")).startswith(HOURS_COMPONENT_PREFIX):
+            touched.add((change["target_kind"], str(change["target_id"])))
+    if not touched:
+        return []
+
+    extra = []
+    for entity in snapshot.entities:
+        key = ("entity", str(entity.id))
+        if key not in touched or "hours_by_kind" not in entity.attributes:
+            continue
+        total_link = next(
+            (
+                link
+                for link in snapshot.source_links
+                if link.target_kind == "entity"
+                and str(link.target_id) == str(entity.id)
+                and link.field_path == HOURS_TOTAL_PATH
+                and link.observed_value.get("calculated")
+            ),
+            None,
+        )
+        if total_link is None:
+            continue
+        new_total = sum(entity.attributes["hours_by_kind"].values())
+        entity.attributes["hours_total"] = new_total
+        extra.append({
+            "op": "set_attribute",
+            "target_kind": "entity",
+            "target_id": str(entity.id),
+            "field_path": HOURS_TOTAL_PATH,
+            "value": new_total,
+        })
+    return extra
+
+
 def plan_approved_changes(snapshot: SnapshotV2, proposal: ChangeProposal) -> list[ApprovedChange]:
     """Проверить предложение целиком против снимка и вернуть правки к применению.
 
