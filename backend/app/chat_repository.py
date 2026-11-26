@@ -138,13 +138,6 @@ class ChatRepository:
                 (session_id,),
             ).fetchone():
                 raise DomainError(409, "Дождитесь завершения предыдущего сообщения")
-            if (
-                cur.execute(
-                    "SELECT count(*) AS total FROM chat_turns WHERE session_id=%s", (session_id,)
-                ).fetchone()["total"]
-                >= get_settings().chat_max_turns
-            ):
-                raise DomainError(409, "Достигнут предел сообщений в этой сессии")
             cur.execute(
                 "INSERT INTO chat_turns(id,session_id,operation_key,request_hash,user_text,"
                 "workflow_id) "
@@ -193,15 +186,15 @@ class ChatRepository:
                 raise DomainError(409, "Чат станет доступен после сборки графа")
             return row
 
-    def prior_turns(self, turn, limit):
+    def prior_turns(self, turn, limit, offset=0):
         """Завершённые обмены до сообщения в той же сессии, от старых к новым."""
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             rows = cur.execute(
                 """SELECT user_text,result FROM chat_turns WHERE session_id=%s
                    AND status='completed' AND result IS NOT NULL
                    AND (created_at,id)<(%s,%s)
-                   ORDER BY created_at DESC,id DESC LIMIT %s""",
-                (turn["session_id"], turn["created_at"], turn["id"], limit),
+                   ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s""",
+                (turn["session_id"], turn["created_at"], turn["id"], limit, offset),
             ).fetchall()
         return rows[::-1]
 
