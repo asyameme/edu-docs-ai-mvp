@@ -43,7 +43,11 @@ def snapshot_changes(snapshot: SnapshotV2) -> list[FieldChange]:
     }
     changes = {}
     for link in snapshot.source_links:
-        if not link.field_path.startswith("/attributes/") or link.observed_value.get("calculated"):
+        if (
+            not link.field_path.startswith("/attributes/")
+            or link.observed_value.get("calculated")
+            or link.observed_value.get("workload_mirror")
+        ):
             continue
         target = targets.get((link.target_kind, str(link.target_id)))
         if target is None:

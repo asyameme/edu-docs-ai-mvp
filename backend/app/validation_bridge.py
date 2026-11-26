@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from app.confirmation_policy import CONFIRMATION_POLICY
-from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH
+from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH, WORKLOAD_ENTITY_KINDS
 from app.document_reconciliation import apply_document_mutations
 from app.parser_document import parse_output
 from app.review_contract import DOCUMENT_MUTATION_OPS
@@ -321,7 +321,7 @@ def project_snapshot_documents(documents, snapshot):
                 if not change["field_path"].startswith("/attributes/"):
                     raise ValueError("Изменяемый путь должен находиться внутри attributes")
                 target = targets.get(key[:2])
-                if (target and target.get("kind") == "curriculum_item"
+                if (target and target.get("kind") in WORKLOAD_ENTITY_KINDS
                     and key[2].startswith(HOURS_COMPONENT_PREFIX)):
                     changed_workload.add(key[:2])
                     review_attribute_fields.add((*key[:2], HOURS_TOTAL_PATH))
@@ -462,12 +462,22 @@ def project_snapshot_documents(documents, snapshot):
             raise ValueError("Источник не содержит координаты для повторной проверки") from error
         field_tokens = path_tokens[1:]
         if key[:2] in changed_workload and key[2] == HOURS_TOTAL_PATH:
-            # Старые артефакты не содержат разбиение, но итог остаётся доступен по строке.
-            records = [row for row in document.get("curriculum_items", [])
-                       if same_locator(row.get("source_ref"), locator)]
-            if len(records) == 1 and records[0].get("workload_cells"):
-                for name, cell in records[0]["workload_cells"].items():
-                    cell["hours"] = target["attributes"]["hours_by_kind"][name]
+            hours_by_kind = target["attributes"]["hours_by_kind"]
+            if target["kind"] == "discipline":
+                count = update_record(
+                    document.get("disciplines", []), locator, ["hours_by_kind"], hours_by_kind
+                )
+                if count != 1:
+                    raise ValueError(
+                        "Не найдена исходная строка нагрузки РПД для повторной проверки"
+                    )
+            else:
+                # Старые артефакты УП не содержат разбиение, но итог доступен по строке.
+                records = [row for row in document.get("curriculum_items", [])
+                           if same_locator(row.get("source_ref"), locator)]
+                if len(records) == 1 and records[0].get("workload_cells"):
+                    for name, cell in records[0]["workload_cells"].items():
+                        cell["hours"] = hours_by_kind[name]
         values = record_values(document, locator, field_tokens)
         if len(values) == 1 and values[0] == new_value and type(values[0]) is type(new_value):
             continue

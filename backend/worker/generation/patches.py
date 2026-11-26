@@ -211,6 +211,11 @@ def plan_patches(
                 f"Для изменения нет записанных свидетельств источника: {_describe(change)}"
             )
         for link in evidence:
+            if (
+                link.observed_value.get("workload_mirror")
+                and link.observed_value.get("value") == change.new_value
+            ):
+                continue
             ref = ref_index.get(link.source_ref_id)
             if ref is None:
                 raise GenerationMappingError(

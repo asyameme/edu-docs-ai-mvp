@@ -23,9 +23,14 @@ from uuid import UUID
 
 from pydantic import JsonValue
 
-from app.curriculum_workload import HOURS_COMPONENT_PREFIX, HOURS_TOTAL_PATH
+from app.curriculum_workload import (
+    HOURS_COMPONENT_PREFIX,
+    HOURS_TOTAL_PATH,
+    WORKLOAD_ENTITY_KINDS,
+    with_editable_workload,
+)
 from app.domain import SnapshotV2
-from worker.agent.contracts import ChangeProposal
+from worker.agent.contracts import Answer, ChangeProposal, Clarification, ProposedAttributeChange
 from worker.generation.patches import FieldChange, FieldEvidence, SourceEvidence
 
 TargetKind = Literal["entity", "relation"]
@@ -50,6 +55,134 @@ class ProposalApplicationError(ValueError):
     """Предложение нельзя применить: не совпадает с текущим состоянием версии."""
 
 
+def prepare_rpd_workload_alignment(snapshot, program_id, request, read_document):
+    """Подготовить план из наблюдений DOCX для запроса об изменении итога РПД."""
+    title = " ".join(request.discipline_name.split())
+    targets = [
+        item for item in snapshot.entities
+        if item.kind == "discipline"
+        and " ".join(item.attributes.get("name", "").split()).casefold() == title.casefold()
+        and (not request.semesters
+             or set(request.semesters) & set(item.attributes.get("semesters") or []))
+    ]
+    target_ids = {item.id for item in targets}
+    refs = {ref.id: ref.document_id for ref in snapshot.source_refs}
+    documents = {
+        refs[link.source_ref_id] for link in snapshot.source_links
+        if link.target_id in target_ids and link.field_path == HOURS_TOTAL_PATH
+    }
+    covered_semesters = {
+        semester for item in targets for semester in (item.attributes.get("semesters") or [])
+    }
+    if len(documents) != 1 or set(request.semesters or ()) - covered_semesters:
+        return Clarification(
+            kind="clarification",
+            message=f"Не удалось однозначно найти РПД «{title}» для этой правки.",
+            questions=[
+                "Как называется дисциплина в РПД и для каких семестров нужно изменить часы?"
+            ],
+        )
+    cached_documents = {}
+
+    def read_source(owner, document_id):
+        if document_id not in cached_documents:
+            cached_documents[document_id] = read_document(owner, document_id)
+        return cached_documents[document_id]
+
+    hydrated = with_editable_workload(snapshot, program_id, target_ids, read_source)
+    changes = []
+    for item in targets:
+        current_total = item.attributes.get("hours_total")
+        semesters = item.attributes.get("semesters") or []
+        if request.semesters and not set(semesters).issubset(request.semesters):
+            return Answer(
+                kind="answer",
+                message=f"В РПД «{title}» нагрузка хранится общей для семестров "
+                f"{', '.join(map(str, semesters))}. Для правки нужен общий объём "
+                "для этих семестров.",
+            )
+        if current_total == request.hours:
+            continue
+        fields = [
+            link for link in hydrated.source_links
+            if link.target_id == item.id and link.field_path.startswith(HOURS_COMPONENT_PREFIX)
+            and not link.observed_value.get("workload_mirror")
+        ]
+        if fields:
+            current = {
+                link.field_path: read_attribute(hydrated, "entity", item.id, link.field_path)
+                for link in fields
+            }
+            expected = {
+                link.field_path: (
+                    current[link.field_path]
+                    if current[link.field_path] != link.observed_value["value"]
+                    else link.observed_value.get("semester_hours")
+                )
+                for link in fields
+            }
+            if None in expected.values() or sum(expected.values()) != request.hours:
+                workload = ", ".join(
+                    f"{_unescape(path.removeprefix(HOURS_COMPONENT_PREFIX))} — {value} ч"
+                    for path, value in current.items()
+                )
+                return Clarification(
+                    kind="clarification",
+                    message=f"Семестр {semesters[0]}, текущая нагрузка в РПД «{title}». "
+                    f"{workload}.",
+                    questions=[f"Какие графы изменить, чтобы получить {request.hours} ч?"],
+                )
+            for link in fields:
+                path = link.field_path
+                if current[path] == expected[path]:
+                    continue
+                label = _unescape(path.removeprefix(HOURS_COMPONENT_PREFIX))
+                changes.append(ProposedAttributeChange(
+                    target_kind="entity", target_id=item.id, field_path=path,
+                    expected_old_value=current[path], new_value=expected[path],
+                    reason=f"Семестр {semesters[0]}. "
+                    f"В строке семестра {label} — {expected[path]} ч. "
+                    f"Перенос этого значения в «Итого» даёт {request.hours} ч.",
+                    source_ref_ids=[link.source_ref_id],
+                ))
+        else:
+            links = _evidence_links(hydrated, "entity", item.id, HOURS_TOTAL_PATH)
+            if not links or current_total is None:
+                return Answer(
+                    kind="answer",
+                    message=f"Для общего объёма РПД «{title}» "
+                    "нет ячейки с подтверждённым значением.",
+                )
+            changes.append(ProposedAttributeChange(
+                target_kind="entity", target_id=item.id, field_path=HOURS_TOTAL_PATH,
+                expected_old_value=current_total, new_value=request.hours,
+                reason=f"Общий объём РПД «{title}» по запросу пользователя.",
+                source_ref_ids=[link.source_ref_id for link in links],
+            ))
+    if not changes:
+        return Answer(kind="answer", message=f"В РПД «{title}» уже указано {request.hours} ч.")
+    proposal = ChangeProposal(
+        kind="change_proposal",
+        summary=f"Привести нагрузку РПД «{title}» к {request.hours} ч.",
+        changes=changes,
+    )
+    try:
+        approved = plan_approved_changes(hydrated, proposal)
+    except ProposalApplicationError as error:
+        return Answer(kind="answer", message=str(error))
+    sources = {
+        str(doc_id): bytes(read_source(program_id, doc_id)["content"])
+        for doc_id in touched_document_ids(hydrated, approved)
+    }
+    problems = unwritable_changes(hydrated, approved, sources)
+    if problems:
+        return Answer(
+            kind="answer",
+            message="Правку нельзя записать в исходный РПД. " + ". ".join(dict.fromkeys(problems)),
+        )
+    return proposal
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovedChange:
     """Одно проверенное предложение агента, готовое к применению."""
@@ -65,6 +198,21 @@ class ApprovedChange:
 
 def _unescape(token: str) -> str:
     return token.replace("~1", "/").replace("~0", "~")
+
+
+def _compact_workload_pointer(field_path: str) -> str | None:
+    """Expand the dotted workload shorthand into its nested JSON Pointer."""
+    for prefix in (
+        "/attributes/hours_by_kind.",
+        "attributes.hours_by_kind.",
+        "hours_by_kind.",
+    ):
+        if field_path.startswith(prefix):
+            name = field_path[len(prefix):]
+            if name:
+                escaped = name.replace("~", "~0").replace("/", "~1")
+                return HOURS_COMPONENT_PREFIX + escaped
+    return None
 
 
 def normalize_field_path(field_path: str) -> str:
@@ -84,6 +232,9 @@ def normalize_field_path(field_path: str) -> str:
     # приводим её к каноническому указателю до общей обработки.
     if field_path.startswith("attributes."):
         field_path = "/attributes/" + field_path[len("attributes."):]
+    compact_workload = _compact_workload_pointer(field_path)
+    if compact_workload is not None:
+        field_path = compact_workload
     pointer = field_path if field_path.startswith("/") else f"/attributes/{field_path}"
     tokens = pointer[1:].split("/")
     if any(token == "" for token in tokens):
@@ -285,7 +436,7 @@ def apply_change(snapshot: SnapshotV2, change: ApprovedChange) -> SnapshotV2:
     else:
         value[last] = change.new_value
     if (
-        change.target_kind == "entity" and target.kind == "curriculum_item"
+        change.target_kind == "entity" and target.kind in WORKLOAD_ENTITY_KINDS
         and change.field_path.startswith(HOURS_COMPONENT_PREFIX)
     ):
         attributes["hours_total"] = sum(attributes["hours_by_kind"].values())

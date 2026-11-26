@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
 
-from app.curriculum_workload import with_legacy_curriculum_workload
+from app.curriculum_workload import with_editable_workload
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.repository import Repository
@@ -80,7 +80,7 @@ class ChatWriteRepository:
                         (owner, document_id),
                     ).fetchone())
 
-                snapshot = with_legacy_curriculum_workload(
+                snapshot = with_editable_workload(
                     snapshot, program_id, workload_targets(proposal), read_source,
                 )
                 try:

@@ -9,7 +9,12 @@ from pydantic_ai import ModelRetry
 from pydantic_core import to_json
 
 from app.config import get_settings
-from app.curriculum_workload import HOURS_COMPONENT_PREFIX, with_legacy_curriculum_workload
+from app.curriculum_workload import (
+    HOURS_COMPONENT_PREFIX,
+    HOURS_TOTAL_PATH,
+    WORKLOAD_ENTITY_KINDS,
+    with_editable_workload,
+)
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.repository import Repository
@@ -191,9 +196,13 @@ class PostgresChatReadPort:
         entity = next((item for item in snapshot.entities if item.id == entity_id), None)
         if entity is None:
             raise DomainError(404, "Сущность отсутствует в выбранной версии")
-        if entity.kind == "curriculum_item" and "hours_by_kind" not in entity.attributes:
+        has_hours = (
+            entity.kind in WORKLOAD_ENTITY_KINDS
+            and type(entity.attributes.get("hours_total")) is int
+        )
+        if has_hours:
             snapshot = await asyncio.to_thread(
-                with_legacy_curriculum_workload, snapshot, program_id, {entity_id},
+                with_editable_workload, snapshot, program_id, {entity_id},
                 Repository(self.pool).document_content,
             )
             entity = next(item for item in snapshot.entities if item.id == entity_id)
@@ -204,25 +213,27 @@ class PostgresChatReadPort:
         ]
         bounded_relations = [_bounded_relation(r) for r in relations[:8]]
         workload = []
-        if entity.kind == "curriculum_item" and "hours_by_kind" in entity.attributes:
+        if entity.kind in WORKLOAD_ENTITY_KINDS and "hours_by_kind" in entity.attributes:
             for link in snapshot.source_links:
                 if (
                     link.target_id == entity_id
                     and link.field_path.startswith(HOURS_COMPONENT_PREFIX)
                     and link.observed_value.get("cell_text") is not None
+                    and not link.observed_value.get("workload_mirror")
                 ):
                     name = link.field_path[len(HOURS_COMPONENT_PREFIX):]
                     name = name.replace("~1", "/").replace("~0", "~")
                     workload.append(WorkloadField(
                         label=name, hours=entity.attributes["hours_by_kind"][name],
                         field_path=link.field_path, source_ref_id=link.source_ref_id,
+                        semester_hours=link.observed_value.get("semester_hours"),
                     ))
         hours_total_write_error = None
         if workload:
             hours_total_write_error = "Итог рассчитывается автоматически из граф нагрузки."
-        elif entity.kind == "curriculum_item" and type(entity.attributes.get("hours_total")) is int:
+        elif has_hours:
             hours_total_write_error = await asyncio.to_thread(
-                self._curriculum_hours_write_error, program_id, snapshot, entity,
+                self._hours_write_error, program_id, snapshot, entity,
             )
         return EntityReadResult(
             entity=bounded,
@@ -239,15 +250,15 @@ class PostgresChatReadPort:
             editable_workload=workload,
         )
 
-    def _curriculum_hours_write_error(self, program_id, snapshot, entity):
+    def _hours_write_error(self, program_id, snapshot, entity):
         hours = entity.attributes["hours_total"]
         # Проверяем замену на временной копии DOCX. Никаких версий и файлов не записываем.
         change = ApprovedChange(
-            "entity", entity.id, "/attributes/hours_total", hours, hours + 1, "", ()
+            "entity", entity.id, HOURS_TOTAL_PATH, hours, hours + 1, "", ()
         )
         document_ids = sorted(touched_document_ids(snapshot, [change]))
         if not document_ids:
-            return "У общего объёма часов нет источника для прямой замены в учебном плане."
+            return "У общего объёма часов нет источника для прямой замены в документе."
         with self.pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id,content FROM source_documents WHERE program_id=%s AND id=ANY(%s)",

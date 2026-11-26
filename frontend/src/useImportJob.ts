@@ -912,13 +912,16 @@ export function useImportJob() {
     }
   }
 
-  async function decideCustom(conflictId: string, value: string) {
+  async function decideCustom(conflictId: string, value: string): Promise<string | null> {
     const current = sessionRef.current;
-    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return;
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) {
+      return "Не удалось начать сохранение: сверка уже выполняется или версия программы изменилась.";
+    }
     const signature = signatureForProgram(signatureRef.current, current.programId);
     if (!signature) {
-      setNotice("Укажите подпись для этой программы кнопкой над программой.");
-      return;
+      const message = "Укажите подпись для этой программы кнопкой над программой.";
+      setNotice(message);
+      return message;
     }
     reviewBusyRef.current = true;
     setReviewBusy(true);
@@ -934,14 +937,20 @@ export function useImportJob() {
       setReviewDetails((details) => details && {
         ...details,
         issues: details.issues.map((issue) => issue.id === conflictId
-          ? { ...issue, decision: { variant_id: `custom:${conflictId}`, author: signature } }
+          ? {
+            ...issue,
+            decision: { variant_id: `custom:${conflictId}`, author: signature, custom_value: value },
+          }
           : issue),
       });
       void loadReviewDetails(version.id, current.programId).catch(() => {
         setNotice("Выбор сохранён, обновляем список расхождений…");
       });
+      return null;
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось сохранить собственный вариант");
+      const message = error instanceof Error ? error.message : "Не удалось сохранить собственный вариант";
+      setNotice(message);
+      return message;
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
