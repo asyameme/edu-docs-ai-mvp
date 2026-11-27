@@ -4633,3 +4633,7 @@ textarea:focus-visible {
 .chat-progress-steps li + li { margin-top: 5px; }
 @keyframes chat-progress-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .chat-progress-spinner { animation: none; } }
+
+/* Статус над содержимым не сдвигает текст при разной длине подписи. */
+.r11-explanations > li { grid-template-columns: minmax(0, 1fr); }
+.r11-explanations > li > .r11-verdict { justify-self: start; white-space: normal; }
