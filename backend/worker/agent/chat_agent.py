@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import Field
@@ -13,6 +13,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 from temporalio.common import RetryPolicy
 
+from app.chat_findings import FindingsPage
 from app.chat_progress import ChatProgressCapability
 
 from .contracts import (
@@ -90,7 +91,18 @@ INSTRUCTIONS = """
   недоступны и есть hours_total_write_error, объясни ограничение без плана.
 - Предлагая правку того же поля повторно, сначала перечитай сущность:
   значение могло измениться с прошлой правки.
-- На вопросы о нарушениях и замечаниях используй get_validation_findings.
+- На общий вопрос о проблемах, нарушениях и замечаниях сначала используй
+  get_validation_summary и ответь по готовой сводке без read_entity,
+  search_entities и read_source_fragment для каждого замечания. Не перепроверяй
+  все документы ради общего списка. Не запускай новую проверку без просьбы.
+  По умолчанию показывай оставшиеся проблемы (status=attention).
+  Если просят также принятые или решённые замечания, передай status=all.
+  При has_more=true назови общее число групп и сообщи, что показана часть;
+  следующую страницу получай по просьбе пользователя с after=next_cursor.
+  Группы могут иметь смешанные status_counts: не называй принятые записи нерешёнными.
+  Названия документов уже есть в documents; неизвестные сведения не додумывай.
+  Для подробного разбора выбранного замечания читай нужные source_ref_ids
+  и сущности; get_validation_findings остаётся инструментом отдельных записей.
   Для подготовки конкретной правки не загружай общий список замечаний.
   Результаты повторной проверки появляются после применения плана.
 - По явной просьбе проверить всю программу вызывай request_program_check без
@@ -245,6 +257,26 @@ def create_chat_agent(
             version_id=ctx.deps.version_id,
             entity_id=entity_id,
             depth=depth,
+        )
+
+    @agent.tool
+    async def get_validation_summary(
+        ctx: RunContext[ChatDeps],
+        limit: Annotated[int, Field(ge=1, le=20)] = 10,
+        after: str | None = None,
+        status: Literal["all", "attention"] = "attention",
+    ) -> FindingsPage:
+        """Готовый обзор автоматической сверки и основной проверки версии.
+
+        Отдельно запущенные дополнительные проверки R-09/R-11 сюда не входят.
+
+        Для общего вопроса достаточно первой страницы. При has_more укажи,
+        что список неполный; следующую страницу читай по просьбе пользователя.
+        status=attention выбирает только то, что ещё требует внимания.
+        """
+        return await get_worker_read_port().get_validation_summary(
+            program_id=ctx.deps.program_id, version_id=ctx.deps.version_id,
+            limit=limit, after=after, status=status,
         )
 
     @agent.tool

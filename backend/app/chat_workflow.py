@@ -15,6 +15,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from app.chat_context import CONTEXT_RESERVE_TOKENS, DEFAULT_CONTEXT_TOKENS, trim_messages
+    from app.chat_findings import findings_limit_answer, limit_reason
     from app.chat_model import chat_agent
     from app.chat_progress import ChatProgressState
     from worker.agent.contracts import ChatDeps
@@ -197,13 +198,16 @@ class ChatWorkflow(PydanticAIWorkflow):
                 if not context_budget_v2:
                     raise
                 workflow.logger.warning("Превышен лимит чата: %s", error)
+                output = {"kind": "answer", "message": CHAT_LIMIT_MESSAGE, "sources": []}
+                if workflow.patched("chat-findings-summary-v1"):
+                    output = findings_limit_answer(self.chat_progress.findings_pages,
+                                                   limit_reason(error))
                 now = workflow.now()
                 conversation = replace(conversation, messages=[
                     *conversation.messages,
                     ModelRequest(parts=[UserPromptPart(content=payload["text"], timestamp=now)]),
-                    ModelResponse(parts=[TextPart(content=CHAT_LIMIT_MESSAGE)], timestamp=now),
+                    ModelResponse(parts=[TextPart(content=output["message"])], timestamp=now),
                 ])
-                output = {"kind": "answer", "message": CHAT_LIMIT_MESSAGE, "sources": []}
             if token_context:
                 # В БД и Temporal не копируем длинные ответы инструментов и рассуждения.
                 now = workflow.now()
