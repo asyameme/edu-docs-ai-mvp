@@ -122,7 +122,6 @@ type ChatMessage = {
   role: "agent" | "user";
   text: string;
   pending?: boolean;
-  progressSteps?: string[];
   result?: {
     kind: "coverage";
     title: string;
@@ -777,11 +776,6 @@ function ChatScreen({
                       {message.pending && <span className="chat-progress-spinner" aria-hidden="true" />}
                       {message.text}
                     </p>}
-                    {message.pending && Boolean(message.progressSteps?.length) && (
-                      <ol className="chat-progress-steps" aria-label="Действия агента">
-                        {message.progressSteps?.map((step, index) => <li key={index}>{step}</li>)}
-                      </ol>
-                    )}
                     {message.questions && <ul className="chat-clarification-questions">
                       {message.questions.map((question) => <li key={question}>{question}</li>)}
                     </ul>}
@@ -1502,7 +1496,7 @@ function App() {
         ? { ...item, text: "Запрос принят. Ожидаю ответа агента…" } : item));
       const output = await waitForChatOutput(processing.programId, turn.run_id, (progress) => {
         setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
-          ? { ...item, text: progress.message, progressSteps: progress.steps } : item));
+          ? { ...item, text: progress.message } : item));
       });
       const agentMessage = chatOutputMessage(
         turn.id, output, chatSession.version_id, processing.reviewDetails, processing.job,
