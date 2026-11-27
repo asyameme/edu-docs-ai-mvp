@@ -397,6 +397,15 @@ class PostgresChatReadPort:
         )
 
     @limit_tool_payload
+    async def get_validation_summary(self, *, program_id, version_id, limit=10,
+                                     after=None, status="all"):
+        """Читает готовую сводку вместо повторного обхода исходных документов."""
+        from app.chat_findings_store import read_findings_page
+
+        return await asyncio.to_thread(read_findings_page, self.pool, program_id, version_id,
+                                       limit=limit, after=after, status=status)
+
+    @limit_tool_payload
     async def get_validation_findings(self, *, program_id, version_id, limit):
         return await asyncio.to_thread(self._get_validation_findings, program_id, version_id, limit)
 

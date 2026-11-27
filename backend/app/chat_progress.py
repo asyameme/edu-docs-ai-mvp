@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pydantic_ai.capabilities import AbstractCapability
 from temporalio import workflow
 
+from app.chat_findings import FindingsPage
+
 
 def tool_progress_label(name, args):
     if name == "search_entities":
@@ -21,6 +23,7 @@ def tool_progress_label(name, args):
         "read_source_fragment": "Читаю фрагмент документа…",
         "read_graph_projection": "Изучаю связи в программе…",
         "get_validation_findings": "Изучаю замечания к программе…",
+        "get_validation_summary": "Собираю список замечаний…",
         "list_program_check_targets": "Ищу данные для проверки…",
         "request_program_check": "Запускаю проверку программы…",
         "read_program_check": "Читаю результаты проверки…",
@@ -29,6 +32,7 @@ def tool_progress_label(name, args):
 
 @dataclass
 class ChatProgressState:
+    findings_pages: list[FindingsPage] = field(default_factory=list)
     message: str = "Обдумываю запрос…"
     active: dict[str, str] = field(default_factory=dict)
     steps: list[str] = field(default_factory=list)
@@ -68,7 +72,12 @@ class ChatProgressCapability(AbstractCapability):
         if state is not None:
             state.start_tool(call.tool_call_id, tool_progress_label(tool_def.name, args))
         try:
-            return await handler(args)
+            result = await handler(args)
+            if state is not None and tool_def.name == "get_validation_summary":
+                page = FindingsPage.model_validate(result)
+                # После durable-шага результат повторно доступен и при replay.
+                state.findings_pages = [*state.findings_pages[-2:], page]
+            return result
         finally:
             if state is not None:
                 state.finish_tool(call.tool_call_id)

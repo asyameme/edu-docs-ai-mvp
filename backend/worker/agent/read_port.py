@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from app.chat_findings import FindingsPage
 from app.domain import EntityKind
 
 from .contracts import (
@@ -53,6 +54,13 @@ class ChatReadPort(Protocol):
         entity_id: UUID,
         depth: int,
     ) -> GraphProjection: ...
+
+    async def get_validation_summary(
+        self, *, program_id: UUID, version_id: UUID, limit: int = 10,
+        after: str | None = None, status: str = "all",
+    ) -> FindingsPage:
+        """Сводка групп замечаний с явным продолжением."""
+        ...
 
     async def get_validation_findings(
         self, *, program_id: UUID, version_id: UUID, limit: int
