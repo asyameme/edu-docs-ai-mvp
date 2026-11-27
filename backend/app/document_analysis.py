@@ -251,18 +251,23 @@ def _competency_link_variants(finding, documents, issue_id):
         item["code"] for document in original.values()
         for item in document.get("competencies", [])
     }
+    # Дисциплина может занимать несколько строк плана (по семестрам): список
+    # документа применяется ко всем им, иначе вариант терялся у многобеместровых.
     options = []
     if not evidence["shared_discipline"] and set(plan_codes) <= declared:
-        options.append((f"Список из учебного плана: {', '.join(plan_codes)}", rp, plan_codes))
-    if len(plan) == 1 and evidence["plan_row_is_exclusive"] and set(rp_codes) <= declared:
+        options.append((f"Список из учебного плана: {', '.join(plan_codes)}", [rp], plan_codes))
+    if evidence["plan_row_is_exclusive"] and set(rp_codes) <= declared:
         options.append((f"Список из {evidence['document_label']}: {', '.join(rp_codes)}",
-                        plan[0], rp_codes))
+                        plan, rp_codes))
     if not options:
         return [], ["Не удалось безопасно сопоставить связи с исходными строками"]
-    options.append(("Оставить расхождение в документах", rp, rp_codes))
+    options.append(("Оставить расхождение в документах", [rp], rp_codes))
     variants = []
-    for label, target, codes in options:
-        changes = [{"op": "set_competency_links", **target, "codes": codes}]
+    for label, targets, codes in options:
+        changes = [
+            {"op": "set_competency_links", **target, "codes": codes}
+            for target in targets
+        ]
         try:
             validate_document_mutation_variants(original, [changes])
         except (DomainError, ValueError):
