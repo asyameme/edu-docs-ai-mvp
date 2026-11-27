@@ -545,6 +545,23 @@ function findingCategoryLabel(ruleCode?: string) {
   }
 }
 
+const LEVEL_NOTE = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/i;
+
+// Рекомендуемый вариант: с пометкой уровня, иначе в большем числе документов,
+// иначе самый полный по тексту. Пользователь остаётся один на один с выбором —
+// подсветка только экономит чтение.
+function recommendedChoiceId(finding: ReconciliationFinding): string | null {
+  if (finding.choices.length === 0) return null;
+  const withLevel = finding.choices.find((choice) => LEVEL_NOTE.test(choice.value));
+  if (withLevel) return withLevel.id;
+  const maxDocuments = Math.max(...finding.choices.map((choice) => choice.documentCount));
+  if (maxDocuments > 0) {
+    const mostDocuments = finding.choices.filter((choice) => choice.documentCount === maxDocuments);
+    if (mostDocuments.length === 1) return mostDocuments[0].id;
+  }
+  return [...finding.choices].sort((left, right) => right.value.length - left.value.length)[0]?.id ?? null;
+}
+
 function issueRuleGroup(ruleId?: string) {
   return ruleId?.match(/^R-(01|07|08|11)(?:$|[^0-9])/)?.[0]?.slice(0, 4) ?? "other";
 }
@@ -1404,27 +1421,6 @@ function App() {
     });
   }
 
-  function cancelFindingChoice(findingId: string, appliedChoiceId: string | undefined) {
-    setSelectedChoices((current) => {
-      const next = { ...current };
-      if (appliedChoiceId) next[findingId] = appliedChoiceId;
-      else delete next[findingId];
-      return next;
-    });
-    const savedCustomValue = parsedProgram?.findings.find((finding) => finding.id === findingId)?.customDecision;
-    setCustomValues((current) => {
-      const next = { ...current };
-      if (savedCustomValue) next[findingId] = savedCustomValue;
-      else delete next[findingId];
-      return next;
-    });
-    setChoiceErrors((current) => {
-      const next = { ...current };
-      delete next[findingId];
-      return next;
-    });
-  }
-
   async function saveFindingChoice(findingId: string, choiceId: string) {
     if (!choiceId || choiceId === "__reject__") return;
     if (choiceId === "__custom__") {
@@ -2141,7 +2137,8 @@ function App() {
                       {visibleFindings.map((finding, index) => {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
-                        const selectedChoiceId = selectedChoices[finding.id] ?? appliedChoiceId ?? "";
+                        const selectedChoiceId =
+                          selectedChoices[finding.id] ?? appliedChoiceId ?? recommendedChoiceId(finding) ?? "";
                         const customText = customValues[finding.id] ?? finding.customDecision ?? "";
                         const savedCustomMatches = Boolean(
                           !isDemoMode && appliedChoiceId === "__custom__" && finding.customDecision &&
@@ -2287,12 +2284,7 @@ function App() {
                                 >
                                   {isSavingChoice ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
                                 </button>
-                                {isUnsaved && (
-                                  <button className="competency-cancel-button" type="button"
-                                    disabled={processing.reviewBusy}
-                                    onClick={() => cancelFindingChoice(finding.id, appliedChoiceId)}
-                                  >Отменить выбор</button>
-                                )}
+
                                 {isResolved && <span className="competency-saved-note">Выбор сохранён в версии</span>}
                                 {choiceErrors[finding.id] && (
                                   <p className="competency-api-note" role="alert">Не удалось сохранить выбор: {choiceErrors[finding.id]}</p>
