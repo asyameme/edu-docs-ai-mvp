@@ -2155,7 +2155,6 @@ function App() {
                         const compareFormulations = !finding.sharedIndicatorText
                           && (ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1;
                         const isCustom = selectedChoiceId === "__custom__";
-                        const isReject = selectedChoiceId === "__reject__";
                         const isUnsaved = Boolean(selectedChoiceId && !isResolved);
                         const isSavingChoice = processing.reviewBusy && savingFindingId === finding.id;
 
@@ -2234,19 +2233,6 @@ function App() {
                                       />
                                       <span className="choice-content"><span className="choice-value">Ввести свой вариант</span></span>
                                     </label>
-                                    {finding.ruleCode === "R-01" && (
-                                      <label className={`choice-card${isReject ? " is-selected" : ""}`}>
-                                        <input
-                                          type="radio"
-                                          name={`choice-${finding.id}`}
-                                          value="__reject__"
-                                          checked={isReject}
-                                          disabled={isConfirmed || processing.reviewBusy}
-                                          onChange={() => chooseFindingChoice(finding.id, "__reject__")}
-                                        />
-                                        <span className="choice-content"><span className="choice-value">Отклонить сопоставление</span></span>
-                                      </label>
-                                    )}
                                   </>
                                 )}
                               </fieldset>
@@ -2279,7 +2265,7 @@ function App() {
                                 <button
                                   className="secondary-button"
                                   type="button"
-                                  disabled={!isUnsaved || isReject || (isCustom && !customText.trim()) || processing.reviewBusy}
+                                  disabled={!isUnsaved || (isCustom && !customText.trim()) || processing.reviewBusy}
                                   onClick={() => saveFindingChoice(finding.id, selectedChoiceId)}
                                 >
                                   {isSavingChoice ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
@@ -2291,11 +2277,9 @@ function App() {
                                 )}
                               </div>
                             )}
-                            {finding.ruleCode === "R-01" && (isCustom || isReject) && (
+                            {finding.ruleCode === "R-01" && isCustom && (
                               <p className="competency-api-note" role="status">
-                                {isReject
-                                  ? "Отклонение сопоставления не меняет списки компетенций и не сохраняется как принятое решение."
-                                  : "Введите один код: он заменит единственный отличающийся код в обоих списках. При нескольких различиях выберите готовый вариант."}
+                                Введите один код: он заменит единственный отличающийся код в обоих списках. При нескольких различиях выберите готовый вариант.
                               </p>
                             )}
                             </div>
