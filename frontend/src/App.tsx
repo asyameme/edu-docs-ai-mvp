@@ -122,7 +122,6 @@ type ChatMessage = {
   role: "agent" | "user";
   text: string;
   pending?: boolean;
-  progressSteps?: string[];
   result?: {
     kind: "coverage";
     title: string;
@@ -777,11 +776,6 @@ function ChatScreen({
                       {message.pending && <span className="chat-progress-spinner" aria-hidden="true" />}
                       {message.text}
                     </p>}
-                    {message.pending && Boolean(message.progressSteps?.length) && (
-                      <ol className="chat-progress-steps" aria-label="Действия агента">
-                        {message.progressSteps?.map((step, index) => <li key={index}>{step}</li>)}
-                      </ol>
-                    )}
                     {message.questions && <ul className="chat-clarification-questions">
                       {message.questions.map((question) => <li key={question}>{question}</li>)}
                     </ul>}
@@ -1502,7 +1496,7 @@ function App() {
         ? { ...item, text: "Запрос принят. Ожидаю ответа агента…" } : item));
       const output = await waitForChatOutput(processing.programId, turn.run_id, (progress) => {
         setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
-          ? { ...item, text: progress.message, progressSteps: progress.steps } : item));
+          ? { ...item, text: progress.message } : item));
       });
       const agentMessage = chatOutputMessage(
         turn.id, output, chatSession.version_id, processing.reviewDetails, processing.job,
@@ -2063,8 +2057,8 @@ function App() {
                                         <li key={issue.id}>
                                           <span className={`r11-verdict r11-verdict--${alignment?.classification ?? "unknown"}`}>{verdict}</span>
                                           <div>
-                                            <strong>{alignment?.outcome_id ?? issue.message.slice(0, 40)}</strong>
-                                            {alignment?.reason && <p>{alignment.reason}</p>}
+                                            <p><b>В РПД заявлено:</b> {alignment?.outcome_text || "Формулировка не приведена в отчёте."}</p>
+                                            <p><b>Пояснение проверки:</b> {alignment?.reason || issue.message}</p>
                                             {assessmentEvidence.length > 0 && (
                                               <div className="r11-context">
                                                 <span className="r11-context-label">Цепочка оценивания</span>
@@ -2091,12 +2085,6 @@ function App() {
                                                   ))}
                                                 </ul>
                                               </div>
-                                            )}
-                                            {alignment?.outcome_text && (
-                                              <details className="r11-outcome-text">
-                                                <summary>Текст результата обучения</summary>
-                                                <p>{alignment.outcome_text}</p>
-                                              </details>
                                             )}
                                           </div>
                                         </li>

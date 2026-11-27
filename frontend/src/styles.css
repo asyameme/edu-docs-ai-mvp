@@ -4629,8 +4629,6 @@ textarea:focus-visible {
   width: 14px; height: 14px; flex-shrink: 0; border: 2px solid #dce3fa;
   border-top-color: #4167d8; border-radius: 50%; animation: chat-progress-spin 1s linear infinite;
 }
-.chat-progress-steps { margin: 10px 0 0; padding-left: 20px; color: #68758a; font-size: 13px; }
-.chat-progress-steps li + li { margin-top: 5px; }
 @keyframes chat-progress-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .chat-progress-spinner { animation: none; } }
 
@@ -4688,3 +4686,6 @@ textarea:focus-visible {
     rotate: none;
   }
 }
+/* Статус над содержимым не сдвигает текст при разной длине подписи. */
+.r11-explanations > li { grid-template-columns: minmax(0, 1fr); }
+.r11-explanations > li > .r11-verdict { justify-self: start; white-space: normal; }
