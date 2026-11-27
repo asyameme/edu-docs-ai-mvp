@@ -1801,12 +1801,6 @@ function App() {
                     <span className="status-pill status-pill--muted">{restoringProgram ? "Загружаем состояние…" : "Ожидает обработки"}</span>
                   )}
                 </div>
-                {processing.reviewDetails && (
-                  <button className="primary-button" type="button" onClick={processing.retryPrepare} disabled={processing.reviewBusy}>
-                    Перезапустить сверку для этого пакета
-                  </button>
-                )}
-
                 {parsedProgram ? (
                   <>
                     {processing.job && (
