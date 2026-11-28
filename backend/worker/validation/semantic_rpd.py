@@ -45,13 +45,29 @@ SYSTEM_PROMPT = """Ты проверяешь внутреннюю согласо
 {"results":[{"outcome_id":"LO-001","status":"supported|gap|uncertain",
 "course_evidence_ids":["C001"],"assessment_evidence_ids":["A001"],
 "reason":"Развёрнутое объяснение на русском языке"}]}
-Для каждого переданного outcome верни ровно один результат. В evidence_ids используй
-только идентификаторы из входных данных; пустые списки допустимы для gap/uncertain.
-Поле reason заполняй двумя-тремя короткими предложениями (суммарно не длиннее
-50 слов): сначала кратко, что требует результат обучения; затем что фактически
-есть в содержании и оценивании — назови конкретные темы раздела 2 и оценочные
-средства, которые рассматривал; затем вывод, почему этого достаточно или
-недостаточно для данного результата."""
+Для каждого outcome верни ровно один результат. Оба массива evidence_ids обязательны.
+Они содержат идентификаторы РАССМОТРЕННЫХ фрагментов, а не только подтверждений:
+указывай их и при supported, и при gap, и при uncertain. Если тема, индикатор
+или оценочное средство использованы в reason (в том числе для объяснения
+несоответствия), обязательно включи их идентификаторы в соответствующий массив.
+Выбирай наиболее относящиеся к результату фрагменты (обычно 1–3 из каждого раздела).
+Используй только C-ID из course_content_section_2 и A-ID из assessment_evidence
+текущего результата. При supported оба массива непустые. При gap/uncertain
+пустой массив допустим, только если нет относящегося к результату фрагмента;
+в reason объясни, каких сведений не хватает. Не выбирай случайные фрагменты.
+
+Поле reason: 3–5 конкретных предложений на русском языке, до 100 слов.
+Назови конкретные рассмотренные темы, индикаторы (по коду или формулировке)
+и оценочные средства. Для supported объясни, как они подтверждают результат.
+Для gap/uncertain назови неподтверждённую часть результата и объясни, почему
+фрагменты её не подтверждают. Для gap укажи конкретное несоответствие,
+для uncertain — каких сведений не хватает. Для gap/uncertain в конце укажи,
+что именно эксперту проверить в разделе 2 и/или 3.
+При частичном подтверждении различай подтверждённую и неподтверждённую части.
+Не утверждай, что задания отсутствуют, если их содержание не предоставлено.
+Не используй внутренние идентификаторы LO, C, A в reason; они нужны только
+в JSON-полях. Не придумывай факты и не требуй исправления документа
+без экспертного подтверждения."""
 
 
 def _source_ref(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -88,6 +104,82 @@ def _finding(
     if extra:
         evidence.update(extra)
     return {"code": code, "status": "needs_review", "message": message, "evidence": evidence}
+
+
+def _course_description(item: Mapping[str, Any]) -> str:
+    topic = str(item.get("topic") or "Название темы не извлечено")[:200]
+    activity = str(item.get("activity") or "")[:80]
+    return f"«{topic}»" + (f" ({activity})" if activity else "")
+
+
+def _assessment_description(item: Mapping[str, Any]) -> str:
+    tool = item.get("assessment_tool") or "Название средства не извлечено"
+    code = item.get("indicator_code") or "код не извлечён"
+    text = str(item.get("indicator_text") or "Формулировка не извлечена")[:200]
+    return f"«{tool}» — индикатор {code}: {text}"
+
+
+def _review_examples(
+    entries: Sequence[Mapping[str, Any]], reason: str, fields: Sequence[str],
+) -> list[Mapping[str, Any]]:
+    """Show up to three real candidates, preferring literal mentions in reason.
+
+    This is only navigation for an expert, never additional model evidence.
+    """
+    normalized_reason = reason.casefold()
+
+    def mentioned(entry: Mapping[str, Any]) -> bool:
+        return any(
+            (value := str(entry.get(field) or "").strip().casefold())
+            and value in normalized_reason
+            for field in fields
+        )
+
+    return sorted(entries, key=lambda entry: not mentioned(entry))[:3]
+
+
+def _alignment_message(
+    status: str,
+    outcome: Mapping[str, Any],
+    details: Mapping[str, Any],
+    discipline: str,
+    *,
+    course_examples: Sequence[Mapping[str, Any]] = (),
+    assessment_examples: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    """Distinguish model-cited fragments, review examples and interpretation."""
+    heading = (
+        "Возможное смысловое несоответствие"
+        if status == "gap"
+        else "Недостаточно сведений для подтверждения смысловой связи"
+    )
+    topics = "; ".join(_course_description(item) for item in details["course_evidence"])
+    assessments = "; ".join(
+        _assessment_description(item) for item in details["assessment_evidence"]
+    )
+    lines = [
+        f"{heading}. Дисциплина: {discipline}.",
+        f"Результат обучения (раздел 1.3): {outcome.get('text') or 'Формулировка не извлечена'}.",
+    ]
+    for label, selected, examples, describe in (
+        ("Содержание (раздел 2)", topics, course_examples, _course_description),
+        ("Оценивание (раздел 3)", assessments, assessment_examples, _assessment_description),
+    ):
+        if selected:
+            lines.append(f"{label}, рассмотренные моделью фрагменты: {selected}.")
+        else:
+            lines.append(f"{label}: модель не указала ссылки на конкретные фрагменты.")
+            if examples:
+                sample = "; ".join(describe(entry) for entry in examples)
+                lines.append(
+                    f"Примеры извлечённых данных для ручной проверки ({label.lower()}): "
+                    f"{sample}. Не являются свидетельствами, отобранными моделью."
+                )
+    lines.extend([
+        f"Пояснение и рекомендация модели: {details['reason']}",
+        "Требуется экспертная проверка приведённых сведений; нарушение не установлено.",
+    ])
+    return "\n".join(lines)
 
 
 def evaluate_rpd_alignment(
@@ -461,7 +553,32 @@ def evaluate_rpd_alignment(
                 if status == "gap"
                 else "rpd_semantic_alignment_uncertain"
             )
-            message = f"Для результата {outcome_id} нужна экспертная проверка: {reason[:800]}"
+            course_examples: list[Mapping[str, Any]] = []
+            assessment_examples: list[Mapping[str, Any]] = []
+            if status in {"gap", "uncertain"}:
+                # Missing model citations do not establish that the RPD lacks
+                # these data. Offer a few explicitly labelled review examples.
+                if not cited_course_ids:
+                    course_examples = _review_examples(course_items, reason, ("topic",))
+                    refs.extend(
+                        course_refs[entry["id"]] for entry in course_examples
+                        if entry["id"] in course_refs
+                    )
+                if not cited_assessment_ids:
+                    candidates = [
+                        entry for entries in assessment_by_competency.values()
+                        for entry in entries if entry["id"] in allowed_assessment_ids[outcome_id]
+                    ]
+                    assessment_examples = _review_examples(
+                        candidates, reason, ("indicator_code", "indicator_text", "assessment_tool"),
+                    )
+                    refs.extend(
+                        ref for entry in assessment_examples for ref in entry["source_refs"]
+                    )
+            message = _alignment_message(
+                status, outcome, extra, ", ".join(discipline_names) or document_label,
+                course_examples=course_examples, assessment_examples=assessment_examples,
+            )
             if status == "supported":
                 code = "rpd_semantic_evidence_missing"
                 message = (
