@@ -2070,7 +2070,12 @@ function App() {
                                           <span className={`r11-verdict r11-verdict--${alignment?.classification ?? "unknown"}`}>{verdict}</span>
                                           <div>
                                             <p><b>В РПД заявлено:</b> {alignment?.outcome_text || "Формулировка не приведена в отчёте."}</p>
-                                            <p><b>Пояснение проверки:</b> {alignment?.reason || issue.message}</p>
+                                            {alignment?.reason?.startsWith("Краткое описание: ") && alignment.reason.includes("\n\n") ? (
+                                              <>
+                                                <p><b>Краткое описание:</b> {alignment.reason.split("\n\n")[0].slice("Краткое описание: ".length)}</p>
+                                                <p style={{ whiteSpace: "pre-line" }}><b>Пояснение проверки:</b> {alignment.reason.slice(alignment.reason.indexOf("\n\n") + 2)}</p>
+                                              </>
+                                            ) : <p><b>Пояснение проверки:</b> {alignment?.reason || issue.message}</p>}
                                             {assessmentEvidence.length > 0 && (
                                               <div className="r11-context">
                                                 <span className="r11-context-label">Цепочка оценивания</span>
