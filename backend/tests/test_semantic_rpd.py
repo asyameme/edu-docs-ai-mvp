@@ -155,6 +155,9 @@ def test_r11_review_examples_are_not_model_evidence(
             value['source_ref'] = source_ref
         return value
 
+    reason = ('Тема Производные не раскрывает моделирование. ' * 35
+              + 'Проверить экзамен. Итоговый вывод.')
+
     def evaluator(payload, config):
         assert 'РАССМОТРЕННЫХ' in config['_system_prompt']
         assert 'включи их идентификаторы' in config['_system_prompt']
@@ -162,7 +165,7 @@ def test_r11_review_examples_are_not_model_evidence(
             'outcome_id': 'LO-001', 'status': status,
             'course_evidence_ids': course_ids,
             'assessment_evidence_ids': assessment_ids,
-            'reason': 'Тема Производные не раскрывает моделирование. Проверить экзамен.',
+            'reason': reason,
         }]}
 
     checks, findings = evaluate_rpd_alignment(
@@ -205,6 +208,8 @@ def test_r11_review_examples_are_not_model_evidence(
     if status == 'supported':
         assert 'Примеры извлечённых данных' not in message
         return
+    assert evidence['reason'] == reason
+    assert reason in message
     assert 'Производные' in message
     assert 'Экзамен' in message
     assert ref('2.2', 2) in evidence['source_refs']
@@ -220,3 +225,42 @@ def test_r11_review_examples_are_not_model_evidence(
     if not assessment_ids:
         assert evidence['assessment_evidence'] == []
         assert 'Не являются свидетельствами, отобранными моделью' in message
+
+
+def test_r11_prompt_requires_connected_explanation_and_cautious_classification():
+    from worker.validation.semantic_rpd import SYSTEM_PROMPT
+
+    for requirement in (
+        'самостоятельное связное объяснение',
+        'а не gap',
+        'Не требуй отдельной темы для каждого навыка',
+        'Отделяй подтверждённые части от неподтверждённых',
+        'что именно позволяют оценить'.capitalize(),
+    ):
+        assert requirement in SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize('ending', ['.', ';', ''])
+def test_r11_message_preserves_long_explanation_and_normalizes_punctuation(ending):
+    from worker.validation.semantic_rpd import _alignment_message
+
+    reason = 'Связное объяснение. ' * 100 + 'Итоговый вывод.'
+    message = _alignment_message('uncertain', {'text': 'Обосновывать решения' + ending}, {
+        'course_evidence': [], 'assessment_evidence': [], 'reason': reason,
+    }, 'РПД')
+    assert reason in message
+    assert 'Обосновывать решения.\n' in message
+
+
+@pytest.mark.parametrize("summary", [None, "", "  ", 42])
+def test_r11_legacy_reason_without_summary(summary):
+    from worker.validation.semantic_rpd import _format_review_reason
+    assert _format_review_reason(summary, "Связное пояснение.") == "Связное пояснение."
+
+
+def test_r11_summary_preserves_connected_reason():
+    from worker.validation.semantic_rpd import _format_review_reason
+    reason = "Первое предложение.\n\nВторой абзац: подробности."
+    assert _format_review_reason(" Неясен формат экзамена. ", reason) == (
+        "Краткое описание: Неясен формат экзамена.\n\n" + reason
+    )
