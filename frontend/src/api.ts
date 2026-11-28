@@ -176,6 +176,8 @@ export type ReviewIssue = {
   requires_decision: boolean;
   variants: ReviewVariant[];
   rpd_alignment?: RpdAlignmentSummary | null;
+  // Развернутое пояснение для человека: что означают числа и что проверять.
+  explanation?: string | null;
   effective_status?: string;
   decision?: {
     variant_id: string;
@@ -275,11 +277,19 @@ export type ChatTurnHistoryRead = {
 
 export type ChatSessionHistoryRead = ChatSessionRead & { turns: ChatTurnHistoryRead[] };
 
+export type CompetencyCoverageSummary = {
+  competency_code: string;
+  status: "supported" | "gap" | "uncertain";
+  reason: string | null;
+};
+
 export type RuleCoverage = {
   rule_code: string;
   rule_revision: string;
   status: "passed" | "failed" | "needs_review" | "skipped" | "not_applicable";
   reason: string | null;
+  // Заполняется только R-09: краткое резюме по каждой компетенции.
+  competencies?: CompetencyCoverageSummary[] | null;
 };
 
 export type PrepareReport = {

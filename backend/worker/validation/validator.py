@@ -82,6 +82,8 @@ class RuleResult:
     status: str
     checks: int
     findings: list[Finding] = field(default_factory=list)
+    # R-09: краткое резюме по каждой компетенции (code/status/reason) для интерфейса.
+    summaries: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -553,6 +555,38 @@ def _valid_load(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
+_ROLE_LABELS = {"rpd": "РПД", "rpp": "РПП"}
+
+
+def _workload_explanation(name, semester, field_name, lhs, rhs, role, load_row):
+    """Развернутое пояснение к расхождению нагрузки — словами для пользователя."""
+    role_label = _ROLE_LABELS.get(role, role.upper())
+    numeric = isinstance(lhs, (int, float)) and isinstance(rhs, (int, float))
+    difference = abs(lhs - rhs) if numeric else None
+    parts = [
+        f"Учебный план (строка семестра {semester}) отводит дисциплине «{name}» "
+        f"{lhs} {'ч' if field_name == 'hours_total' else field_name}, "
+        f"а {role_label} — {rhs}."
+    ]
+    if difference is not None:
+        parts.append(f"Расхождение: {difference}.")
+    kinds = load_row.get("hours_by_kind")
+    if field_name == "hours_total" and isinstance(kinds, dict) and kinds:
+        known = {key: value for key, value in kinds.items() if isinstance(value, (int, float))}
+        if known:
+            breakdown = " + ".join(f"{key} {value}" for key, value in sorted(known.items()))
+            parts.append(
+                f"Число {rhs} в {role_label} не написано в документе одной ячейкой: "
+                f"оно складывается из графов нагрузки ({breakdown} = {sum(known.values())} ч), "
+                "поэтому править нужно графы, а не итог."
+            )
+    parts.append(
+        "Выберите, какой документ верен, и приведите второй к нему: "
+        "часы можно изменить через чат-агента или исправить в исходном документе."
+    )
+    return " ".join(parts)
+
+
 def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
                       field_name: str, roles: set[str]) -> RuleResult:
     """Compare only unambiguous semester records of supplied disciplines."""
@@ -659,7 +693,9 @@ def _compare_workload(rule: Mapping[str, Any], docs: Sequence[Document],
                 elif lhs != rhs:
                     findings.append(Finding("curriculum_hours_mismatch" if field_name == "hours_total" else "value_mismatch",
                         "failed", f"«{name}», семестр {semester}: УП {lhs}, {doc.role.upper()} {rhs} ({field_name}).",
-                        {**evidence, "left_value": lhs, "right_value": rhs}))
+                        {**evidence, "left_value": lhs, "right_value": rhs,
+                         "explanation": _workload_explanation(
+                             name, semester, field_name, lhs, rhs, doc.role, load_row)}))
     return _result(rule, checks, findings)
 
 
@@ -688,7 +724,16 @@ def _credit_hours(rule: Mapping[str, Any], docs: Sequence[Document]) -> RuleResu
                 continue
             checks += 1
             if hours != units * hours_per_credit_unit:
-                findings.append(Finding("credit_hours_mismatch", "failed", f"{doc.label}: {hours} ч не соответствуют {units} ЗЕТ ({hours_per_credit_unit:g} ч/ЗЕТ).", {"credit_units":units,"hours_total":hours,"hours_per_credit_unit":hours_per_credit_unit,"source_refs": [_source_ref(doc,row)]}))
+                expected_hours = units * hours_per_credit_unit
+                explanation = (
+                    f"Норма программы: 1 ЗЕТ = {hours_per_credit_unit:g} ч. "
+                    f"Для {units} ЗЕТ должно быть {expected_hours:g} ч, "
+                    f"а в документе указано {hours} ч. "
+                    f"Расхождение: {abs(hours - expected_hours):g} ч. "
+                    "Проверьте графы нагрузки в документе: либо в них лишние или "
+                    "недостающие часы, либо неверно указано число зачётных единиц."
+                )
+                findings.append(Finding("credit_hours_mismatch", "failed", f"{doc.label}: {hours} ч не соответствуют {units} ЗЕТ ({hours_per_credit_unit:g} ч/ЗЕТ).", {"credit_units":units,"hours_total":hours,"hours_per_credit_unit":hours_per_credit_unit,"explanation": explanation,"source_refs": [_source_ref(doc,row)]}))
     return _result(rule, checks, findings)
 
 
@@ -704,7 +749,10 @@ def _title_credit_units(rule: Mapping[str, Any], docs: Sequence[Document]) -> Ru
                 checks += 1
                 findings.append(Finding("title_credit_units_missing", "needs_review",
                     f"{doc.label}: недостаточно ЗЕТ для сверки титула и нагрузки.",
-                    {"source_refs": [_source_ref(doc, discipline)]}))
+                    {"explanation": "Сверка требует, чтобы ЗЕТ были указаны и на титуле, "
+                     "и в разделе нагрузки документа; сейчас одно из значений отсутствует "
+                     "или не распознано.",
+                     "source_refs": [_source_ref(doc, discipline)]}))
                 continue
             table_ref = _source_ref(doc, discipline)
             if table_ref.get("table") is None and table_ref.get("section") == "титул":
@@ -712,11 +760,18 @@ def _title_credit_units(rule: Mapping[str, Any], docs: Sequence[Document]) -> Ru
             checks += 1
             if title != table:
                 title_ref = _source_ref(doc, {"source_ref": doc.data.get("title_credit_units_source_ref")})
+                explanation = (
+                    f"На титульном листе {doc.label} заявлено {title} ЗЕТ, "
+                    f"а в разделе нагрузки по дисциплине — {table} ЗЕТ. "
+                    f"Расхождение: {abs(title - table)} ЗЕТ. Проверьте обе цифры: "
+                    "либо на титуле опечатка, либо нагрузка в разделе неполна."
+                )
                 findings.append(Finding(
                     "title_credit_units_mismatch",
                     "failed",
                     f"{doc.label}: на титуле {title} ЗЕТ, в разделе нагрузки {table} ЗЕТ.",
-                    {"left_value": title, "right_value": table, "source_refs": [title_ref, table_ref]},
+                    {"left_value": title, "right_value": table, "explanation": explanation,
+                     "source_refs": [title_ref, table_ref]},
                 ))
     return _result(rule, checks, findings)
 
@@ -754,9 +809,17 @@ def _semester_workload_totals(rule: Mapping[str, Any], docs: Sequence[Document])
                 findings.append(Finding("semester_value_missing", "needs_review",
                     f"{doc.label}: недостаточно данных {key} для сверки итогов.", {"field": key, "source_refs": refs}))
             elif sum(values) != total:
+                field_label = "часов" if key == "hours_total" else "зачётных единиц"
+                explanation = (
+                    f"Документ разбивает дисциплину по семестрам, и сумма этих строк "
+                    f"({sum(values)} {field_label}) не совпадает с итогом по дисциплине "
+                    f"({total} {field_label}). Проверьте строки семестров: "
+                    "обычно в одной из них часы или ЗЕТ указаны неверно."
+                )
                 findings.append(Finding("semester_total_mismatch", "failed",
                     f"{doc.label}: сумма {key} по семестрам {sum(values)}, итог {total}.",
-                    {"field": key, "calculated": sum(values), "declared": total, "source_refs": refs}))
+                    {"field": key, "calculated": sum(values), "declared": total,
+                     "explanation": explanation, "source_refs": refs}))
     return _result(rule, checks, findings)
 
 
@@ -917,7 +980,7 @@ def _competency_coverage(
         )
         for doc in docs
     ]
-    semantic_checks, semantic_findings = evaluate_competency_coverage(
+    semantic_checks, semantic_findings, summaries = evaluate_competency_coverage(
         coverage_docs,
         llm_config=rule.get("llm", {}),
         evaluator=semantic_evaluator,
@@ -925,7 +988,9 @@ def _competency_coverage(
     )
     checks += semantic_checks
     findings.extend(Finding(**item) for item in semantic_findings)
-    return _result(rule,checks,findings)
+    result = _result(rule, checks, findings)
+    result.summaries = summaries
+    return result
 
 
 

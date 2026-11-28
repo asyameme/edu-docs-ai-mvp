@@ -2032,10 +2032,26 @@ function App() {
                                   </p>
                                 ) : running ? (
                                   <p className="optional-rule-check-status" role="status">
-                                    {check?.status === "pending" ? "Задание поставлено в очередь."
-                                      : "Проверяем документы. Это может занять несколько минут."}
+                                    Задание поставлено в очередь.
                                   </p>
                                 ) : null}
+                                {code === "R-09" && coverage?.competencies && coverage.competencies.length > 0 && (
+                                  <details className="r09-competency-summary">
+                                    <summary>Резюме по компетенциям · {coverage.competencies.length}</summary>
+                                    <ul className="r09-competency-list">
+                                      {coverage.competencies.map((item) => (
+                                        <li className="r09-competency-row" key={item.competency_code}>
+                                          <strong>{item.competency_code}</strong>
+                                          <span className={`r09-verdict r09-verdict--${item.status}`}>
+                                            {item.status === "supported" ? "Подтверждена"
+                                              : item.status === "gap" ? "Пробел" : "Требует проверки"}
+                                          </span>
+                                          <small>{item.reason}</small>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                )}
                                 {code === "R-11" && diagnostics.length > 0 && (
                                   <ul className="r11-explanations" aria-label="Пояснения модели к результатам проверки">
                                     {issues.map((issue: ReviewIssue) => {

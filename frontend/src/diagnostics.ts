@@ -81,16 +81,20 @@ const alignmentTitles: Record<string, string> = {
 
 export function reviewDiagnostic(issue: ReviewIssue, documents: Diagnostic["documents"]): Diagnostic {
   const alignment = issue.rule_code === "R-11" ? issue.rpd_alignment : null;
+  const detailParts = [
+    ...(alignment ? [
+      alignment.outcome_text ? `Результат обучения: ${alignment.outcome_text}` : alignment.outcome_id,
+      alignment.reason ? `Пояснение: ${alignment.reason}` : null,
+    ] : []),
+    issue.explanation ?? null,
+  ].filter((part): part is string => Boolean(part && part.trim()));
   return {
     id: issue.id, origin: "validation",
     severity: issue.severity === "blocking" ? "error" : "warning",
     category: issue.type, ruleCode: issue.rule_code,
     title: issue.rule_code === "R-11" ? alignmentTitles[issue.type] ?? issue.message : issue.message,
     message: issue.message, documents,
-    detail: alignment ? [
-      alignment.outcome_text ? `Результат обучения: ${alignment.outcome_text}` : alignment.outcome_id,
-      alignment.reason ? `Пояснение: ${alignment.reason}` : null,
-    ].filter(Boolean).join("\n") || null : null,
+    detail: detailParts.join("\n") || null,
   };
 }
 
