@@ -112,11 +112,15 @@ def test_dispatcher_loads_more_than_one_history_page():
         offsets, payloads = [], []
 
         class Repo:
+            def cancellations_pending(self):
+                return []
+
             def pending(self, after=None):
                 return [(uuid4(), "workflow", None)] if after is None else []
 
             def turn_input(self, turn_id):
-                return {"session_id": uuid4(), "program_id": uuid4(), "version_id": uuid4(),
+                return {"status": "pending", "session_id": uuid4(),
+                        "program_id": uuid4(), "version_id": uuid4(),
                         "user_text": "Продолжаем"}
 
             def prior_turns(self, turn, limit, offset=0):

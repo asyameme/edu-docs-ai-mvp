@@ -134,7 +134,8 @@ class ChatRepository:
                     raise DomainError(409, "Ключ использован для другого сообщения")
                 return existing["id"]
             if cur.execute(
-                "SELECT 1 FROM chat_turns WHERE session_id=%s AND status='pending'",
+                "SELECT 1 FROM chat_turns WHERE session_id=%s "
+                "AND status IN ('pending','cancelling')",
                 (session_id,),
             ).fetchone():
                 raise DomainError(409, "Дождитесь завершения предыдущего сообщения")
@@ -146,6 +147,42 @@ class ChatRepository:
             )
             cur.execute("UPDATE chat_sessions SET updated_at=now() WHERE id=%s", (session_id,))
         return turn_id
+
+    def request_cancel(self, program_id, session_id, turn_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            session = cur.execute(
+                "SELECT id FROM chat_sessions WHERE program_id=%s AND id=%s FOR UPDATE",
+                (program_id, session_id),
+            ).fetchone()
+            if session is None:
+                raise DomainError(404, "Сессия чата не найдена")
+            turn = cur.execute(
+                "SELECT id,status,workflow_id FROM chat_turns "
+                "WHERE session_id=%s AND id=%s FOR UPDATE",
+                (session_id, turn_id),
+            ).fetchone()
+            if turn is None:
+                raise DomainError(404, "Ход чата не найден")
+            if turn["status"] == "pending":
+                cur.execute(
+                    "UPDATE chat_turns SET status='cancelling' WHERE id=%s", (turn_id,),
+                )
+                turn["status"] = "cancelling"
+            return turn
+
+    def cancellations_pending(self, limit=100):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            return cur.execute(
+                "SELECT id,workflow_id FROM chat_turns WHERE status='cancelling' "
+                "ORDER BY created_at,id LIMIT %s", (limit,),
+            ).fetchall()
+
+    def finish_cancel(self, turn_id):
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE chat_turns SET status='cancelled',completed_at=now() "
+                "WHERE id=%s AND status='cancelling'", (turn_id,),
+            )
 
     def pending(self, after=None, limit=100):
         with self.pool.connection() as conn, conn.cursor() as cur:
@@ -167,7 +204,8 @@ class ChatRepository:
     def turn_input(self, turn_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
-                "SELECT t.id,t.user_text,t.created_at,s.id AS session_id,s.program_id,s.version_id "
+                "SELECT t.id,t.status,t.user_text,t.created_at,"
+                "s.id AS session_id,s.program_id,s.version_id "
                 "FROM chat_turns t JOIN chat_sessions s ON s.id=t.session_id WHERE t.id=%s",
                 (turn_id,),
             ).fetchone()
@@ -209,6 +247,8 @@ class ChatRepository:
         if len(conversation) > get_settings().chat_max_conversation_bytes:
             raise DomainError(413, "История чата превысила допустимый размер")
         turn = self.turn_input(turn_id)
+        if turn["status"] != "pending":
+            return
         from app.repository import Repository
 
         snapshot = Repository(self.pool).version(turn["program_id"], turn["version_id"])["snapshot"]

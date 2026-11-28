@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from app.chat_cancellation import cancel_chat
 from app.chat_repository import ChatRepository
 from app.chat_write import ChatWriteRepository
 from app.config import get_settings
@@ -23,7 +24,7 @@ from app.temporal_rpc import temporal_rpc
 from worker.agent.contracts import ChatOutput
 
 router = APIRouter(prefix="/api/v1/programs/{program_id}/chat", tags=["Chat"])
-TurnStatus = Literal["pending", "completed", "failed"]
+TurnStatus = Literal["pending", "cancelling", "cancelled", "completed", "failed"]
 ChatResult = Annotated[ChatOutput, Field(discriminator="kind")]
 RESULT_ADAPTER = TypeAdapter(ChatResult)
 MAX_TEMPORAL_NOT_FOUND_RETRIES = 15
@@ -111,7 +112,7 @@ class SessionHistoryRead(SessionRead):
 
 class ChatStatusData(BaseModel):
     run_id: UUID
-    status: Literal["pending", "processing"]
+    status: Literal["pending", "processing", "cancelling"]
 
 
 class ChatProgressData(BaseModel):
@@ -129,6 +130,11 @@ class ChatProgressEvent(BaseModel):
 class ChatFailureData(BaseModel):
     run_id: UUID
     message: str = "Не удалось выполнить запрос. Попробуйте отправить его ещё раз."
+
+
+class ChatCancelledData(BaseModel):
+    run_id: UUID
+    message: str = "Запрос остановлен."
 
 
 class ChatUnavailableData(BaseModel):
@@ -163,9 +169,15 @@ class ChatUnavailableEvent(BaseModel):
     data: ChatUnavailableData
 
 
+class ChatCancelledEvent(BaseModel):
+    id: UUID
+    event: Literal["cancelled"]
+    data: ChatCancelledData
+
+
 ChatEvent = Annotated[
     ChatStatusEvent | ChatProgressEvent | ChatCompletedEvent
-    | ChatFailedEvent | ChatUnavailableEvent,
+    | ChatFailedEvent | ChatUnavailableEvent | ChatCancelledEvent,
     Field(discriminator="event"),
 ]
 
@@ -204,6 +216,13 @@ def completed_event(run_id: UUID, result) -> ServerSentEvent:
 
 def failed_event(run_id: UUID) -> ServerSentEvent:
     return ServerSentEvent(id=str(run_id), event="failed", data=ChatFailureData(run_id=run_id))
+
+
+def cancelled_event(run_id: UUID) -> ServerSentEvent:
+    return ServerSentEvent(
+        id=str(run_id), event="cancelled",
+        data=ChatCancelledData(run_id=run_id),
+    )
 
 
 def unavailable_event(run_id: UUID) -> ServerSentEvent:
@@ -268,6 +287,21 @@ def send_message(
     return {"id": identity, "status": state["status"], "run_id": identity}
 
 
+@router.post(
+    "/sessions/{session_id}/runs/{turn_id}/cancel",
+    status_code=202,
+    response_model=TurnRead,
+    responses={404: {"model": ChatError}},
+)
+async def cancel_turn(program_id: UUID, session_id: UUID, turn_id: UUID, request: Request):
+    repository = repo(request)
+    turn = await asyncio.to_thread(repository.request_cancel, program_id, session_id, turn_id)
+    if turn["status"] == "cancelling":
+        await cancel_chat(request.app.state.resources.temporal, repository, turn)
+    state = await asyncio.to_thread(repository.turn_status, turn_id)
+    return {"id": turn_id, "status": state["status"], "run_id": turn_id}
+
+
 @router.get(
     "/runs/{run_id}/events",
     response_class=EventSourceResponse,
@@ -304,6 +338,16 @@ async def run_events(
             if turn["status"] == "failed":
                 yield failed_event(run_id)
                 return
+            if turn["status"] == "cancelled":
+                yield cancelled_event(run_id)
+                return
+            if turn["status"] == "cancelling":
+                yield ServerSentEvent(
+                    id=str(run_id), event="status",
+                    data=ChatStatusData(run_id=run_id, status="cancelling"),
+                )
+                await asyncio.sleep(1)
+                continue
             try:
                 description = await temporal_rpc(
                     request.app.state.resources.temporal.get_workflow_handle(
@@ -361,9 +405,10 @@ async def run_events(
                 if turn["status"] == "failed":
                     yield failed_event(run_id)
                     return
+                if turn["status"] in {"cancelled", "cancelling"}:
+                    continue
                 await asyncio.to_thread(repository.fail, run_id)
-                yield failed_event(run_id)
-                return
+                continue
             else:
                 status = "pending"
             yield ServerSentEvent(

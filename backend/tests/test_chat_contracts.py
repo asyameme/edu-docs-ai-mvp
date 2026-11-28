@@ -331,6 +331,9 @@ def test_dispatcher_pages_past_one_hundred_pending_turns():
     ]
 
     class Repository:
+        def cancellations_pending(self):
+            return []
+
         def pending(self, after=None, limit=100):
             remaining = [row for row in records if after is None or (row[2], row[0]) > after]
             return [
@@ -340,6 +343,7 @@ def test_dispatcher_pages_past_one_hundred_pending_turns():
 
         def turn_input(self, turn_id):
             return {
+                "status": "pending",
                 "user_text": "Вопрос",
                 "program_id": uuid4(),
                 "version_id": uuid4(),

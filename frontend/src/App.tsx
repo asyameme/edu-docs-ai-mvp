@@ -5,7 +5,7 @@ import { DiagnosticList } from "./DiagnosticList";
 import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
 import { api } from "./api";
-import { parseChatProgress, type ChatProgress } from "./chatProgress";
+import { waitForChatRun } from "./chat-run";
 import { variantDocumentIds } from "./variantDocuments";
 import type {
   ChatOutput,
@@ -13,6 +13,7 @@ import type {
   ChatSessionHistoryRead,
   ChatSessionRead,
   ChatTurnHistoryRead,
+  ChatTurnRead,
   ImportJob,
   OptionalRuleCode,
   ReviewDetails,
@@ -197,63 +198,6 @@ function parseChatOutput(value: unknown): ChatOutput | null {
   return null;
 }
 
-function waitForChatOutput(
-  programId: string, runId: string, onProgress: (progress: ChatProgress) => void,
-): Promise<ChatOutput> {
-  return new Promise((resolve, reject) => {
-    const stream = new EventSource(`/api/v1/programs/${programId}/chat/runs/${runId}/events`);
-    let timeout = 0;
-    const finish = (error: Error | null, output?: ChatOutput) => {
-      window.clearTimeout(timeout);
-      stream.close();
-      if (error) reject(error);
-      else if (output) resolve(output);
-      else reject(new Error("Агент вернул пустой ответ."));
-    };
-    stream.addEventListener("progress", (event) => {
-      if (!(event instanceof MessageEvent)) return;
-      try {
-        const progress = parseChatProgress(JSON.parse(event.data));
-        if (progress) onProgress(progress);
-      } catch {
-        // Некорректная подсказка не мешает дождаться итогового ответа.
-      }
-    });
-    stream.addEventListener("completed", (event) => {
-      if (!(event instanceof MessageEvent)) {
-        finish(new Error("Не удалось прочитать ответ агента."));
-        return;
-      }
-      try {
-        const parsed: unknown = JSON.parse(event.data);
-        const output = parseChatOutput(parsed);
-        finish(output ? null : new Error("Формат ответа агента не распознан."), output ?? undefined);
-      } catch {
-        finish(new Error("Не удалось разобрать ответ агента."));
-      }
-    });
-    stream.addEventListener("failed", () => finish(new Error("Агент не смог выполнить запрос. Попробуйте ещё раз.")));
-    stream.addEventListener("unavailable", (event) => {
-      let message = "Состояние запроса временно недоступно. Обновите страницу позже, чтобы получить результат.";
-      if (event instanceof MessageEvent) {
-        try {
-          const data: unknown = JSON.parse(event.data);
-          if (data && typeof data === "object" && "message" in data && typeof data.message === "string") {
-            message = data.message;
-          }
-        } catch {
-          // Если сервер прислал неверный формат, покажем безопасное сообщение по умолчанию.
-        }
-      }
-      finish(new Error(message));
-    });
-    stream.addEventListener("error", () => {
-      if (stream.readyState === EventSource.CLOSED) finish(new Error("Соединение с чатом потеряно."));
-    });
-    timeout = window.setTimeout(() => finish(new Error("Агент не ответил за отведённое время.")), 5 * 60 * 1000);
-  });
-}
-
 function chatSourceLabels(ids: string[], reviewDetails: ReviewDetails | null, job: ImportJob | null) {
   const sourceRefs = new Map((reviewDetails?.version.snapshot.source_refs ?? []).map((source) => [source.id, source]));
   const documentNames = new Map((job?.files ?? []).map((file) => [file.document_id, file.member_name]));
@@ -312,6 +256,12 @@ function chatHistoryMessages(
 
   return history.turns.flatMap((turn: ChatTurnHistoryRead) => {
     const userMessage: ChatMessage = { id: `${turn.id}-user`, role: "user", text: turn.user_text };
+    if (turn.status === "cancelled") {
+      return [userMessage, { id: `${turn.id}-agent`, role: "agent", text: "Запрос остановлен. Можно отправить следующий." }];
+    }
+    if (turn.status === "cancelling") {
+      return [userMessage, { id: `${turn.id}-agent`, role: "agent", text: "Останавливаем запрос…" }];
+    }
     if (turn.status === "pending") {
       return [userMessage, { id: `${turn.id}-agent`, role: "agent", text: "Обрабатываю запрос…" }];
     }
@@ -692,6 +642,14 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
   };
 }
 
+type ActiveChatRun = {
+  programId: string;
+  sessionId: string;
+  versionId: string;
+  runId: string;
+  messageId: string;
+};
+
 type ChatScreenProps = {
   versionNumber: number;
   currentVersionId: string;
@@ -700,6 +658,8 @@ type ChatScreenProps = {
   hasSignature: boolean;
   canUseChat: boolean;
   isBusy: boolean;
+  canStop: boolean;
+  isStopping: boolean;
   applyingPlanId: string | null;
   revertingPlanId: string | null;
   planErrors: Record<string, string>;
@@ -709,6 +669,7 @@ type ChatScreenProps = {
   selectedSourceRef: SourceRef | null;
   onDraftChange: (value: string) => void;
   onSend: (message?: string) => void | Promise<void>;
+  onStop: () => void | Promise<void>;
   onApplyPlan: (messageId: string) => void | Promise<void>;
   onCancelPlan: (messageId: string) => void;
   onUndoPlan: (messageId: string) => void | Promise<void>;
@@ -730,6 +691,8 @@ function ChatScreen({
   hasSignature,
   canUseChat,
   isBusy,
+  canStop,
+  isStopping,
   applyingPlanId,
   revertingPlanId,
   planErrors,
@@ -739,6 +702,7 @@ function ChatScreen({
   selectedSourceRef,
   onDraftChange,
   onSend,
+  onStop,
   onApplyPlan,
   onCancelPlan,
   onUndoPlan,
@@ -971,9 +935,15 @@ function ChatScreen({
             placeholder={isConfirmed ? "Опишите, что нужно изменить, или задайте вопрос…" : "Задайте вопрос о программе…"}
             disabled={!canUseChat || isBusy}
           />
-          <button className="chat-send-button" disabled={!canUseChat || isBusy || !draft.trim()} type="submit">
-            {isBusy ? "Ожидайте…" : "Отправить"}
-          </button>
+          {canStop ? (
+            <button className="chat-send-button" disabled={isStopping} type="button" onClick={onStop}>
+              {isStopping ? "Останавливаем…" : "Остановить"}
+            </button>
+          ) : (
+            <button className="chat-send-button" disabled={!canUseChat || isBusy || !draft.trim()} type="submit">
+              {isBusy ? "Ожидайте…" : "Отправить"}
+            </button>
+          )}
       </form>
 
       {selectedSourceRef && (
@@ -1121,7 +1091,15 @@ function App() {
   const [chatDraft, setChatDraft] = useState("");
   const [chatAvailability, setChatAvailability] = useState<"loading" | "available" | "unavailable">("loading");
   const [chatSession, setChatSession] = useState<ChatSessionHistoryRead | null>(null);
-  const [chatBusy, setChatBusy] = useState(false);
+  const [chatSending, setChatSending] = useState(false);
+  const [activeChatRun, setActiveChatRun] = useState<ActiveChatRun | null>(null);
+  const activeChatRunRef = useRef<ActiveChatRun | null>(null);
+  const chatSendingRef = useRef(false);
+  const chatStopRequestRef = useRef<string | null>(null);
+  const chatConnectionRef = useRef(0);
+  const [chatStopping, setChatStopping] = useState(false);
+  const [chatWatchAttempt, setChatWatchAttempt] = useState(0);
+  const chatBusy = chatSending || activeChatRun !== null;
   const [applyingPlanId, setApplyingPlanId] = useState<string | null>(null);
   const [revertingPlanId, setRevertingPlanId] = useState<string | null>(null);
   const [chatPlanErrors, setChatPlanErrors] = useState<Record<string, string>>({});
@@ -1299,6 +1277,11 @@ function App() {
   }, [isDemoMode, processing.programId]);
 
   useEffect(() => {
+    const connection = ++chatConnectionRef.current;
+    updateActiveChatRun(null);
+    chatSendingRef.current = false;
+    setChatSending(false);
+    setChatStopping(false);
     if (isDemoMode) return;
     if (!processing.programId || !graphReady || !processing.versionId || chatAvailability !== "available") {
       setChatSession(null);
@@ -1329,15 +1312,108 @@ function App() {
       if (!active) return;
       setChatSession(history);
       setChatMessages(chatHistoryMessages(history, processing.reviewDetails, processing.job));
+      const pending = history.turns.find((turn) => turn.status === "pending" || turn.status === "cancelling");
+      if (pending) {
+        updateActiveChatRun({
+          programId: processing.programId,
+          sessionId: history.id,
+          versionId: history.version_id,
+          runId: pending.run_id,
+          messageId: `${pending.id}-agent`,
+        });
+        setChatStopping(pending.status === "cancelling");
+      }
       setChatStatusMessage("");
     };
     void connect().catch((error: unknown) => {
       if (!active) return;
       setChatStatusMessage(error instanceof Error ? error.message : "Не удалось открыть чат с агентом.");
     });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      if (chatConnectionRef.current === connection) chatConnectionRef.current += 1;
+    };
   }, [isDemoMode, processing.programId, processing.versionId, processing.reviewDetails?.version.id,
     processing.job?.id, graphReady, chatAvailability]);
+
+  useEffect(() => {
+    if (!activeChatRun) return;
+    const run = activeChatRun;
+    const controller = new AbortController();
+    let active = true;
+    void waitForChatRun(run.programId, run.runId, controller.signal, () => {
+      if (active) setChatStopping(true);
+    }, (progress) => {
+      if (!active || activeChatRunRef.current?.runId !== run.runId) return;
+      setChatMessages((current) => current.map((item) => item.id === run.messageId
+        ? { ...item, text: progress.message, pending: true } : item));
+    }).then((end) => {
+      if (!active || activeChatRunRef.current?.runId !== run.runId) return;
+      let message: ChatMessage;
+      if (end.status === "completed") {
+        const output = parseChatOutput(end.result);
+        if (!output) throw new Error("Формат ответа агента не распознан.");
+        message = chatOutputMessage(run.runId, output, run.versionId, processing.reviewDetails, processing.job);
+      } else {
+        message = {
+          id: run.messageId, role: "agent",
+          text: end.status === "cancelled"
+            ? "Запрос остановлен. Можно отправить следующий."
+            : "Агент не смог выполнить запрос. Попробуйте ещё раз.",
+        };
+      }
+      setChatMessages((current) => current.map((item) => item.id === run.messageId ? message : item));
+      updateActiveChatRun(null);
+      setChatStopping(false);
+      setChatStatusMessage("");
+    }).catch((error: unknown) => {
+      if (!active || activeChatRunRef.current?.runId !== run.runId) return;
+      setChatMessages((current) => current.map((item) => item.id === run.messageId ? {
+        id: run.messageId, role: "agent",
+        text: error instanceof Error ? error.message : "Не удалось получить ответ агента. Можно остановить запрос.",
+      } : item));
+      setChatStopping(false);
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [activeChatRun, chatWatchAttempt, processing.reviewDetails, processing.job]);
+
+  function updateActiveChatRun(run: ActiveChatRun | null) {
+    activeChatRunRef.current = run;
+    setActiveChatRun(run);
+  }
+
+  async function stopChatRun() {
+    const run = activeChatRunRef.current;
+    if (!run || chatStopRequestRef.current === run.runId) return;
+    chatStopRequestRef.current = run.runId;
+    setChatStopping(true);
+    setChatStatusMessage("");
+    try {
+      const turn = await api<ChatTurnRead>(
+        `/api/v1/programs/${run.programId}/chat/sessions/${run.sessionId}/runs/${run.runId}/cancel`,
+        { method: "POST" },
+      );
+      if (activeChatRunRef.current?.runId !== run.runId) return;
+      if (turn.status === "cancelled") {
+        setChatMessages((current) => current.map((item) => item.id === run.messageId ? {
+          id: run.messageId, role: "agent", text: "Запрос остановлен. Можно отправить следующий.",
+        } : item));
+        updateActiveChatRun(null);
+        setChatStopping(false);
+      } else {
+        setChatWatchAttempt((attempt) => attempt + 1);
+      }
+    } catch (error) {
+      if (activeChatRunRef.current?.runId !== run.runId) return;
+      setChatStopping(false);
+      setChatStatusMessage(error instanceof Error ? error.message : "Не удалось остановить запрос. Попробуйте ещё раз.");
+    } finally {
+      if (chatStopRequestRef.current === run.runId) chatStopRequestRef.current = null;
+    }
+  }
 
   useEffect(() => {
     if (processing.reviewJob?.status !== "completed") return;
@@ -1472,15 +1548,17 @@ function App() {
       return;
     }
 
-    if (!canUseLiveChat || !chatSession || chatBusy || !processing.programId) return;
+    if (!canUseLiveChat || !chatSession || chatSendingRef.current || activeChatRunRef.current || !processing.programId) return;
+    const connection = chatConnectionRef.current;
     const optimisticId = `message-${crypto.randomUUID()}`;
     const userMessage: ChatMessage = { id: `${optimisticId}-user`, role: "user", text };
     const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…", pending: true };
     setChatMessages((current) => [...current, userMessage, pendingMessage]);
-    setChatBusy(true);
+    chatSendingRef.current = true;
+    setChatSending(true);
     if (message === undefined) setChatDraft("");
     try {
-      const turn = await api<{ id: string; status: "pending" | "completed" | "failed"; run_id: string }>(
+      const turn = await api<ChatTurnRead>(
         `/api/v1/programs/${processing.programId}/chat/sessions/${chatSession.id}/messages`,
         {
           method: "POST",
@@ -1488,17 +1566,15 @@ function App() {
           body: JSON.stringify({ text }),
         },
       );
+      if (chatConnectionRef.current !== connection) return;
+      updateActiveChatRun({
+        programId: processing.programId, sessionId: chatSession.id,
+        versionId: chatSession.version_id, runId: turn.run_id, messageId: pendingMessage.id,
+      });
       setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
         ? { ...item, text: "Запрос принят. Ожидаю ответа агента…" } : item));
-      const output = await waitForChatOutput(processing.programId, turn.run_id, (progress) => {
-        setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
-          ? { ...item, text: progress.message } : item));
-      });
-      const agentMessage = chatOutputMessage(
-        turn.id, output, chatSession.version_id, processing.reviewDetails, processing.job,
-      );
-      setChatMessages((current) => current.map((item) => item.id === pendingMessage.id ? agentMessage : item));
     } catch (error) {
+      if (chatConnectionRef.current !== connection) return;
       const failedMessage: ChatMessage = {
         id: pendingMessage.id,
         role: "agent",
@@ -1506,7 +1582,10 @@ function App() {
       };
       setChatMessages((current) => current.map((item) => item.id === pendingMessage.id ? failedMessage : item));
     } finally {
-      setChatBusy(false);
+      if (chatConnectionRef.current === connection) {
+        chatSendingRef.current = false;
+        setChatSending(false);
+      }
     }
   }
 
@@ -1684,6 +1763,8 @@ function App() {
                 hasSignature={Boolean(processing.signature)}
                 canUseChat={isDemoMode ? hasReconciliation : canUseLiveChat}
                 isBusy={chatBusy || processing.reviewBusy}
+                canStop={activeChatRun !== null}
+                isStopping={chatStopping}
                 applyingPlanId={applyingPlanId}
                 revertingPlanId={revertingPlanId}
                 planErrors={chatPlanErrors}
@@ -1693,6 +1774,7 @@ function App() {
                 selectedSourceRef={selectedSourceRef}
                 onDraftChange={setChatDraft}
                 onSend={sendChatMessage}
+                onStop={stopChatRun}
                 onApplyPlan={applyChatPlan}
                 onCancelPlan={cancelChatPlan}
                 onUndoPlan={undoChatPlan}
@@ -2286,7 +2368,17 @@ function App() {
                                 >
                                   {isSavingChoice ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
                                 </button>
-
+                                {isUnsaved && (
+                                  <button className="secondary-button" type="button"
+                                    disabled={processing.reviewBusy}
+                                    onClick={() => setSelectedChoices((current) => {
+                                      const next = { ...current };
+                                      if (appliedChoiceId) next[finding.id] = appliedChoiceId;
+                                      else delete next[finding.id];
+                                      return next;
+                                    })}
+                                  >Отменить выбор</button>
+                                )}
                                 {isResolved && <span className="competency-saved-note">Выбор сохранён в версии</span>}
                                 {choiceErrors[finding.id] && (
                                   <p className="competency-api-note" role="alert">Не удалось сохранить выбор: {choiceErrors[finding.id]}</p>
