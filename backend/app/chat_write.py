@@ -68,6 +68,10 @@ class ChatWriteRepository:
                 )
                 if snapshot.review is None or not snapshot.review.graph_ready:
                     raise DomainError(409, "Нужен подготовленный граф программы")
+                from app.version_policy import pending_document_choices
+
+                if pending_document_choices(snapshot.review):
+                    raise DomainError(409, "Сначала примените сохранённый выбор кнопкой «Далее»")
                 if any(choice.conflict_id == turn_id for choice in snapshot.review.decisions):
                     raise DomainError(409, "Предложение уже принято")
                 proposal = ChangeProposal.model_validate(turn["result"])
@@ -160,6 +164,12 @@ class ChatWriteRepository:
                     # Каждая правка получает собственную неизменяемую версию и проверку.
                     try:
                         project_snapshot_documents(document_inputs, snapshot)
+                        if index == len(changes) - 1:
+                            from app.source_graph import apply_document_selections
+
+                            snapshot = apply_document_selections(
+                                program_id, document_inputs, snapshot, [],
+                            )
                     except ValueError as error:
                         raise DomainError(422, str(error)) from error
                     version = insert_version(
@@ -245,6 +255,13 @@ class ChatWriteRepository:
                 key=key, fingerprint=fingerprint, origin="restore",
                 restore_id=target_id, actor_type="user", actor_id=body.signature,
             )
+            if snapshot.review:
+                ReviewRepository(self.pool).create(
+                    program_id, "automatic-check:" + str(version["id"]),
+                    CheckCreate(version_id=version["id"]), purpose="check",
+                    review_id=snapshot.review.review_id, connection=conn,
+                    snapshot_override=snapshot,
+                )
             cur.execute(
                 "UPDATE chat_sessions SET version_id=%s,updated_at=now() WHERE id=%s",
                 (version["id"], session_id),

@@ -138,7 +138,7 @@ def test_policy_revision_is_stable_and_failed_remains_validator_outcome():
     changed_rules["ruleset"]["config"] = {"threshold": 0.9}
     changed = apply_confirmation_policy(changed_rules)
 
-    assert once["ruleset"]["revision"].startswith("mvp-confirmation-policy-v1:")
+    assert once["ruleset"]["revision"].startswith("mvp-version-policy-v2:")
     assert twice["ruleset"]["revision"] == once["ruleset"]["revision"]
     assert changed["ruleset"]["revision"] != once["ruleset"]["revision"]
     assert once["coverage"][0]["status"] == "failed"
@@ -164,3 +164,18 @@ def test_prepare_report_omits_backend_only_graph_metadata():
     assert "graph_build_issues" not in report
     assert "candidate" not in report
     assert "artifacts" not in report
+
+
+def test_automatic_graph_check_keeps_resolved_indicator_choice_cards():
+    from app.review_projection import visible_prepare_findings
+
+    chosen = {"id": "chosen", "job_id": "prepare", "rule_code": "R-08", "requires_decision": True}
+    pending = {**chosen, "id": "pending"}
+    diagnostic = {**chosen, "id": "diagnostic", "requires_decision": False}
+    checked = {**diagnostic, "id": "check-result", "job_id": "check"}
+    items = [chosen, pending, diagnostic, checked]
+    assert visible_prepare_findings(items, "prepare") == [
+        chosen, pending, checked,
+    ]
+
+    assert items == [chosen, pending, diagnostic, checked]

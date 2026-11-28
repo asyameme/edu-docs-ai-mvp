@@ -10,8 +10,7 @@ import httpx
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
-from test_generation_docx_patch import make_docx
-from test_review_integration import choose, post, prepare, wait
+from test_review_integration import choose, make_docx, post, prepare, wait
 
 from app.config import get_settings
 
@@ -109,7 +108,7 @@ def saved_multi_field_proposal(program, session, changes):
 
 
 @pytest.mark.parametrize("final", [180, 108])
-def test_two_accepted_chat_proposals_check_confirm_and_docx(final):
+def test_two_accepted_chat_proposals_check_and_docx(final):
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         original = make_docx("<w:p><w:r><w:t>Тестовая дисциплина: 108 часов</w:t></w:r></w:p>")
         root, _, review = prepare(http, "РПД/РПД_матанализ1.docx", content=original)
@@ -151,18 +150,21 @@ def test_two_accepted_chat_proposals_check_confirm_and_docx(final):
             },
             headers={"Idempotency-Key": uuid4().hex},
         )
-        assert rejected.status_code == 409, rejected.text
+        if final == 108:
+            assert rejected.status_code == 201, rejected.text
+            version = rejected.json()
+            assert version["snapshot"]["entities"][0]["attributes"]["hours_total"] == final
+            assert len(version["snapshot"]["review"]["decisions"]) == 3
+            details = http.get(root + f"/versions/{version['id']}/review").json()
+            checked = wait(
+                http, root + f"/reviews/{review['id']}/checks/"
+                + details["lifecycle"]["check_job_id"],
+            )
+        else:
+            assert rejected.status_code == 409, rejected.text
         assert http.get(root).json()["current_version_id"] == version["id"]
-        confirmed = post(
-            http,
-            root + f"/reviews/{review['id']}/confirm",
-            {
-                "expected_version_id": version["id"],
-                "signature": "Тестовый пользователь",
-                "check_job_id": accepted["check_job_id"],
-            },
-            201,
-        )
+        assert checked["status"] == "completed"
+        confirmed = version
         job = post(http, root + "/generation", {"version_id": confirmed["id"]}, 202)
         generated = wait(http, root + "/generation/" + job["id"])
         assert generated["status"] == "completed", generated
@@ -217,16 +219,8 @@ def test_sequential_chat_changes_to_different_fields_are_both_generated():
         assert checked["status"] == "completed", checked
         version = second["version"]
 
-        confirmed = post(
-            http,
-            root + f"/reviews/{review['id']}/confirm",
-            {
-                "expected_version_id": version["id"],
-                "signature": "Тестовый пользователь",
-                "check_job_id": second["check_job_id"],
-            },
-            201,
-        )
+        assert checked["status"] == "completed"
+        confirmed = version
         generation = post(http, root + "/generation", {"version_id": confirmed["id"]}, 202)
         generated = wait(http, root + "/generation/" + generation["id"])
         assert generated["status"] == "completed", generated

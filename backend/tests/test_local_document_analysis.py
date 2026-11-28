@@ -344,6 +344,9 @@ def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp
             assert identity == job["id"]
             return job
 
+        def ensure_source_graph(self, identity):
+            assert identity == job["id"]
+
         def publish(self, identity, result, artifacts, raw, raw_hash):
             assert "candidate" not in raw and "candidate" not in result
             AnalysisV2.model_validate(validator_result_for_contract(raw))
@@ -359,7 +362,7 @@ def test_activity_uses_local_v2_analyzer_and_preserves_protocol(monkeypatch, tmp
     monkeypatch.setattr("app.review_activities.to_snapshot_v2", forbidden)
     activity = object.__new__(ReviewActivities)
     activity.repo = Repository()
-    activity.settings = SimpleNamespace(artifact_files_path=tmp_path)
+    activity.settings = SimpleNamespace(artifact_files_path=tmp_path, local_validation_enabled=True)
     assert activity.execute({"job_id": str(job["id"])}) == "completed"
     assert published[0]["schema_version"] == 2
     assert published[0]["issues"][0]["requires_decision"]

@@ -2,11 +2,14 @@ import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "r
 import { ImportProgress } from "./ImportProgress";
 import { GenerationScreen, type GenerationReview } from "./GenerationScreen";
 import { DiagnosticList } from "./DiagnosticList";
-import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWarnings, type Diagnostic } from "./diagnostics";
+import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, type Diagnostic, type DiagnosticGroup } from "./diagnostics";
 import { useImportJob } from "./useImportJob";
 import { api } from "./api";
 import { parseChatProgress, type ChatProgress } from "./chatProgress";
 import { variantDocumentIds } from "./variantDocuments";
+import { automaticGenerationReview } from "./versionLifecycle";
+import { finishedChoosing, reviewStageFor, type ReviewStage } from "./reviewStage";
+import { diagnosticDiscussionPrompt, diagnosticDiscussionText } from "./diagnosticDiscussion";
 import type {
   ChatOutput,
   ChatProposedChange,
@@ -311,7 +314,7 @@ function chatHistoryMessages(
   }
 
   return history.turns.flatMap((turn: ChatTurnHistoryRead) => {
-    const userMessage: ChatMessage = { id: `${turn.id}-user`, role: "user", text: turn.user_text };
+    const userMessage: ChatMessage = { id: `${turn.id}-user`, role: "user", text: diagnosticDiscussionText(turn.user_text) };
     if (turn.status === "pending") {
       return [userMessage, { id: `${turn.id}-agent`, role: "agent", text: "Обрабатываю запрос…" }];
     }
@@ -696,7 +699,7 @@ type ChatScreenProps = {
   versionNumber: number;
   currentVersionId: string;
   isDemoMode: boolean;
-  isConfirmed: boolean;
+  versionSaved: boolean;
   hasSignature: boolean;
   canUseChat: boolean;
   isBusy: boolean;
@@ -726,7 +729,7 @@ function ChatScreen({
   versionNumber,
   currentVersionId,
   isDemoMode,
-  isConfirmed,
+  versionSaved,
   hasSignature,
   canUseChat,
   isBusy,
@@ -760,7 +763,7 @@ function ChatScreen({
           <h1>Чат с агентом</h1>
           <p className="eyebrow">Вопросы, проверки и изменения программы</p>
         </div>
-        <span className={`status-pill ${isDemoMode || isConfirmed ? "status-pill--green" : "status-pill--muted"}`}>
+        <span className={`status-pill ${isDemoMode || versionSaved ? "status-pill--green" : "status-pill--muted"}`}>
           Версия {versionNumber}
         </span>
       </section>
@@ -873,8 +876,8 @@ function ChatScreen({
                       )}
                       {message.plan.status === "pending" ? (
                         <>
-                          {message.plan.kind === "demo" && !isConfirmed && (
-                            <p className="plan-lock-note">Сначала подтвердите версию в разделе «Программа».</p>
+                          {message.plan.kind === "demo" && !versionSaved && (
+                            <p className="plan-lock-note">Дождитесь сохранения версии программы.</p>
                           )}
                           {message.plan.kind === "proposal" && message.plan.expectedVersionId !== currentVersionId && (
                             <p className="plan-lock-note">Предложение относится к предыдущей версии. Отправьте запрос заново.</p>
@@ -884,7 +887,7 @@ function ChatScreen({
                               type="button"
                               className="plan-apply-button"
                               disabled={message.plan.kind === "demo"
-                                ? !isConfirmed
+                                ? !versionSaved
                                 : !canUseChat || !hasSignature || isBusy || message.plan.expectedVersionId !== currentVersionId
                                   || message.plan.unresolvedQuestions.length > 0}
                               onClick={() => { void onApplyPlan(message.id); }}
@@ -968,7 +971,7 @@ function ChatScreen({
             rows={1}
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}
-            placeholder={isConfirmed ? "Опишите, что нужно изменить, или задайте вопрос…" : "Задайте вопрос о программе…"}
+            placeholder={versionSaved ? "Опишите, что нужно изменить, или задайте вопрос…" : "Задайте вопрос о программе…"}
             disabled={!canUseChat || isBusy}
           />
           <button className="chat-send-button" disabled={!canUseChat || isBusy || !draft.trim()} type="submit">
@@ -1094,7 +1097,6 @@ function App() {
   const hasDemoPreview = isChatPreview || isReconciliationPreview || isGenerationPreview;
   const processing = useImportJob();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const autoCheckAttemptRef = useRef<string | null>(null);
   const [documents, setDocuments] = useState<ProgramDocument[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState("");
@@ -1102,7 +1104,6 @@ function App() {
   const [activeScreen, setActiveScreen] = useState<AppScreen>(
     isChatPreview ? "Чат" : isGenerationPreview ? "Генерация" : "Программа",
   );
-  const [demoConfirmed, setDemoConfirmed] = useState(isChatPreview || isGenerationPreview);
   const chatPreviewChoices = isChatPreview
     ? Object.fromEntries(demoProgram.findings.map((finding) => [finding.id, finding.choices[0]?.id ?? ""]))
     : {};
@@ -1115,13 +1116,35 @@ function App() {
   const [findingStatusFilter, setFindingStatusFilter] = useState<FindingStatusFilter>("all");
   const [rpdDocumentId, setRpdDocumentId] = useState("");
   const [coverageCompetencyCode, setCoverageCompetencyCode] = useState("");
-  const [acceptedWarningIds, setAcceptedWarningIds] = useState<string[]>([]);
+  const [reviewStages, setReviewStages] = useState<Record<string, ReviewStage>>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem("education-review-stages") || "{}");
+      if (!isRecord(saved)) return {};
+      const stages: Record<string, ReviewStage> = {};
+      for (const [key, stage] of Object.entries(saved)) {
+        if (stage === "choices" || stage === "results") stages[key] = stage;
+      }
+      return stages;
+    } catch { return {}; }
+  });
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
+  const previousChoicesRef = useRef({ key: "", count: 0 });
+  useEffect(() => {
+    try { localStorage.setItem("education-review-stages", JSON.stringify(reviewStages)); }
+    catch { /* Переключение экранов работает и без локального хранилища. */ }
+  }, [reviewStages]);
   const [levelAutoNotice, setLevelAutoNotice] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(hasDemoPreview ? demoChatMessages : []);
   const [chatDraft, setChatDraft] = useState("");
   const [chatAvailability, setChatAvailability] = useState<"loading" | "available" | "unavailable">("loading");
   const [chatSession, setChatSession] = useState<ChatSessionHistoryRead | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
+  const chatSendingRef = useRef(false);
+  const consumedDiscussionRef = useRef<string | null>(null);
+  const [pendingDiscussion, setPendingDiscussion] = useState<{
+    id: string; programId: string; versionId: string; prompt: string;
+  } | null>(null);
   const [applyingPlanId, setApplyingPlanId] = useState<string | null>(null);
   const [revertingPlanId, setRevertingPlanId] = useState<string | null>(null);
   const [chatPlanErrors, setChatPlanErrors] = useState<Record<string, string>>({});
@@ -1135,7 +1158,7 @@ function App() {
     : processing.reviewDetails
       ? mapReviewToProgram(processing.reviewDetails, processing.job)
       : null;
-  const isConfirmed = isDemoMode ? demoConfirmed : Boolean(processing.reviewDetails?.confirmed);
+  const automaticVersion = !isDemoMode;
   const versionNumber = processing.reviewDetails?.version.number ?? 1;
   const hasReconciliation = parsedProgram !== null;
   const unresolvedCount = parsedProgram?.findings.filter((finding) => {
@@ -1158,15 +1181,8 @@ function App() {
     const saved = Boolean(savedChoiceId && (!draftChoiceId || draftChoiceId === savedChoiceId) && customTextMatches);
     return findingStatusFilter === "all" || (findingStatusFilter === "saved" ? saved : !saved);
   });
-  const visibleIssues = (parsedProgram?.issues ?? []).filter((issue) =>
-    findingFilter === "all" || issueRuleGroup(issue.ruleCode) === findingFilter,
-  );
-  const visibleIssueCount = groupDiagnostics(visibleIssues).length;
   const hasUploadedFiles = documents.length > 0 || processing.job !== null;
   const uploadNotice = processing.notice || notice;
-  const checkWarnings = processing.checkJob?.status === "completed"
-    ? processing.checkJob.report?.issues.filter((issue) => issue.severity === "warning") ?? []
-    : [];
   const checkBlockingCount = processing.checkJob?.status === "completed"
     ? processing.checkJob.report?.issues.filter((issue) => issue.severity === "blocking" || issue.requires_decision).length ?? 0
     : 0;
@@ -1176,31 +1192,54 @@ function App() {
   );
   const prepareReport = processing.reviewDetails?.prepare_report ?? null;
   const graphReady = processing.reviewDetails?.version.snapshot.review?.graph_ready === true;
+  const reviewKey = `${processing.programId}:${processing.reviewDetails?.version.snapshot.review?.review_id ?? ""}`;
+  const analysisComplete = processing.reviewJob?.status === "completed"
+    && processing.reviewJob.review_id === processing.reviewDetails?.version.snapshot.review?.review_id;
+  const pendingSavedChoices = parsedProgram?.findings.filter((finding) => !finding.selectedChoiceId).length ?? 0;
+  const needsProjection = Boolean(processing.reviewDetails?.lifecycle?.needs_projection);
+  const graphBuildInProgress = Boolean(processing.graphBuildJob
+    && ["pending", "processing"].includes(processing.graphBuildJob.status));
+  const reviewStage = reviewStageFor({
+    live: automaticVersion, graphReady, analysisComplete,
+    pendingChoices: pendingSavedChoices + (needsProjection ? 1 : 0), selectedStage: reviewStages[reviewKey],
+  });
+  const showChoices = reviewStage === "choices";
+  const showResults = reviewStage === "results";
+  const stageCheckComplete = showResults && checkMatchesCurrentVersion;
+  function selectReviewStage(stage: ReviewStage) {
+    setReviewStages((current) => ({ ...current, [reviewKey]: stage }));
+  }
+  useEffect(() => {
+    const previous = previousChoicesRef.current;
+    if (automaticVersion && !needsProjection && analysisComplete && finishedChoosing(previous, { key: reviewKey, count: pendingSavedChoices })) {
+      setReviewStages((current) => ({ ...current, [reviewKey]: "results" }));
+    }
+    previousChoicesRef.current = { key: reviewKey, count: pendingSavedChoices };
+  }, [automaticVersion, needsProjection, analysisComplete, reviewKey, pendingSavedChoices]);
   useEffect(() => {
     if (
-      processing.reviewDetails?.graph_build || graphReady ||
-      (!processing.reviewBusy && unresolvedCount > 0)
+      !processing.reviewBusy && (processing.reviewDetails?.graph_build || graphReady || unresolvedCount > 0)
     ) setSavingFindingId(null);
   }, [processing.reviewBusy, processing.reviewDetails?.graph_build, unresolvedCount, graphReady]);
-  const canUseLiveChat = !isDemoMode && graphReady && chatAvailability === "available" && chatSession !== null;
+  const canUseLiveChat = !isDemoMode && graphReady && !needsProjection && chatAvailability === "available" && chatSession !== null && chatSession.version_id === processing.versionId;
   const chatStatus = isDemoMode
     ? ""
     : chatAvailability === "loading"
       ? "Проверяем подключение к модели чата…"
       : chatAvailability === "unavailable"
         ? "Настройки модели чата не готовы. Проверьте CHAT_ENABLED и параметры модели."
+        : needsProjection
+          ? "Нажмите «Далее» на экране выбора, чтобы применить сохранённые изменения."
         : !graphReady
           ? "Чат станет доступен после построения графа программы."
           : chatSession
             ? ""
             : chatStatusMessage;
   const currentCheckReport = checkMatchesCurrentVersion ? processing.checkJob?.report ?? null : null;
-  // Список правил показывается только на этапе ответов (до сборки графа).
-  // После сборки графа правила со страницы исчезают: остаются статус проверки
-  // и блок ручных проверок R-09/R-11.
-  const displayedCoverage = graphReady ? [] : prepareReport?.coverage ?? [];
+  // Предварительные правила и полная проверка относятся к разным экранам.
+  const displayedCoverage = showChoices ? prepareReport?.coverage ?? [] : [];
   const displayedValidationIssueCount = groupDiagnostics(
-    (currentCheckReport?.issues ?? (graphReady ? [] : prepareReport?.issues ?? []))
+    (showChoices ? prepareReport?.issues ?? [] : currentCheckReport?.issues ?? [])
       .filter((issue) => !issue.requires_decision).map((issue) => reviewDiagnostic(issue, [])),
   ).length;
   function checkIssueDiagnostic(issue: ReviewIssue) {
@@ -1212,7 +1251,13 @@ function App() {
       name: processing.job?.files.find((file) => file.document_id === id)?.member_name ?? "Документ пакета",
     })));
   }
-  const checkWarningDiagnostics = checkWarnings.map(checkIssueDiagnostic);
+  const stageIssues = automaticVersion && showChoices
+    ? (prepareReport?.issues ?? []).filter((issue) => !issue.requires_decision).map(checkIssueDiagnostic)
+    : parsedProgram?.issues ?? [];
+  const visibleIssues = stageIssues.filter((issue) =>
+    findingFilter === "all" || issueRuleGroup(issue.ruleCode) === findingFilter,
+  );
+  const visibleIssueCount = groupDiagnostics(visibleIssues).length;
   const checkIsRunning = Boolean(
     processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) &&
     processing.checkJob.input_version_id === processing.versionId,
@@ -1231,43 +1276,9 @@ function App() {
       ? processing.reviewDetails?.check_report ?? null
       : null
   );
-  const generationFreshIssueIds = processing.reviewDetails?.version.id === processing.versionId &&
-    (!currentCheckReport || processing.reviewDetails.check_job_id === processing.checkJob?.id)
-    ? processing.reviewDetails.fresh_issue_ids
-    : null;
-  const generationBlockReason = !graphReady
-    ? "Завершите сверку документов в разделе «Программа»."
-    : unresolvedCount > 0
-      ? "В разделе «Программа» остались расхождения, по которым нужно выбрать вариант."
-      : !checkMatchesCurrentVersion
-        ? checkIsRunning ? "Дождитесь окончания повторной проверки." : "Нужна завершённая проверка текущей версии."
-        : checkBlockingCount > 0
-          ? "Исправьте блокирующие замечания перед сборкой пакета."
-          : skippedRequiredChecks.length > 0
-            ? "Дождитесь результатов обязательных проверок."
-            : !processing.signature
-              ? "Укажите подпись программы в верхней части экрана."
-              : processing.reviewBusy ? "Дождитесь сохранения изменений." : null;
-  const generationReview: GenerationReview = isConfirmed
-    ? { kind: "confirmed", versionId: processing.versionId }
-    : generationBlockReason
-      ? { kind: "blocked", reason: generationBlockReason }
-      : {
-        kind: "ready",
-        confirm: () => {
-          const freshIds = generationFreshIssueIds === null
-            ? null
-            : new Set(generationFreshIssueIds);
-          const warningsToAccept = checkWarnings
-            .filter((warning) => freshIds === null || freshIds.has(warning.id))
-            .map((warning) => warning.id);
-          return processing.confirm(warningsToAccept, processing.versionId);
-        },
-      };
-
-  useEffect(() => {
-    setAcceptedWarningIds([]);
-  }, [processing.checkJob?.id]);
+  const generationReview: GenerationReview = isDemoMode
+    ? { kind: "saved", versionId: processing.versionId }
+    : automaticGenerationReview(processing.reviewDetails, processing.versionId);
 
   useEffect(() => {
     setSignatureDraft(processing.signature ?? "");
@@ -1345,32 +1356,6 @@ function App() {
     setFindingStatusFilter("all");
   }, [processing.reviewJob?.id, processing.reviewJob?.status]);
 
-  useEffect(() => {
-    const details = processing.reviewDetails;
-    const versionId = details?.version.id;
-    const reviewId = details?.version.snapshot.review?.review_id;
-    if (
-      isDemoMode || !graphReady || !details || !versionId || !reviewId ||
-      !processing.sessionVerified ||
-      processing.versionId !== versionId || processing.reviewBusy || details.confirmed ||
-      details.check_job_id || processing.checkJob?.input_version_id === versionId
-    ) return;
-
-    const attemptKey = `${reviewId}:${versionId}`;
-    if (autoCheckAttemptRef.current === attemptKey) return;
-    autoCheckAttemptRef.current = attemptKey;
-    void processing.runCheck(`auto-check:${attemptKey}`);
-  }, [
-    graphReady,
-    isDemoMode,
-    processing.checkJob?.input_version_id,
-    processing.reviewBusy,
-    processing.reviewDetails,
-    processing.runCheck,
-    processing.sessionVerified,
-    processing.versionId,
-  ]);
-
   async function addFiles(files: FileList | File[]) {
     if (processing.busy) return;
     setNotice("");
@@ -1389,8 +1374,6 @@ function App() {
       setCustomValues({});
       setFindingFilter("all");
       setFindingStatusFilter("pending");
-      setDemoConfirmed(false);
-      setAcceptedWarningIds([]);
       setChatMessages([]);
       setChatDraft("");
       setActiveScreen("Программа");
@@ -1449,8 +1432,46 @@ function App() {
       return;
     }
     setSavingFindingId(findingId);
-    void processing.decide(findingId, choiceId);
+    const error = await processing.decide(findingId, choiceId);
+    if (error) {
+      setSavingFindingId(null);
+      setChoiceErrors((current) => ({ ...current, [findingId]: error }));
+    } else {
+      setChoiceErrors((current) => {
+        const next = { ...current };
+        delete next[findingId];
+        return next;
+      });
+    }
   }
+
+  function discussDiagnostic(group: DiagnosticGroup) {
+    if (chatBusy || processing.reviewBusy) return;
+    const prompt = diagnosticDiscussionPrompt(group, {
+      programId: processing.programId, versionId: processing.versionId, versionNumber,
+    });
+    setChatDraft(diagnosticDiscussionText(prompt));
+    setPendingDiscussion({ id: crypto.randomUUID(), programId: processing.programId, versionId: processing.versionId, prompt });
+    setActiveScreen("Чат");
+  }
+
+  useEffect(() => {
+    if (!pendingDiscussion || consumedDiscussionRef.current === pendingDiscussion.id) return;
+    const stale = pendingDiscussion.programId !== processing.programId
+      || pendingDiscussion.versionId !== processing.versionId || activeScreen !== "Чат";
+    if (stale || (!isDemoMode && chatAvailability === "unavailable")) {
+      setPendingDiscussion(null);
+      if (stale) setChatDraft((draft) => draft === diagnosticDiscussionText(pendingDiscussion.prompt) ? "" : draft);
+      return;
+    }
+    if ((!isDemoMode && !canUseLiveChat) || chatBusy) return;
+    // Помечаем до отправки: повторный запуск эффекта не создаёт второй запрос.
+    consumedDiscussionRef.current = pendingDiscussion.id;
+    setPendingDiscussion(null);
+    setChatDraft((draft) => draft === diagnosticDiscussionText(pendingDiscussion.prompt) ? "" : draft);
+    void sendChatMessage(pendingDiscussion.prompt);
+  }, [pendingDiscussion, activeScreen, isDemoMode, chatAvailability, canUseLiveChat,
+    chatBusy, processing.programId, processing.versionId]);
 
   async function sendChatMessage(message?: string) {
     const text = (message ?? chatDraft).trim();
@@ -1459,22 +1480,21 @@ function App() {
     if (isDemoMode) {
       if (!hasReconciliation) return;
       const id = `message-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const userMessage: ChatMessage = { id: `${id}-user`, role: "user", text };
+      const userMessage: ChatMessage = { id: `${id}-user`, role: "user", text: diagnosticDiscussionText(text) };
       const agentMessage: ChatMessage = {
         id: `${id}-agent`,
         role: "agent",
-        text: isConfirmed
-          ? "Это демонстрационный ответ. В рабочей версии агент проанализирует запрос и подготовит план правок."
-          : "Запрос принят в демо-режиме. До подтверждения версии можно задавать вопросы, а планы правок будут доступны после подтверждения.",
+        text: "Это демонстрационный ответ. В рабочей версии агент проанализирует запрос и подготовит план правок.",
       };
       setChatMessages((current) => [...current, userMessage, agentMessage]);
       if (message === undefined) setChatDraft("");
       return;
     }
 
-    if (!canUseLiveChat || !chatSession || chatBusy || !processing.programId) return;
+    if (!canUseLiveChat || !chatSession || chatBusy || chatSendingRef.current || !processing.programId) return;
+    chatSendingRef.current = true;
     const optimisticId = `message-${crypto.randomUUID()}`;
-    const userMessage: ChatMessage = { id: `${optimisticId}-user`, role: "user", text };
+    const userMessage: ChatMessage = { id: `${optimisticId}-user`, role: "user", text: diagnosticDiscussionText(text) };
     const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…", pending: true };
     setChatMessages((current) => [...current, userMessage, pendingMessage]);
     setChatBusy(true);
@@ -1506,6 +1526,7 @@ function App() {
       };
       setChatMessages((current) => current.map((item) => item.id === pendingMessage.id ? failedMessage : item));
     } finally {
+      chatSendingRef.current = false;
       setChatBusy(false);
     }
   }
@@ -1515,7 +1536,6 @@ function App() {
     const plan = message?.plan;
     if (!plan || plan.status !== "pending") return;
     if (plan.kind === "demo") {
-      if (!isConfirmed) return;
       setChatMessages((current) => current.map((item) => (
         item.id === messageId && item.plan?.kind === "demo" && item.plan.status === "pending"
           ? {
@@ -1617,17 +1637,14 @@ function App() {
     Boolean(hasUploadedFiles && !processing.notice && (!processing.sessionVerified ||
       (processing.reviewJob?.status === "completed" && !processing.reviewDetails))));
 
-  const pageStatus = restoringProgram ? "Загружаем состояние программы…" : isDemoMode && parsedProgram
-    ? `Версия ${versionNumber} · подтверждена`
-    : isConfirmed
-      ? `Версия ${versionNumber} · подтверждена`
-      : hasReconciliation
-        ? "Готова к сверке"
-        : processing.reviewJob && ["pending", "processing"].includes(processing.reviewJob.status)
-          ? "Сверка документов"
-        : hasUploadedFiles
-          ? "Пакет загружен"
-          : "Ожидает загрузки";
+  const pageStatus = restoringProgram ? "Загружаем состояние программы…"
+    : hasReconciliation
+      ? processing.reviewDetails?.lifecycle?.is_source
+        ? "Исходная версия сохранена"
+        : `Версия ${versionNumber} · сохранена`
+      : processing.reviewJob && ["pending", "processing"].includes(processing.reviewJob.status)
+        ? "Сверка документов"
+        : hasUploadedFiles ? "Пакет загружен" : "Ожидает загрузки";
 
   return (
     <div className="app-shell">
@@ -1680,7 +1697,7 @@ function App() {
                 versionNumber={versionNumber}
                 currentVersionId={processing.versionId}
                 isDemoMode={isDemoMode}
-                isConfirmed={isConfirmed}
+                versionSaved={hasReconciliation}
                 hasSignature={Boolean(processing.signature)}
                 canUseChat={isDemoMode ? hasReconciliation : canUseLiveChat}
                 isBusy={chatBusy || processing.reviewBusy}
@@ -1707,20 +1724,17 @@ function App() {
                 isDemoMode={isDemoMode}
                 checkReport={generationCheckReport}
                 issues={(generationCheckReport?.issues ?? []).map(checkIssueDiagnostic)}
-                freshIssueIds={generationFreshIssueIds}
                 reviewNotice={processing.notice}
-                acceptedWarnings={
-                  processing.reviewDetails?.confirmation?.accepted_warning_ids.length ?? 0
-                }
+                discussion={automaticVersion ? { onDiscuss: discussDiagnostic, disabled: chatBusy || processing.reviewBusy } : undefined}
               />
             ) : (
               <>
             <section className="page-heading">
               <div>
                 <h1>Программа</h1>
-                <p className="eyebrow">Загрузка документов, сверка и подтверждение версии</p>
+                <p className="eyebrow">Загрузка документов и сверка</p>
               </div>
-              <span className={`status-pill ${!isDemoMode && isConfirmed ? "status-pill--green" : "status-pill--muted"}`}>
+              <span className={`status-pill ${hasReconciliation ? "status-pill--green" : "status-pill--muted"}`}>
                 {pageStatus}
               </span>
             </section>
@@ -1782,16 +1796,18 @@ function App() {
               <section className="processing-card card" aria-labelledby="processing-title">
                 <div className="processing-heading">
                   <div>
-                    <h2 id="processing-title">Обработка и сверка</h2>
+                    <h2 id="processing-title">Проверка документов</h2>
                     <p className="processing-subtitle">
                       {parsedProgram
-                        ? `Все ${formatFileCount(parsedProgram.documentCount)} обработаны. Проверьте расхождения перед подтверждением.`
+                        ? automaticVersion
+                          ? `Все ${formatFileCount(parsedProgram.documentCount)} обработаны. ${showChoices ? "Выберите варианты исправлений." : "Оставшиеся замечания можно разобрать в чате."}`
+                          : `Все ${formatFileCount(parsedProgram.documentCount)} обработаны. Проверьте расхождения перед выгрузкой.`
                         : restoringProgram ? "Загружаем сохранённые результаты обработки и сверки…" : "Проверка начнётся после загрузки, распаковки и парсинга архива."}
                     </p>
                   </div>
                   {parsedProgram ? (
                     <span className={`status-pill ${unresolvedCount ? "status-pill--warning" : "status-pill--green"}`}>
-                      {unresolvedCount > 0 ? `Решений ожидают: ${unresolvedCount} · ` : ""}{formatIssueSummary(parsedProgram.issues)}
+                      {unresolvedCount > 0 ? `Без выбранного варианта: ${unresolvedCount} · ` : ""}{formatIssueSummary(stageIssues)}
                     </span>
                   ) : (
                     <span className="status-pill status-pill--muted">{restoringProgram ? "Загружаем состояние…" : "Ожидает обработки"}</span>
@@ -1818,10 +1834,11 @@ function App() {
                           job={processing.job}
                           busy={processing.busy}
                           onRetry={processing.retry}
+                          showDiagnostics={showResults}
                         />
                       </details>
                     )}
-                    <div className="competency-filter-toolbar" aria-label="Фильтры результатов проверки">
+                    {(!automaticVersion || showChoices) && <div className="competency-filter-toolbar" aria-label="Фильтры результатов проверки">
                       <div className="competency-filter-rules" role="group" aria-label="Фильтр по виду расхождения">
                         {findingFilters.map(({ code, label }) => (
                           <button key={code} type="button"
@@ -1836,54 +1853,61 @@ function App() {
                         Статус
                         <select value={findingStatusFilter} onChange={(event) => setFindingStatusFilter(event.target.value as FindingStatusFilter)}>
                           <option value="all">Все</option>
-                          <option value="pending">Требуют решения</option>
-                          <option value="saved">Сохранены</option>
+                          <option value="pending">Без выбранного варианта</option>
+                          <option value="saved">Вариант сохранён</option>
                         </select>
                       </label>
-                    </div>
+                    </div>}
                     {processing.reviewDetails && (
-                      <section className={`validation-stage-card${checkMatchesCurrentVersion || graphReady ? " validation-stage-card--complete" : ""}`} aria-label="Статус проверки">
+                      <section className={`validation-stage-card${stageCheckComplete || showResults ? " validation-stage-card--complete" : ""}`} aria-label="Статус проверки">
                         <div className="validation-stage-heading">
                           <div>
                             <h3>
                               {checkIsRunning
-                                ? "Проверки по графу выполняются"
-                                : checkMatchesCurrentVersion
-                                ? "Проверки по графу завершены"
-                                : graphReady
-                                  ? "Граф сущностей и связей построен"
-                                  : "Предварительная сверка после парсинга"}
+                                ? "Проверяем документы"
+                                : stageCheckComplete
+                                ? "Проверка документов завершена"
+                                : showResults
+                                  ? "Документы готовы к проверке"
+                                  : "Предварительная сверка документов"}
                             </h3>
                             <p>
-                              {checkMatchesCurrentVersion
+                              {stageCheckComplete
                                 ? `В полной проверке групп замечаний: ${displayedValidationIssueCount}.`
-                                : graphReady
-                                  ? "Решения сохранены, граф сущностей и связей собран."
+                                : showResults
+                                  ? "Подготавливаем результаты проверки."
                                   : `Групп замечаний проверки: ${displayedValidationIssueCount}.`}
                             </p>
                           </div>
-                          <span className={`status-pill ${checkMatchesCurrentVersion || graphReady ? "status-pill--green" : "status-pill--warning"}`}>
-                            {checkIsRunning ? "Проверка выполняется" : checkMatchesCurrentVersion ? "Проверки завершены" : graphReady ? "Граф готов" : "Предварительный этап"}
+                          <span className={`status-pill ${stageCheckComplete || showResults ? "status-pill--green" : "status-pill--warning"}`}>
+                            {checkIsRunning ? "Проверка выполняется" : stageCheckComplete ? "Проверки завершены" : showResults ? "Граф готов" : "Предварительный этап"}
                           </span>
                         </div>
                         <div className="validation-stage-metrics">
                           <div><strong>{parsedProgram.documentCount}</strong><span>файлов обработано</span></div>
                           <div><strong>{displayedValidationIssueCount}</strong><span>групп замечаний проверки</span></div>
-                          <div><strong>{unresolvedCount}</strong><span>решений ожидают</span></div>
-                          {!graphReady && (
+                          <div><strong>{unresolvedCount}</strong><span>без выбранного варианта</span></div>
+                          {!showResults && (
                             <div><strong>{displayedCoverage.length}</strong><span>видов проверок</span></div>
                           )}
                         </div>
                         <p className="validation-stage-message" role="status">
-                          {checkIsRunning
+                          {automaticVersion
+                            ? showChoices ? "Сравните варианты и сохраните подходящий."
+                              : graphBuildInProgress ? "Выбор сохранён. Собираем новую версию графа; проверки и чат откроются после сохранения."
+                                : needsProjection ? "Выбранные изменения сохранены. Перейдите со страницы выбора, чтобы обновить граф."
+                              : checkIsRunning ? "Проверка документов выполняется…"
+                                : stageCheckComplete ? "Результаты относятся к выбранной версии документов."
+                                  : "Ожидаем результаты проверки документов."
+                            : checkIsRunning
                             ? `Проверки по графу выполняются · ${processing.checkJob?.progress ?? 0}%.`
-                            : checkMatchesCurrentVersion
+                            : stageCheckComplete
                               ? "Результаты относятся к выбранной версии графа."
                               : processing.graphBuildJob?.status === "failed" || processing.graphBuildJob?.status === "conflict"
                                 ? processing.graphBuildJob.message ?? "Не удалось собрать граф программы. Откройте замечания проверки."
                                 : processing.graphBuildJob && ["pending", "processing"].includes(processing.graphBuildJob.status)
                                   ? "Последнее решение сохранено. Собираем граф программы; после завершения откроются проверки и чат."
-                                  : savingFindingId && unresolvedCount === 0 && !graphReady
+                                  : savingFindingId && unresolvedCount === 0 && !showResults
                                     ? "Последнее решение сохранено. Запускаем сборку графа программы…"
                                   : processing.reviewBusy && savingFindingId && unresolvedCount === 1
                                     ? "Сохраняем последнее решение. После этого начнётся сборка графа программы."
@@ -1891,16 +1915,17 @@ function App() {
                                       ? "Сохраняем выбор. После последнего обязательного решения система построит граф программы."
                                 : unresolvedCount > 0
                                   ? `Сохраните решения для ${unresolvedCount} расхождений. После этого система построит граф программы.`
-                                  : !graphReady
+                                  : !showResults
                                     ? "Граф ещё не готов. Завершите обязательные решения и проверьте замечания о построении графа."
                                     : "Граф построен. Можно отдельно проверить покрытие компетенций и связь результатов обучения с дисциплинами."}
                         </p>
-                        {!isDemoMode && !checkMatchesCurrentVersion && (
+                        {!isDemoMode && !stageCheckComplete && (
                           <button
                             className="confirm-button validation-run-check-button"
                             type="button"
                             disabled={
-                              !graphReady || processing.reviewBusy || checkIsRunning || isConfirmed
+                              !showResults || processing.reviewBusy || checkIsRunning ||
+                              needsProjection || graphBuildInProgress || !graphReady
                             }
                             onClick={() => void processing.runCheck()}
                           >
@@ -1926,15 +1951,15 @@ function App() {
                         )}
                       </section>
                     )}
-                    {!isDemoMode && graphReady && (
+                    {!isDemoMode && graphReady && showResults && (
                       <section className="optional-rule-checks" aria-labelledby="optional-rule-checks-title">
                         <div className="optional-rule-checks-heading">
                           <div>
                             <h3 id="optional-rule-checks-title">Дополнительные проверки</h3>
                             <p>
-                              Запустите их отдельно после сверки документов — доступны
-                              в том числе после подтверждения версии; результаты
-                              ни на что не влияют и не блокируют подтверждение.
+                              {automaticVersion
+                                ? "Выберите цель и запустите нужную проверку."
+                                : "Запустите их отдельно после сверки документов — доступны в том числе после подтверждения версии; результаты не блокируют подтверждение."}
                             </p>
                           </div>
                         </div>
@@ -1990,7 +2015,7 @@ function App() {
                                         id={`${code}-scope`}
                                         value={target}
                                         disabled={!options.length || !processing.optionalChecksReady ||
-                                          processing.reviewBusy || optionalCheckIsRunning}
+                                          processing.reviewBusy || optionalCheckIsRunning || needsProjection || graphBuildInProgress}
                                         onChange={(event) => chooseTarget(event.target.value)}
                                       >
                                         <option value="">{isRpdCheck ? "Выберите одну РПД" : "Выберите одну компетенцию"}</option>
@@ -2006,7 +2031,7 @@ function App() {
                                       type="button"
                                       disabled={
                                         !target || !processing.optionalChecksReady || processing.reviewBusy ||
-                                        checkIsRunning || optionalCheckIsRunning
+                                        checkIsRunning || optionalCheckIsRunning || needsProjection || graphBuildInProgress
                                       }
                                       onClick={() => void processing.runOptionalRuleCheck(code, target)}
                                     >
@@ -2114,17 +2139,17 @@ function App() {
                         </div>
                       </section>
                     )}
-                    {findingFilterDescriptions[findingFilter] && <p className="competency-toolbar-note">{findingFilterDescriptions[findingFilter]}</p>}
-                    <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
-                      <summary>Подробные результаты сверки · групп: {visibleIssueCount}{findingFilter !== "all" ? ` · ${findingFilters.find((item) => item.code === findingFilter)?.label}` : ""}</summary>
+                    {(!automaticVersion || showChoices) && findingFilterDescriptions[findingFilter] && <p className="competency-toolbar-note">{findingFilterDescriptions[findingFilter]}</p>}
+                    {(!automaticVersion || showChoices) && <details className="issues-details" key={`issues-${findingFilter}`} open={findingFilter === "R-08" || findingFilter === "R-11" ? true : undefined}>
+                      <summary>Все замечания проверки · {visibleIssueCount}{findingFilter !== "all" ? ` · ${findingFilters.find((item) => item.code === findingFilter)?.label}` : ""}</summary>
                       <DiagnosticList items={visibleIssues} />
-                    </details>
-                    {!isConfirmed && unresolvedCount > 0 && (
+                    </details>}
+                    {showChoices && unresolvedCount > 0 && (
                       <div className="level-only-decisions">
                         <button
                           className="primary-button"
                           type="button"
-                          disabled={processing.reviewBusy || isConfirmed}
+                          disabled={processing.reviewBusy}
                           onClick={() => {
                             setLevelAutoNotice(null);
                             void processing.decideLevelOnlyVariants().then((applied) => {
@@ -2147,7 +2172,7 @@ function App() {
                         )}
                       </div>
                     )}
-                    {!graphReady && (
+                    {showChoices && (
                     <div className="finding-list finding-accordion">
                       {visibleFindings.length === 0 && <p className="competency-empty-state">По выбранной категории нет расхождений, требующих выбора. {findingFilter === "R-08" ? "Подробности о формулировках индикаторов доступны ниже." : findingFilter === "R-11" ? "Эта проверка не предлагает готовый вариант: её замечания нужно оценить специалисту." : "Попробуйте другую категорию."}</p>}
                       {visibleFindings.map((finding, index) => {
@@ -2185,7 +2210,7 @@ function App() {
                                   : `Расхождение ${index + 1} из ${visibleFindings.length}`}</span>
                               </span>
                               <span className={`finding-status${isResolved || finding.customDecision ? " finding-status--resolved" : isSavingChoice ? " finding-status--saving" : ""}`}>
-                                {isSavingChoice ? "Сохраняем…" : isResolved ? "Решено" : finding.customDecision ? "Свой вариант" : "Нужно решение"}
+                                {isSavingChoice ? "Сохраняем…" : isResolved ? "Вариант сохранён" : finding.customDecision ? "Свой вариант" : "Выберите вариант"}
                               </span>
                             </summary>
                             <div className="variant-accordion-body">
@@ -2214,7 +2239,7 @@ function App() {
                                         value={choice.id}
                                         checked={selectedChoiceId === choice.id}
                                         aria-label={choice.value}
-                                        disabled={isConfirmed || processing.reviewBusy}
+                                        disabled={processing.reviewBusy}
                                         onChange={() => chooseFindingChoice(finding.id, choice.id)}
                                       />
                                       <span className="choice-content">
@@ -2244,7 +2269,7 @@ function App() {
                                         name={`choice-${finding.id}`}
                                         value="__custom__"
                                         checked={isCustom}
-                                        disabled={isConfirmed || processing.reviewBusy}
+                                        disabled={processing.reviewBusy}
                                         onChange={() => chooseFindingChoice(finding.id, "__custom__")}
                                       />
                                       <span className="choice-content"><span className="choice-value">Ввести свой вариант</span></span>
@@ -2263,7 +2288,7 @@ function App() {
                                   rows={finding.ruleCode === "R-01" ? 2 : 4}
                                   value={customText}
                                   maxLength={4000}
-                                  disabled={isConfirmed || processing.reviewBusy}
+                                  disabled={processing.reviewBusy}
                                   placeholder={finding.ruleCode === "R-01" ? "Введите код" : "Введите формулировку"}
                                   onChange={(event) => {
                                     setCustomValues((current) => ({ ...current, [finding.id]: event.target.value }));
@@ -2276,7 +2301,7 @@ function App() {
                                 />
                               </div>
                             )}
-                            {(finding.choices.length > 0 || allowsCustomChoice) && !isConfirmed && (
+                            {(finding.choices.length > 0 || allowsCustomChoice) && (
                               <div className="competency-action-row">
                                 <button
                                   className="secondary-button"
@@ -2284,7 +2309,7 @@ function App() {
                                   disabled={!isUnsaved || (isCustom && !customText.trim()) || processing.reviewBusy}
                                   onClick={() => saveFindingChoice(finding.id, selectedChoiceId)}
                                 >
-                                  {isSavingChoice ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
+                                  {isSavingChoice ? "Сохраняем…" : "Применить выбранный вариант"}
                                 </button>
 
                                 {isResolved && <span className="competency-saved-note">Выбор сохранён в версии</span>}
@@ -2304,88 +2329,80 @@ function App() {
                       })}
                     </div>
                     )}
-                    {graphReady && (
-                      <p className="competency-empty-state" role="status">
-                        Ответы сохранены в версии. Оставшиеся замечания проверки — ниже, в диагностике и предупреждениях.
-                      </p>
+                    {automaticVersion && (
+                      <div className="confirm-version">
+                        <button className="confirm-button" type="button"
+                          disabled={processing.reviewBusy || !analysisComplete}
+                          onClick={async () => {
+                            if (!showChoices) { selectReviewStage("choices"); return; }
+                            setCheckpointError(null);
+                            setCheckpointSubmitting(true);
+                            try {
+                              const error = await processing.checkpointChoices();
+                              if (error) setCheckpointError(error);
+                              else selectReviewStage("results");
+                            } finally {
+                              setCheckpointSubmitting(false);
+                            }
+                          }}>
+                          {checkpointSubmitting && showChoices
+                            ? "Запускаем сборку графа…"
+                            : processing.reviewBusy && showChoices
+                              ? "Сохраняем выбранный вариант…"
+                              : showChoices ? "Далее — к замечаниям проверки" : "Назад к выбору вариантов"}
+                        </button>
+                        {checkpointSubmitting && showChoices && (
+                          <div className="processing-caption" role="status">
+                            <p>Передаём сохранённые варианты на сборку графа. После этого автоматически проверим новую версию.</p>
+                            <progress aria-label="Запуск сборки графа" />
+                          </div>
+                        )}
+                        {checkpointError && <p role="alert">{checkpointError}</p>}
+                      </div>
                     )}
 
-                    {!isDemoMode && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
+
+                    {!isDemoMode && showResults && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
                       <div className="processing-caption" role="status">
-                        <p>Повторная проверка версии выполняется</p>
+                        <p>Шаг 2 из 2. Граф собран — проверяем новую версию и обновляем замечания.</p>
                         <progress max={100} value={processing.checkJob.progress} aria-label="Прогресс повторной проверки" />
                         <span> {processing.checkJob.progress}%</span>
                       </div>
                     )}
-
-                    {!isDemoMode && checkMatchesCurrentVersion && checkWarnings.length > 0 && (
-                      <section className="warning-acknowledgements" aria-label="Принятие предупреждений">
-                        <h3>Подтвердите, что группы предупреждений учтены</h3>
-                        <p>Подтверждение группы относится ко всем указанным в ней записям. Подробности доступны в каждой группе.</p>
-                        <DiagnosticList items={checkWarningDiagnostics} acceptance={{
-                          acceptedIds: acceptedWarningIds, disabled: isConfirmed || processing.reviewBusy,
-                          onChange: (ids, accepted) => setAcceptedWarningIds((current) => updateAcceptedWarnings(current, ids, accepted)),
-                        }} />
-                      </section>
-                    )}
-
-                    {!isDemoMode && checkMatchesCurrentVersion && checkBlockingCount > 0 && (
-                      <p className="upload-notice" role="alert">
-                        Проверка нашла {checkBlockingCount} блокирующих замечаний. Исправьте их перед подтверждением версии.
+                    {!isDemoMode && showResults && graphBuildInProgress && (
+                      <p className="processing-caption" role="status">
+                        Шаг 1 из 2. Формируем новую версию графа по выбранным вариантам. Следом проверим её и обновим замечания.
                       </p>
                     )}
-                    {!isDemoMode && skippedRequiredChecks.length > 0 && (
+                    {!isDemoMode && showResults && ["failed", "conflict"].includes(processing.graphBuildJob?.status ?? "") && (
+                      <p className="upload-notice" role="alert">
+                        {processing.graphBuildJob?.message || "Не удалось сохранить новую версию графа. Вернитесь к выбору и повторите переход."}
+                      </p>
+                    )}
+
+                    {!isDemoMode && showResults && checkMatchesCurrentVersion && (
+                      <section className="warning-acknowledgements" aria-label="Что ещё нужно решить">
+                        <h3>Что ещё нужно решить</h3>
+                        <p>Раскройте замечание, чтобы посмотреть документы и подробности. Обсудить исправление можно в чате.</p>
+                        {parsedProgram.issues.length === 0 && <p>Замечаний по результатам проверки нет.</p>}
+                        <DiagnosticList items={parsedProgram.issues}
+                          discussion={{ onDiscuss: discussDiagnostic, disabled: chatBusy || processing.reviewBusy }} />
+                      </section>
+                    )}
+                    {!isDemoMode && showResults && checkMatchesCurrentVersion && checkBlockingCount > 0 && (
+                      <p className="upload-notice" role="alert">
+                        {automaticVersion
+                          ? `Проверка нашла ошибок целостности: ${checkBlockingCount}. Для выгрузки нужно устранить эти ошибки.`
+                          : `Проверка нашла ${checkBlockingCount} блокирующих замечаний. Исправьте их перед выгрузкой.`}
+                      </p>
+                    )}
+                    {!isDemoMode && showResults && skippedRequiredChecks.length > 0 && (
                       <p className="upload-notice" role="alert">
                         Не выполнены обязательные проверки: {skippedRequiredChecks.join(", ")}.
                       </p>
                     )}
 
-                    <div className="confirm-version">
-                      <div className="confirm-copy">
-                        <strong>{isConfirmed ? "Версия программы подтверждена" : "Готовы зафиксировать версию?"}</strong>
-                        <span>
-                          {isConfirmed
-                            ? isDemoMode ? "Результат подтверждения сохранён в предпросмотре." : "Подтверждённая версия сохранена на сервере."
-                            : unresolvedCount
-                              ? `Сначала примените решение для ${unresolvedCount} ${unresolvedCount === 1 ? "расхождения" : "расхождений"}.`
-                              : !isDemoMode && !checkMatchesCurrentVersion
-                                ? "Сначала запустите проверки по построенному графу."
-                                : !isDemoMode && checkBlockingCount > 0
-                                  ? "Проверка нашла блокирующие замечания. Эту версию нельзя подтвердить."
-                                  : !isDemoMode && skippedRequiredChecks.length > 0
-                                  ? "Не все обязательные проверки выполнены, версия пока не подтверждена."
-                                    : !isDemoMode && checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))
-                                    ? "Подтвердите, что все группы предупреждений учтены."
-                                    : "После подтверждения эта версия станет основой для работы с программой."}
-                        </span>
-                      </div>
-                      <button
-                        className="confirm-button"
-                        disabled={
-                          unresolvedCount > 0 || isConfirmed || processing.reviewBusy ||
-                          (!isDemoMode && (!checkMatchesCurrentVersion || checkBlockingCount > 0 ||
-                            skippedRequiredChecks.length > 0 ||
-                            checkWarnings.some((warning) => !acceptedWarningIds.includes(warning.id))))
-                        }
-                        onClick={() => {
-                          if (isDemoMode) setDemoConfirmed(true);
-                          else void processing.confirm(acceptedWarningIds);
-                        }}
-                        type="button"
-                      >
-                        {isConfirmed
-                          ? "Версия подтверждена"
-                          : processing.reviewBusy
-                            ? "Обрабатываем…"
-                            : !isDemoMode && checkMatchesCurrentVersion && checkBlockingCount > 0
-                              ? "Есть блокирующие замечания"
-                              : !isDemoMode && checkMatchesCurrentVersion && skippedRequiredChecks.length > 0
-                                ? "Проверки не завершены"
-                                : isDemoMode || checkMatchesCurrentVersion
-                                  ? "Подтвердить версию"
-                                  : "Сначала проверьте граф"}
-                      </button>
-                    </div>
+
                   </>
                 ) : (
                   <>
@@ -2405,6 +2422,7 @@ function App() {
                         job={processing.job}
                         busy={processing.busy}
                         onRetry={processing.retry}
+                        showDiagnostics={false}
                       />
                     )}
                     {processing.reviewJob && (
@@ -2415,7 +2433,7 @@ function App() {
                           <p>{processing.reviewJob.message || "Не удалось подготовить сверку."}</p>
                         ) : (
                           <>
-                            <p>Подготавливаем сверку</p>
+                            <p>{processing.reviewJob.progress_stage || "Подготавливаем сверку"}</p>
                             <progress max={100} value={processing.reviewJob.progress} aria-label="Прогресс подготовки сверки" />
                             <span> {processing.reviewJob.progress}%</span>
                           </>

@@ -32,6 +32,10 @@ from worker.agent.read_port import configure_worker_read_port
 from worker.generation.docx_patch import DocxPatchError, read_area_text
 
 MAX_TOOL_PAYLOAD_BYTES = 64 * 1024
+INCOMPLETE_GRAPH_NOTE = (
+    "Неоднозначные связи сохранены отдельно. Отсутствие ребра не доказывает "
+    "отсутствия связи в документах; запросите замечания и исходный фрагмент."
+)
 
 
 def limit_tool_payload(function):
@@ -248,6 +252,10 @@ class PostgresChatReadPort:
             source_refs=[_bounded_ref(ref) for ref in snapshot.source_refs if ref.id in ids][:5],
             hours_total_write_error=hours_total_write_error,
             editable_workload=workload,
+            unresolved_relations=len(snapshot.metadata.get("unresolved_relations", [])),
+            completeness_note=(
+                INCOMPLETE_GRAPH_NOTE if snapshot.metadata.get("unresolved_relations") else None
+            ),
         )
 
     def _hours_write_error(self, program_id, snapshot, entity):
@@ -394,6 +402,10 @@ class PostgresChatReadPort:
             entities=[_bounded_entity(known[item]) for item in selected],
             relations=[_bounded_relation(r) for r in relations[:12]],
             source_refs=[_bounded_ref(r) for r in snapshot.source_refs if r.id in refs][:8],
+            unresolved_relations=len(snapshot.metadata.get("unresolved_relations", [])),
+            completeness_note=(
+                INCOMPLETE_GRAPH_NOTE if snapshot.metadata.get("unresolved_relations") else None
+            ),
         )
 
     @limit_tool_payload
@@ -419,9 +431,10 @@ class PostgresChatReadPort:
                 raise DomainError(404, "Версия программы не найдена")
 
             review = version[0] or {}
+            if review.get("review_id"):
+                return self._automatic_findings(conn, program_id, version_id, review, limit)
             review_id = review.get("review_id")
-            confirmation = review.get("confirmation") or {}
-            check_job_id = confirmation.get("check_job_id")
+            check_job_id = None
             if not check_job_id:
                 latest_check = conn.execute(
                     """SELECT id FROM processing_jobs WHERE program_id=%s
@@ -456,10 +469,6 @@ class PostgresChatReadPort:
             for item in review.get("decisions", [])
             if isinstance(item, dict) and item.get("conflict_id")
         }
-        accepted = {
-            str(value)
-            for value in confirmation.get("accepted_warning_ids", [])
-        }
         has_current_check = check_job_id is not None
         findings = []
         for row in rows:
@@ -479,8 +488,6 @@ class PostgresChatReadPort:
             effective_status = (
                 "resolved"
                 if str(issue_id) in decisions
-                else "accepted"
-                if str(issue_id) in accepted
                 else status
             )
             findings.append(
@@ -496,6 +503,41 @@ class PostgresChatReadPort:
                 )
             )
         return findings
+
+    def _automatic_findings(self, conn, program_id, version_id, review, limit):
+        from psycopg.rows import dict_row
+
+        from app.version_findings import read_automatic_findings
+
+        with conn.cursor(row_factory=dict_row) as cur:
+            latest = cur.execute(
+                "SELECT id FROM processing_jobs WHERE program_id=%s AND input_version_id=%s "
+                "AND type='validate' AND parameters->>'purpose'='check' "
+                "AND parameters->>'manual_rule_codes' IS NULL AND report->>'outcome'='completed' "
+                "ORDER BY created_at DESC,id DESC LIMIT 1", (program_id, version_id),
+            ).fetchone()
+            jobs = [UUID(review["review_id"])] + ([latest["id"]] if latest else [])
+            rows = cur.execute(
+                "SELECT job_id,details FROM validation_issues WHERE program_id=%s "
+                "AND job_id=ANY(%s) ORDER BY created_at,id", (program_id, jobs),
+            ).fetchall()
+            decisions = {str(item["conflict_id"]) for item in review.get("decisions", [])}
+            issues = []
+            for row in rows:
+                item = row["details"]
+                if (latest and str(row["job_id"]) == review["review_id"]
+                    and item["rule_code"].startswith("R-08")
+                    and (not item.get("requires_decision") or item["id"] in decisions)):
+                    continue
+                issues.append({**item, "effective_status": (
+                    "resolved" if item["id"] in decisions else item["status"]
+                )})
+            issues = read_automatic_findings(cur, program_id, version_id, review, issues)
+        return [ValidationFinding(
+            id=item["id"], rule_code=item["rule_code"], type=item["type"],
+            severity=item["severity"], status=item.get("effective_status", item["status"]),
+            details=_bounded_value(item, budget=1800),
+        ) for item in issues[:limit]]
 
 
 def build_read_port(pool):

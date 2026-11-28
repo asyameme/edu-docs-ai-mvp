@@ -43,6 +43,7 @@ class ImportRead(BaseModel):
     files: list[ImportFileRead]
     created_at: datetime
     updated_at: datetime
+    automatic_review_id: UUID | None = None
 
 
 class ParsedDocumentRead(BaseModel):

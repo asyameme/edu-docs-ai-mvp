@@ -69,7 +69,9 @@ def _is_retryable_semantic_error(error: Exception) -> bool:
     )
 
 
-def _rate_limit_retry_delay(error: Exception, config: Mapping[str, Any], retry_index: int) -> float | None:
+def _rate_limit_retry_delay(
+    error: Exception, config: Mapping[str, Any], retry_index: int,
+) -> float | None:
     base_delay = config.get("rate_limit_retry_delay_seconds", 5)
     if (
         not isinstance(base_delay, (int, float))
@@ -263,7 +265,10 @@ class _ValidationBudget:
                         "Retrying semantic LLM request",
                         extra={
                             "retry_kind": retry_kind,
-                            "retry_index": rate_retry_index if retry_kind == "rate_limit" else semantic_retry_index,
+                            "retry_index": (
+                                rate_retry_index if retry_kind == "rate_limit"
+                                else semantic_retry_index
+                            ),
                             "retry_delay_seconds": delay,
                             "rate_limit_type": getattr(exc, "rate_limit_type", None),
                         },
@@ -292,6 +297,13 @@ def project_snapshot_documents(documents, snapshot):
     """Переносит изменения атрибутов по источникам в JSON для повторной сверки."""
     data = snapshot.model_dump(mode="python")
     outputs = {str(item["document_id"]): deepcopy(item["parsed"]) for item in documents}
+    projected_decisions = set()
+    if snapshot.review and snapshot.review.projected_decision_ids:
+        checkpoint = snapshot.metadata.get("parsed_documents")
+        if not isinstance(checkpoint, dict) or set(checkpoint) != set(outputs):
+            raise ValueError("Не найдена сохранённая проекция документов этой версии")
+        outputs = deepcopy(checkpoint)
+        projected_decisions = set(snapshot.review.projected_decision_ids)
     targets = {("entity", str(item["id"])): item for item in data["entities"]}
     targets.update({("relation", str(item["id"])): item for item in data["relations"]})
     refs = {str(item["id"]): item for item in data["source_refs"]}
@@ -307,6 +319,8 @@ def project_snapshot_documents(documents, snapshot):
     changed_workload = set()
     if snapshot.review:
         for decision in snapshot.review.decisions:
+            if decision.conflict_id in projected_decisions:
+                continue
             for change in decision.changes:
                 if change.get("op") in DOCUMENT_MUTATION_OPS:
                     document_changes.append(change)
@@ -436,6 +450,54 @@ def project_snapshot_documents(documents, snapshot):
             ]
         return []
 
+    def rename_references(document, target, field_tokens, old_values, new_value, locator):
+        """Переименование однозначного объекта сохраняет его существующие связи."""
+        keys = {
+            "discipline": ("disciplines", "name"),
+            "curriculum_item": ("curriculum_items", "discipline_name"),
+            "competency": ("competencies", "code"),
+            "indicator": ("indicators", "code"),
+            "learning_outcome": ("learning_outcomes", "local_id"),
+            "professional_role": ("professional_roles", "local_id"),
+        }
+        kind = target.get("kind")
+        if kind not in keys or field_tokens != [keys[kind][1]] or len(old_values) != 1:
+            return
+        old = old_values[0]
+        if old == new_value:
+            return
+        group, field = keys[kind]
+        matching = [row for row in document.get(group, []) if row.get(field) == old]
+        semester = target.get("attributes", {}).get("semester")
+        scoped = kind == "curriculum_item" and semester is not None
+        if len([row for row in matching if not scoped or row.get("semester") == semester]) != 1:
+            raise ValueError("Нельзя однозначно перенести ссылки при переименовании объекта")
+        for relation in document.get("relations", []):
+            for side in ("src", "dst"):
+                if relation.get(side + "_entity") != kind:
+                    continue
+                key = relation.get(side + "_key")
+                if scoped and key == f"{old}::semester={semester}":
+                    relation[side + "_key"] = f"{new_value}::semester={semester}"
+                elif key == old:
+                    ref = relation.get("source_ref") or {}
+                    same_row = all(locator.get(k) is not None and ref.get(k) == locator[k]
+                                   for k in ("file", "table", "row"))
+                    if len(matching) == 1 or scoped and same_row:
+                        relation[side + "_key"] = new_value
+        fields = {
+            "competency": [("indicators", "competency_code"),
+                           ("role_competency_links", "competency_code"),
+                           ("matrix_cells", "competency_code")],
+            "indicator": [("indicator_outcome_links", "indicator_code")],
+            "learning_outcome": [("indicator_outcome_links", "learning_outcome_id")],
+            "professional_role": [("role_competency_links", "role_id")],
+        }
+        for collection, key in fields.get(kind, []):
+            for row in document.get(collection, []):
+                if row.get(key) == old:
+                    row[key] = new_value
+
     for link in data["source_links"]:
         if link["field_path"] == "$":
             continue
@@ -483,6 +545,7 @@ def project_snapshot_documents(documents, snapshot):
             "hours_total", "credit_units"
         }
         if not numeric_field or new_value is None:
+            rename_references(document, target, field_tokens, values, new_value, locator)
             count = update_record(document, locator, field_tokens, new_value)
             if count != 1:
                 raise ValueError("Источник поля неоднозначен для повторной сверки")

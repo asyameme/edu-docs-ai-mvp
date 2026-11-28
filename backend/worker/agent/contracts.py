@@ -52,6 +52,8 @@ class EntityReadResult(BaseModel):
     source_refs: list[SourceRefV2] = Field(default_factory=list)
     hours_total_write_error: str | None = None
     editable_workload: list[WorkloadField] = Field(default_factory=list)
+    unresolved_relations: int = 0
+    completeness_note: str | None = None
 
 
 class SourceFragment(BaseModel):
@@ -71,6 +73,8 @@ class GraphProjection(BaseModel):
     entities: list[Entity] = Field(default_factory=list)
     relations: list[RelationV2] = Field(default_factory=list)
     source_refs: list[SourceRefV2] = Field(default_factory=list)
+    unresolved_relations: int = 0
+    completeness_note: str | None = None
 
 
 class ValidationFinding(BaseModel):

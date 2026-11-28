@@ -109,13 +109,18 @@ class DocumentBuilder:
         )
         original_member = member if original_member is None else original_member
         observed = {k: deepcopy(v) for k, v in original_member.items() if k != "source_ref"}
-        fields = {key: value for key, value in attributes.items() if not workload or key != "hours_by_kind"}
+        fields = {
+            key: value for key, value in attributes.items()
+            if not workload or key != "hours_by_kind"
+        }
         self.evidence(item, "entity", document_id, ref, fields, observed)
         if workload:
             ref_id = self.source(document_id, ref)
             total_link = self.identity(f"link:entity:{identity}:{HOURS_TOTAL_PATH}:{ref_id}")
             self.links[total_link]["observed_value"]["calculated"] = True
-            for cell_ref, cell_link in workload_evidence(self.program_id, identity, document_id, workload):
+            for cell_ref, cell_link in workload_evidence(
+                self.program_id, identity, document_id, workload,
+            ):
                 ref_id, link_id = str(cell_ref.id), str(cell_link.id)
                 self.refs.setdefault(ref_id, cell_ref.model_dump(mode="json"))
                 self.links[link_id] = cell_link.model_dump(mode="json")
@@ -226,7 +231,20 @@ class DocumentBuilder:
             sources = [self.resolve(document_id, source_kind, source_key, ref, create=create)]
         target = self.resolve(document_id, target_kind, target_key, ref, create=create)
         if not sources or sources[0] is None or target is None:
-            self.unresolved.append({"document_id": document_id, **deepcopy(member)})
+            def candidates(kind, key):
+                local = self.local[document_id, kind, str(key)]
+                return list(local or self.global_keys[kind, str(key)])
+
+            self.unresolved.append({
+                "document_id": document_id, **deepcopy(member),
+                "source_ref_id": self.source(document_id, ref),
+                "resolution": {
+                    "source_kind": source_kind, "source_key": str(source_key),
+                    "target_kind": target_kind, "target_key": str(target_key),
+                    "source_candidates": candidates(source_kind, source_key),
+                    "target_candidates": candidates(target_kind, target_key),
+                },
+            })
             self.issues.append(
                 {
                     "document_id": document_id,

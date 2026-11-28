@@ -12,9 +12,10 @@ type Props = {
   job: ImportJob;
   busy: boolean;
   onRetry: () => Promise<void>;
+  showDiagnostics?: boolean;
 };
 
-export function ImportProgress({ programId, job, busy, onRetry }: Props) {
+export function ImportProgress({ programId, job, busy, onRetry, showDiagnostics = true }: Props) {
   const issues = importDiagnostics(job);
   const groups = groupDiagnostics(issues);
   const issueCounts = groups.reduce(
@@ -44,7 +45,7 @@ export function ImportProgress({ programId, job, busy, onRetry }: Props) {
           <span className="status-pill status-pill--muted">{labels[file.status]}</span>
         </li>
       ))}</ul>
-      {issues.length > 0 && <details className="issues-details">
+      {showDiagnostics && issues.length > 0 && <details className="issues-details">
         <summary>Замечания парсера · {issueSummary}</summary>
         <DiagnosticList items={issues} />
       </details>}

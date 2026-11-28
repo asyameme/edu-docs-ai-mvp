@@ -534,6 +534,44 @@
       "title": "Competency",
       "type": "object"
     },
+    "CompetencyCoverageSummary": {
+      "additionalProperties": false,
+      "description": "Краткое резюме модели по одной компетенции для карточки R-09.",
+      "properties": {
+        "competency_code": {
+          "minLength": 1,
+          "title": "Competency Code",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "supported",
+            "gap",
+            "uncertain"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "competency_code",
+        "status"
+      ],
+      "title": "CompetencyCoverageSummary",
+      "type": "object"
+    },
     "CompetencyLinksMutation": {
       "additionalProperties": false,
       "description": "Replace the competency set of one identified discipline or plan row.",
@@ -2424,6 +2462,18 @@
             }
           ],
           "default": null
+        },
+        "explanation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Explanation"
         }
       },
       "required": [
@@ -2460,11 +2510,25 @@
           "title": "Graph Ready",
           "type": "boolean"
         },
+        "lifecycle_policy": {
+          "const": "automatic_source_v2",
+          "default": "automatic_source_v2",
+          "title": "Lifecycle Policy",
+          "type": "string"
+        },
         "decisions": {
           "items": {
             "$ref": "#/$defs/ReviewDecision"
           },
           "title": "Decisions",
+          "type": "array"
+        },
+        "projected_decision_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Projected Decision Ids",
           "type": "array"
         },
         "confirmation": {
@@ -2715,6 +2779,21 @@
           ],
           "default": null,
           "title": "Reason"
+        },
+        "competencies": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/CompetencyCoverageSummary"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Competencies"
         }
       },
       "required": [

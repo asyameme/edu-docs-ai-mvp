@@ -14,6 +14,7 @@ from app.generation_bridge import (
     shared_indicator_edits,
     snapshot_matrix_graph,
     snapshot_plan,
+    unresolved_matrix_pairs,
 )
 from app.generation_repository import GenerationRepository
 from worker.generation import (
@@ -87,7 +88,9 @@ class GenerationActivities:
             changes = [
                 change for change in plan.changes
                 if change.field_path != "/attributes/text" or change.target_id not in split_targets
-                or (change.target_kind, change.target_id, change.field_path) in has_remaining_evidence
+                or (
+                    change.target_kind, change.target_id, change.field_path
+                ) in has_remaining_evidence
             ]
             unresolved: list[UnresolvedPatch] = []
             documents = build_generation_documents(
@@ -100,8 +103,16 @@ class GenerationActivities:
                 documents, plan.competency_lists, parsed_documents, notes
             )
             documents = apply_shared_indicator_edits(documents, shared, notes)
+            unresolved_source = snapshot.metadata.get("unresolved_relations", [])
+            if unresolved_source:
+                notes.append(
+                    "В исходных документах осталось неразрешённых связей: "
+                    f"{len(unresolved_source)}. "
+                    "В производной матрице знак ? означает неопределённость, а не отсутствие связи."
+                )
             content = generate_program_package(
-                documents, snapshot_matrix_graph(snapshot), notes=notes, applied=applied
+                documents, snapshot_matrix_graph(snapshot), notes=notes, applied=applied,
+                unresolved_pairs=unresolved_matrix_pairs(snapshot),
             )
             if len(content) > MAX_PACKAGE_BYTES:
                 raise GenerationBridgeError("Сгенерированный ZIP превышает допустимый размер")

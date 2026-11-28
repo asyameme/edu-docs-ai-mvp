@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { groupDiagnostics, importDiagnostics, reviewDiagnostic, updateAcceptedWarnings } from "../src/diagnostics.ts";
+import { groupDiagnostics, importDiagnostics, reviewDiagnostic } from "../src/diagnostics.ts";
 
 const issue = {
   id: "i", rule_code: "R-01", type: "competency_not_in_program_catalogue",
@@ -53,13 +53,6 @@ test("Повторяющаяся информация парсера не пре
   assert.equal(groups[1].documents.length, 2);
 });
 
-test("Подтверждение группы передаёт каждый ID и не принимает другие группы", () => {
-  const current = ["other", "a"];
-  const accepted = updateAcceptedWarnings(current, ["a", "b", "c"], true);
-  assert.deepEqual(new Set(accepted), new Set(["other", "a", "b", "c"]));
-  assert.deepEqual(current, ["other", "a"]);
-  assert.deepEqual(updateAcceptedWarnings(accepted, ["a", "b", "c"], false), ["other"]);
-});
 
 test("Отсутствующие коды у разных дисциплин УП показываются как одна проблема", () => {
   const issues = ["Китайский язык", "Хинди"].map((name) => ({

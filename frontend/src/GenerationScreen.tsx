@@ -6,14 +6,12 @@ import {
   type GenerationJob,
   type PackageComposition,
   type RuleCoverage,
-  type VersionRead,
 } from "./api";
-import { DiagnosticList } from "./DiagnosticList";
+import { DiagnosticList, type DiagnosticDiscussion } from "./DiagnosticList";
 import type { Diagnostic } from "./diagnostics";
 
 export type GenerationReview =
-  | { kind: "confirmed"; versionId: string }
-  | { kind: "ready"; confirm: () => Promise<VersionRead | null> }
+  | { kind: "saved"; versionId: string }
   | { kind: "blocked"; reason: string };
 
 type GenerationScreenProps = {
@@ -23,9 +21,8 @@ type GenerationScreenProps = {
   isDemoMode: boolean;
   checkReport: CheckReport | null;
   issues: Diagnostic[];
-  freshIssueIds: string[] | null;
   reviewNotice: string;
-  acceptedWarnings: number;
+  discussion?: DiagnosticDiscussion;
 };
 
 type DemoGeneration =
@@ -109,14 +106,14 @@ function GenerationScreen({
   isDemoMode,
   checkReport,
   issues,
-  freshIssueIds,
   reviewNotice,
-  acceptedWarnings,
+  discussion,
 }: GenerationScreenProps) {
-  const isConfirmed = review.kind === "confirmed";
-  const confirmedVersionId = review.kind === "confirmed" ? review.versionId : "";
+  const isSaved = review.kind === "saved";
+  const versionReady = isSaved;
+  const savedVersionId = review.kind === "saved" ? review.versionId : "";
   const [demo, setDemo] = useState<DemoGeneration>(() => (
-    isDemoMode && isConfirmed
+    isDemoMode && isSaved
       ? { kind: "completed", packageVersion: versionNumber, generatedAt: "Демонстрационный результат" }
       : { kind: "ready" }
   ));
@@ -133,7 +130,7 @@ function GenerationScreen({
   const isCompleted = isDemoMode ? demo.kind === "completed" : job?.status === "completed";
 
   useEffect(() => {
-    if (isDemoMode || !confirmedVersionId) return;
+    if (isDemoMode || !savedVersionId) return;
     let active = true;
     // Состав и история загружаются независимо: отказ одной не должен скрывать другую.
     void api<PackageComposition>(`${base}/composition`).then((pack) => {
@@ -144,13 +141,13 @@ function GenerationScreen({
     void api<GenerationJob[]>(`${base}?limit=20&offset=0`).then((jobs) => {
       if (!active) return;
       setHistory(jobs);
-      const own = jobs.filter((item) => item.version_id === confirmedVersionId);
-      setJob((current) => current?.version_id === confirmedVersionId ? current : own[0] ?? null);
+      const own = jobs.filter((item) => item.version_id === savedVersionId);
+      setJob((current) => current?.version_id === savedVersionId ? current : own[0] ?? null);
     }).catch((error: unknown) => {
       if (active) setNotice(errorMessage(error, "Не удалось загрузить историю генерации."));
     });
     return () => { active = false; };
-  }, [isDemoMode, confirmedVersionId, base]);
+  }, [isDemoMode, savedVersionId, base]);
 
   useEffect(() => {
     if (isDemoMode || !job || !["pending", "processing"].includes(job.status)) return;
@@ -182,12 +179,10 @@ function GenerationScreen({
     }
     setStarting(true);
     try {
-      const version = review.kind === "ready" ? await review.confirm() : null;
-      if (review.kind === "ready" && !version) return;
       setJob(await api<GenerationJob>(base, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ version_id: version?.id ?? confirmedVersionId }),
+        body: JSON.stringify({ version_id: savedVersionId }),
       }));
     } catch (error) {
       setNotice(errorMessage(error, "Не удалось запустить генерацию."));
@@ -227,40 +222,28 @@ function GenerationScreen({
     : composition ? composition.documents.length + 1 : 0;
   const failed = !isDemoMode && job?.status === "failed";
   const manualNotes = job?.notes ?? [];
-  const generationStatus = !isConfirmed
-    ? review.kind === "ready" ? "Проверка завершена" : "Ожидает подтверждения"
+  const generationStatus = !versionReady
+    ? "Ожидает проверки"
     : isRunning
       ? "Формируем пакет"
       : isCompleted
-        ? (manualNotes.length ? "Пакет готов, есть правки вручную" : "Пакет готов")
+        ? (manualNotes.length ? "Пакет готов, есть замечания" : "Пакет готов")
         : failed
           ? "Сборка не удалась"
           : "Готов к запуску";
   const statuses = countByStatus(checkReport?.coverage ?? []);
   const changedDocuments = job?.applied.length ?? 0;
-  const freshIssueIdSet = new Set(freshIssueIds ?? []);
-  const freshIssues = freshIssueIds === null ? [] : issues.filter((issue) => freshIssueIdSet.has(issue.id));
   const warningCount = checkReport?.issues.filter((issue) => issue.severity === "warning").length ?? 0;
-  const freshWarningCount = freshIssues.filter((issue) => issue.severity === "warning").length;
-  const hasFreshWarnings = freshWarningCount > 0;
-  const showIssues = !isDemoMode && freshIssues.length > 0;
-  const freshnessPending = !isDemoMode && review.kind === "ready" && Boolean(checkReport) && freshIssueIds === null;
+  const showIssues = !isDemoMode && issues.length > 0;
   const startButton = (
     <button
       className="primary-button generation-start-button"
       type="button"
-      disabled={review.kind === "blocked" || isRunning || starting || freshnessPending}
+      disabled={review.kind === "blocked" || isRunning || starting}
       onClick={() => { void startGeneration(); }}
     >
-      {starting
-        ? isConfirmed ? "Запускаем сборку…" : "Подтверждаем версию…"
-        : isRunning
-          ? "Собираем пакет…"
-          : freshnessPending
-            ? "Обновляем замечания…"
-          : isConfirmed
-            ? isCompleted ? "Сформировать новый пакет" : "Сформировать пакет"
-            : hasFreshWarnings ? "Принять новые замечания и сформировать пакет" : "Подтвердить и сформировать пакет"}
+      {starting ? "Запускаем сборку…" : isRunning ? "Собираем пакет…"
+        : isCompleted ? "Сформировать новый пакет" : "Сформировать пакет"}
     </button>
   );
 
@@ -271,8 +254,8 @@ function GenerationScreen({
           <h1>Генерация</h1>
           <p className="eyebrow">Сборка и выгрузка документов программы</p>
         </div>
-        <span className={"status-pill " + (isConfirmed ? "status-pill--green" : "status-pill--muted")}>
-          Версия {versionNumber} · {isConfirmed ? "подтверждена" : "черновик"}
+        <span className={"status-pill " + (versionReady ? "status-pill--green" : "status-pill--muted")}>
+          {programId || isDemoMode ? `Версия ${versionNumber} · сохранена` : "Архив не загружен"}
         </span>
       </section>
 
@@ -285,11 +268,7 @@ function GenerationScreen({
           <p>
             {review.kind === "blocked"
               ? review.reason
-              : isConfirmed
-                ? "Сформируем документы на основе подтверждённой версии программы."
-                : hasFreshWarnings
-                  ? "Просмотрите оставшиеся замечания перед сборкой пакета."
-                  : "Проверка завершена, версию можно подтвердить и собрать пакет."}
+              : "Соберите пакет документов с выбранными изменениями."}
           </p>
           {reviewNotice && <p className="generation-notice" role="status">{reviewNotice}</p>}
         </div>
@@ -298,7 +277,7 @@ function GenerationScreen({
             <span aria-hidden="true" />
             {generationStatus}
           </span>
-          {(!showIssues || isConfirmed) && startButton}
+          {startButton}
         </div>
       </section>
 
@@ -306,28 +285,11 @@ function GenerationScreen({
         <section className="generation-section generation-review card" aria-labelledby="generation-issues-title">
           <div className="generation-section-heading">
             <div>
-              <h2 id="generation-issues-title">{isConfirmed ? "Новые замечания проверки" : "Новые замечания"}</h2>
-              <p>Показаны замечания, которых не было в предыдущей подтверждённой проверке.</p>
+              <h2 id="generation-issues-title">Что ещё нужно решить</h2>
+              <p>Раскройте замечание, чтобы посмотреть документы и подробности. Обсудить исправление можно в чате.</p>
             </div>
           </div>
-          <DiagnosticList items={freshIssues} />
-          {!isConfirmed && (
-            <div className="generation-review-action">
-              {hasFreshWarnings && review.kind !== "blocked" && (
-                <p>Новые предупреждения: {freshWarningCount}. Всего в текущей проверке предупреждений: {warningCount}; ранее принятые здесь не повторяются.</p>
-              )}
-              {startButton}
-            </div>
-          )}
-        </section>
-      )}
-
-      {!isDemoMode && checkReport && freshnessPending && (
-        <p className="generation-note" role="status">Сверяем результаты с предыдущей подтверждённой проверкой…</p>
-      )}
-      {!isDemoMode && checkReport && freshIssueIds !== null && freshIssues.length === 0 && (
-        <section className="generation-section generation-review card" aria-label="Новые замечания">
-          <p className="generation-empty-metrics">Новых замечаний нет. Все замечания текущей проверки уже встречались в предыдущей подтверждённой версии или отсутствуют.</p>
+          <DiagnosticList items={issues} discussion={discussion} />
         </section>
       )}
 
@@ -340,7 +302,7 @@ function GenerationScreen({
                 <p>
                   {fileCount
                     ? `${formatCount(fileCount, "файл", "файла", "файлов")} в пакете: ${formatCount(fileCount - 1, "документ DOCX", "документа DOCX", "документов DOCX")} + 1 создаваемая матрица XLSX`
-                    : isConfirmed ? "Состав определяется по подтверждённой версии" : "Состав появится после подтверждения версии"}
+                    : "Состав определяется по сохранённой версии"}
                 </p>
               </div>
               <span className="generation-count">
@@ -398,7 +360,7 @@ function GenerationScreen({
               )}
             </ul>
             <p className="generation-note">
-              В пакет войдут учебный план, РПД и РПП, ЦКМВ и характеристика программы с внесёнными правками; матрица компетенций строится по данным подтверждённой версии.
+              В пакет войдут документы сохранённой версии; матрица компетенций строится по её графу. Неисправленные замечания не скрываются.
             </p>
           </section>
 
@@ -438,17 +400,17 @@ function GenerationScreen({
                 <article className="generation-metric">
                   <span>Правила с замечаниями</span>
                   <strong>{statuses.failed}</strong>
-                  <small>{isConfirmed ? "учтены при подтверждении" : "подробности в списке замечаний"}</small>
+                  <small>подробности в списке замечаний</small>
                 </article>
                 <article className="generation-metric generation-metric--review">
-                  <span>{isConfirmed ? "Принятые предупреждения" : "Новые предупреждения"}</span>
-                  <strong>{isConfirmed ? acceptedWarnings : freshWarningCount}</strong>
-                  <small>{isConfirmed ? "записей учтено" : `${warningCount} всего в текущей проверке`}</small>
+                  <span>Предупреждения</span>
+                  <strong>{warningCount}</strong>
+                  <small>{`${warningCount} всего в текущей проверке`}</small>
                 </article>
               </div>
             ) : (
               <p className="generation-empty-metrics">
-                {isConfirmed ? "Результаты проверки подтверждённой версии недоступны." : "Сводка появится после проверки версии программы."}
+                Сводка появится после проверки версии программы.
               </p>
             )}
           </section>
@@ -532,7 +494,7 @@ function GenerationScreen({
             ) : (
               <div className="generation-empty-result">
                 <strong>{isRunning ? "Архив появится после сборки" : failed ? "Пакет не собран" : "Пока нет готового архива"}</strong>
-                <span>{isConfirmed ? "Запустите генерацию, чтобы собрать пакет." : "Подтвердите версию программы, чтобы продолжить."}</span>
+                <span>{versionReady ? "Запустите генерацию, чтобы собрать пакет." : "Пакет станет доступен после завершения проверки этой версии."}</span>
               </div>
             )}
             {notice && <p className="generation-notice" role="status">{notice}</p>}

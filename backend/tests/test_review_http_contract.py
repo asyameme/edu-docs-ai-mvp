@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 import app.review_api as review_api
 from app.domain import VersionRead
-from app.review_contract import ConfirmCreate, DecisionBatchCreate, DecisionCreate
+from app.review_contract import DecisionBatchCreate, DecisionCreate
 
 
 def version_value():
@@ -76,12 +76,9 @@ def test_version_routes_return_prevalidated_json_with_unchanged_openapi(monkeypa
         def decide_many(self, *args):
             return value
 
-        def confirm(self, *args):
-            return value
-
     monkeypatch.setattr(review_api, "ReviewRepository", Repository)
-    program_id, review_id, version_id, conflict_id, variant_id, check_id = [
-        uuid4() for _ in range(6)
+    program_id, review_id, version_id, conflict_id, variant_id = [
+        uuid4() for _ in range(5)
     ]
     operation_key = "test-key"
     repo = SimpleNamespace(pool=None)
@@ -96,15 +93,9 @@ def test_version_routes_return_prevalidated_json_with_unchanged_openapi(monkeypa
         selections=[{"conflict_id": conflict_id, "variant_id": variant_id}],
         signature="Проверка",
     )
-    confirm = ConfirmCreate(
-        expected_version_id=version_id,
-        check_job_id=check_id,
-        signature="Проверка",
-    )
     responses = [
         review_api.decide(program_id, review_id, decision, operation_key, repo),
         review_api.decide_batch(program_id, review_id, batch, operation_key, repo),
-        review_api.confirm(program_id, review_id, confirm, operation_key, repo),
     ]
     expected = VersionRead.model_validate(value).model_dump(mode="json")
     assert all(isinstance(response, Response) for response in responses)
@@ -117,7 +108,6 @@ def test_version_routes_return_prevalidated_json_with_unchanged_openapi(monkeypa
     for path in (
         "/api/v1/programs/{program_id}/reviews/{review_id}/decisions",
         "/api/v1/programs/{program_id}/reviews/{review_id}/decisions/batch",
-        "/api/v1/programs/{program_id}/reviews/{review_id}/confirm",
     ):
         assert schema["paths"][path]["post"]["responses"]["201"]["content"][
             "application/json"
@@ -137,3 +127,57 @@ def test_version_routes_return_prevalidated_json_with_unchanged_openapi(monkeypa
     assert response.status_code == 201
     assert response.headers["content-type"] == "application/json"
     assert response.json() == expected
+
+
+def test_choice_receipt_does_not_resend_the_saved_graph(monkeypatch):
+    value = version_value()
+
+    class Repository:
+        def __init__(self, _pool):
+            pass
+
+        def decide(self, *args, **kwargs):
+            assert kwargs == {"defer_graph": True}
+            return value
+
+        decide_many = decide
+
+    monkeypatch.setattr(review_api, "ReviewRepository", Repository)
+    program_id, review_id, version_id, conflict_id, variant_id = [uuid4() for _ in range(5)]
+    decision = DecisionCreate(expected_version_id=version_id, conflict_id=conflict_id,
+                              variant_id=variant_id, signature="Тест")
+    batch = DecisionBatchCreate(expected_version_id=version_id, signature="Тест", selections=[
+        {"conflict_id": conflict_id, "variant_id": variant_id},
+    ])
+    repo = SimpleNamespace(pool=None)
+    for response in [
+        review_api.save_choice(program_id, review_id, decision, "single", repo),
+        review_api.save_choices(program_id, review_id, batch, "batch", repo),
+    ]:
+        assert response.status_code == 201
+        assert set(json.loads(response.body)) == {"id", "number"}
+        assert len(response.body) < 200
+
+
+def test_review_details_can_skip_graph_materialization(monkeypatch):
+    captured = {}
+
+    class Repository:
+        def __init__(self, _pool):
+            pass
+
+        def details(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return {"issues_count": 0}
+
+    monkeypatch.setattr(review_api, "ReviewRepository", Repository)
+    program_id, version_id = uuid4(), uuid4()
+    result = review_api.read_version_review(
+        program_id, version_id, SimpleNamespace(pool=None),
+        limit=20, offset=40, include_graph=False, include_summary=False,
+    )
+
+    assert result == {"issues_count": 0}
+    assert captured["args"] == (program_id, version_id, 20, 40)
+    assert captured["kwargs"] == {"include_graph": False, "include_summary": False}

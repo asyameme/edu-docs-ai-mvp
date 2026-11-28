@@ -1,4 +1,4 @@
-"""Преобразование подтверждённого снимка во вход существующего генератора."""
+"""Преобразование сохранённого снимка во вход существующего генератора."""
 
 import json
 import re
@@ -90,8 +90,6 @@ _DOCUMENT_OPS = DOCUMENT_MUTATION_OPS
 
 
 def _require_supported(snapshot: SnapshotV2) -> None:
-    if snapshot.review is not None and snapshot.review.confirmation is None:
-        raise GenerationBridgeError("Изменения требуют подтверждённой версии программы")
     for decision in snapshot.review.decisions if snapshot.review else []:
         for change in decision.changes:
             if change.get("op") not in _DOCUMENT_OPS | {"set_attribute"}:
@@ -170,7 +168,10 @@ def shared_indicator_edits(snapshot: SnapshotV2, parsed_documents):
     ]
     if not split:
         return []
-    refs = {str(ref.id): (str(ref.document_id), json.loads(ref.locator)) for ref in snapshot.source_refs}
+    refs = {
+        str(ref.id): (str(ref.document_id), json.loads(ref.locator))
+        for ref in snapshot.source_refs
+    }
     index = {}
     for entity in snapshot.entities:
         if entity.kind != "indicator":
@@ -182,13 +183,17 @@ def shared_indicator_edits(snapshot: SnapshotV2, parsed_documents):
     edits = []
     for choice in split:
         identity = str(choice["document_id"])
-        original = [parsed_documents[identity]["indicators"][i] for i in choice["indicator_indices"]]
+        original = [
+            parsed_documents[identity]["indicators"][i] for i in choice["indicator_indices"]
+        ]
         ref = original[0]["source_ref"]
         codes_and_texts, replaced_links = [], set()
         for row in original:
             matches = index.get((_indicator_anchor(identity, ref), row["code"]), ())
             if len(matches) != 1:
-                raise GenerationBridgeError(f"Не найден однозначный индикатор {row['code']} для общего текста")
+                raise GenerationBridgeError(
+                    f"Не найден однозначный индикатор {row['code']} для общего текста"
+                )
             entity, ref_id = matches[0]
             codes_and_texts.append((row["code"], entity.attributes["text"]))
             replaced_links.add((str(entity.id), ref_id))
@@ -210,7 +215,10 @@ def apply_shared_indicator_edits(documents, edits, notes):
         )
         new = " ".join(f"{code}: {' '.join(text.split())}" for code, text in edit.codes_and_texts)
         try:
-            originals = [p for p in read_area_text(source.content, edit.source_ref) if pattern.fullmatch(p.strip())]
+            originals = [
+                p for p in read_area_text(source.content, edit.source_ref)
+                if pattern.fullmatch(p.strip())
+            ]
             if len(originals) != 1:
                 raise DocxPatchError(f"не найден общий фрагмент «{expected}»")
             indicators, issues = extract_indicators(
@@ -223,7 +231,9 @@ def apply_shared_indicator_edits(documents, edits, notes):
             patch = DocxPatch(edit.source_ref, originals[0], new)
             patch_docx_bytes(source.content, [patch])
         except (DocxPatchError, ValueError) as error:
-            notes.append(f"{source.file_name}: индикаторы {', '.join(codes)} не разделены ({error})")
+            notes.append(
+                f"{source.file_name}: индикаторы {', '.join(codes)} не разделены ({error})"
+            )
             continue
         documents = with_document_changes(documents, edit.document_id, patches=[patch])
     return documents
@@ -233,7 +243,7 @@ def competency_list_edits(snapshot: SnapshotV2, original_documents) -> list[Comp
     """Списки компетенций после решений R-01 — той же логикой, что собирает граф.
 
     Решения воспроизводятся на неизменённом импорте (как при сохранении ответа
-    и при сборке графа), поэтому итог совпадает со связями подтверждённой версии.
+    и при сборке графа), поэтому итог совпадает со связями сохранённой версии.
     """
     changes = [
         change
@@ -874,3 +884,23 @@ def snapshot_matrix_graph(snapshot: SnapshotV2) -> EducationalGraph:
             )
         )
     return graph
+
+
+def unresolved_matrix_pairs(snapshot: SnapshotV2):
+    """Выделить исходные неопределённые связи дисциплины и компетенции для XLSX."""
+    pairs = []
+    for item in snapshot.metadata.get("unresolved_relations", []):
+        resolution = item.get("resolution", {})
+        if (
+            resolution.get("source_kind") not in {"discipline", "curriculum_item"}
+            or resolution.get("target_kind") != "competency"
+            or item.get("kind") not in {"формирует", "FORMS_COMPETENCY"}
+        ):
+            continue
+        name, code = resolution["source_key"], resolution["target_key"]
+        semester = item.get("semester")
+        if "::semester=" in name:
+            name, semester_text = name.rsplit("::semester=", 1)
+            semester = int(semester_text)
+        pairs.append((name, semester, code))
+    return pairs

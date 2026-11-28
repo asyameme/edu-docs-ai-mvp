@@ -200,6 +200,8 @@ def test_instructions_cover_key_behaviour():
         "Не повторяй прежнее",
         "get_validation_findings",
         "Не утверждай, что данные изменены",
+        "нет отдельной кнопки или галочки",
+        "само согласие не меняет данные и статус замечания",
     ):
         assert fragment in INSTRUCTIONS
 

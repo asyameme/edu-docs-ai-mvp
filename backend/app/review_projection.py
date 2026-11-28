@@ -174,3 +174,15 @@ def project_legacy_review_issue(issue, selected_variant_id=None):
     return ReviewIssue.model_validate(
         _project_issue(issue, selected_variant_id)
     ).model_dump(mode="json")
+
+
+def visible_prepare_findings(issues, review_id):
+    """Сохраняет карточки принятых вариантов при ранней сборке исходного графа."""
+    return [
+        item for item in issues
+        if not (
+            str(item["job_id"]) == str(review_id)
+            and str(item["rule_code"]).startswith("R-08")
+            and not item.get("requires_decision")
+        )
+    ]

@@ -9,10 +9,10 @@ from pydantic import ValidationError
 
 from app.domain import VersionCreate, VersionRestore
 from app.main import app
-from app.review_contract import ConfirmCreate, DecisionCreate
+from app.review_contract import DecisionCreate
 
 
-@pytest.mark.parametrize("model", [VersionCreate, VersionRestore, DecisionCreate, ConfirmCreate])
+@pytest.mark.parametrize("model", [VersionCreate, VersionRestore, DecisionCreate])
 @pytest.mark.parametrize("signature", [None, "", "   ", "я" * 121])
 def test_user_action_rejects_missing_or_invalid_signature(model, signature):
     body = {

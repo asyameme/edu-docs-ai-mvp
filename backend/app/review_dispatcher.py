@@ -20,7 +20,7 @@ async def dispatch_reviews(client, repo, queue, stop):
                     await temporal_rpc(
                         client.start_workflow(
                             ReviewWorkflow.run,
-                            {"job_id": str(job_id)},
+                            {"job_id": str(job_id), "workflow_id": workflow_id},
                             id=workflow_id,
                             task_queue=queue,
                             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,

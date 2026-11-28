@@ -16,6 +16,7 @@ _READ_TOOLS = {
     "read_source_fragment",
     "read_graph_projection",
     "get_validation_findings",
+    "get_validation_summary",
     "request_program_check",
     "read_program_check",
 }
@@ -124,6 +125,15 @@ async def chat_completion(request: Request):
     if "fixture-model-failure" in user_text:
         raise HTTPException(status_code=401, detail="Synthetic chat model failure")
 
+    if "fixture-summary" in user_text:
+        if previous is None:
+            return _tool_response(model, "get_validation_summary", {"status": "attention"})
+        return _tool_response(model, _result_tool(available, "Answer"), {
+            "kind": "answer",
+            "message": "Сводка получена: " + str(previous[1].get("total_groups")) + " групп.",
+            "sources": [],
+        })
+
     if "проверь" in user_text.lower() and "request_program_check" in available:
         if previous is None:
             return _tool_response(model, "request_program_check", {})
@@ -163,7 +173,8 @@ async def chat_completion(request: Request):
         return _tool_response(
             model,
             "search_entities",
-            {"query": "Тестовая дисциплина", "limit": 5},
+            {"query": user_text.split("fixture-query:", 1)[1].split("|")[0].strip()
+             if "fixture-query:" in user_text else "Тестовая дисциплина", "limit": 5},
         )
 
     tool_name, tool_result = previous
@@ -211,6 +222,7 @@ async def chat_completion(request: Request):
         if any(word in user_text.lower() for word in ("сократи", "измени", "поменяй")):
             new_values = re.findall(r"\d+", user_text)
             new_value = int(new_values[-1]) if new_values else 54
+            formulation_edit = "fixture-formulation" in user_text
             return _tool_response(
                 model,
                 _result_tool(available, "ChangeProposal"),
@@ -221,9 +233,12 @@ async def chat_completion(request: Request):
                         {
                             "target_kind": "entity",
                             "target_id": entity["id"],
-                            "field_path": "hours_total",
-                            "expected_old_value": entity["attributes"]["hours_total"],
-                            "new_value": new_value,
+                            "field_path": "formulation" if formulation_edit else "hours_total",
+                            "expected_old_value": entity["attributes"][
+                                "formulation" if formulation_edit else "hours_total"
+                            ],
+                            "new_value": "Уточнённая формулировка после чата"
+                            if formulation_edit else new_value,
                             "reason": "Запрос пользователя в тестовом сценарии",
                             "source_ref_ids": [source_ref_id],
                         }

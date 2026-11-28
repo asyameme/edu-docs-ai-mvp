@@ -13,9 +13,6 @@ from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.graph_storage import load_graph
 from app.repository import Repository, limit_lock_wait
-from app.review_contract import CheckResult
-from app.review_logic import content_hash, digest
-from app.review_projection import project_legacy_review_result
 
 
 def _source_files(cur, graph_id):
@@ -46,55 +43,21 @@ class GenerationRepository:
         self.pool = pool
 
     @staticmethod
-    def _confirmed_snapshot(cur, program_id, version_id, graph_state_id, review):
+    def _checked_snapshot(cur, program_id, version_id, graph_state_id, review):
         if graph_state_id is None or (review or {}).get("graph_ready") is False:
             raise DomainError(409, "Сначала соберите граф из выбранных значений документов")
         snapshot = SnapshotV2.model_validate(load_graph(cur, graph_state_id, review))
-        confirmation = snapshot.review.confirmation if snapshot.review else None
-        if confirmation is None or content_hash(snapshot) != confirmation.content_hash:
-            raise DomainError(409, "Для генерации нужна проверенная и подтверждённая версия")
+        from app.version_policy import require_generation_check
+
         checked = cur.execute(
-            "SELECT input_version_id,parameters,report FROM processing_jobs "
-            "WHERE id=%s AND program_id=%s AND type='validate'",
-            (confirmation.check_job_id, program_id),
+            "SELECT id,program_id,input_version_id,parameters,report FROM processing_jobs "
+            "WHERE program_id=%s AND input_version_id=%s AND type='validate' "
+            "AND parameters->>'purpose'='check' "
+            "AND parameters->>'manual_rule_codes' IS NULL "
+            "ORDER BY created_at DESC,id DESC LIMIT 1",
+            (program_id, version_id),
         ).fetchone()
-        if (
-            checked is None
-            or checked["input_version_id"] != confirmation.checked_version_id
-            or checked["parameters"].get("review_id") != str(snapshot.review.review_id)
-            or checked["parameters"].get("purpose") != "check"
-            or checked["report"].get("outcome") != "completed"
-            or checked["parameters"].get("content_hash") != confirmation.content_hash
-        ):
-            raise DomainError(409, "Подтверждение не связано с завершённой проверкой версии")
-        checked_version = cur.execute(
-            "SELECT graph_snapshot(graph_state_id,review) AS snapshot FROM program_versions "
-            "WHERE program_id=%s AND id=%s",
-            (program_id, confirmation.checked_version_id),
-        ).fetchone()
-        if (
-            checked_version is None
-            or content_hash(checked_version["snapshot"]) != confirmation.content_hash
-        ):
-            raise DomainError(409, "Проверенный граф отличается от подтверждённого")
-        result = CheckResult.model_validate(
-            project_legacy_review_result(checked["report"]["result"])
-        )
-        if digest(result.ruleset.model_dump(mode="json")) != digest(
-            checked["parameters"]["ruleset"]
-        ):
-            raise DomainError(409, "Набор правил проверенной версии изменился")
-        coverage = {item.rule_code: item.status for item in result.coverage}
-        if any(
-            coverage.get(code) not in {"passed", "failed"}
-            for code in result.ruleset.required_rules
-        ):
-            raise DomainError(409, "Есть обязательные проверки без окончательного результата")
-        if any(item.requires_decision or item.severity == "blocking" for item in result.issues):
-            raise DomainError(409, "В проверке остались нерешённые замечания")
-        warnings = {item.id for item in result.issues if item.severity == "warning"}
-        if warnings != set(confirmation.accepted_warning_ids):
-            raise DomainError(409, "Принятые предупреждения не совпадают с проверкой")
+        require_generation_check(snapshot, program_id, version_id, checked)
         return snapshot
 
     def create(self, program_id, version_id, import_job_id, key):
@@ -108,7 +71,7 @@ class GenerationRepository:
             ).encode()
         ).hexdigest()
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:
-            # Чтение подтверждённого графа после блокировки не лимитируется 5 с.
+            # Чтение проверенного графа после блокировки не лимитируется 5 с.
             limit_lock_wait(cur)
             Repository.require(
                 cur.execute(
@@ -144,13 +107,13 @@ class GenerationRepository:
                     ).fetchone()
                 )
                 graph_id = version["graph_state_id"]
-                snapshot = self._confirmed_snapshot(
+                snapshot = self._checked_snapshot(
                     cur, program_id, version_id, graph_id, version["review"]
                 )
                 input_version_id = version_id
             else:
                 raise DomainError(
-                    409, "Генерация разрешена только для проверенной подтверждённой версии"
+                    409, "Генерация разрешена только для проверенной сохранённой версии"
                 )
             if not snapshot.document_ids:
                 raise DomainError(409, "Нет исходных документов для генерации")
@@ -242,7 +205,7 @@ class GenerationRepository:
             snapshot = SnapshotV2.model_validate(
                 load_graph(cur, job["input_graph_state_id"], review)
             )
-            self._confirmed_snapshot(
+            self._checked_snapshot(
                 cur,
                 job["program_id"],
                 job["input_version_id"],

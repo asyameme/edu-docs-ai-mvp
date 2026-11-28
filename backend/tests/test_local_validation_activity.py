@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from document_cases import payload
 
+from app.config import get_settings
 from app.domain import SnapshotV2
 from app.review_activities import ReviewActivities
 from app.validation_bridge import (
@@ -111,6 +112,7 @@ def test_activity_checks_changed_hours_and_does_not_publish_twice():
             return "completed"
 
     activity = object.__new__(ReviewActivities)
+    activity.settings = get_settings()
     activity.repo = Repository()
     assert activity.execute({"job_id": str(job_id)}) == "completed"
     assert activity.repo.results[0]["coverage"][0]["status"] == "passed"

@@ -101,7 +101,11 @@ class ImportRepository:
                     self.namespace,
                     workflow_identity(job_id, 1),
                     Jsonb(
-                        {"fingerprint": fingerprint, "request_keys": [key], "documents": documents}
+                        {
+                            "fingerprint": fingerprint, "request_keys": [key],
+                            "documents": documents,
+                            "lifecycle_policy": "automatic_source_v2",
+                        }
                     ),
                 ),
             )
@@ -158,6 +162,9 @@ class ImportRepository:
             "status": outcome or "pending",
             "progress": (95 if outcome == "failed" else 100) if outcome else 0,
             "issues": report.get("issues", []),
+            "automatic_review_id": (
+                UUID(report["automatic_review_id"]) if report.get("automatic_review_id") else None
+            ),
             "files": files,
             "created_at": row["created_at"],
             "updated_at": datetime.fromisoformat(updated_at) if updated_at else row["created_at"],
@@ -260,6 +267,37 @@ class ImportRepository:
                 "UPDATE processing_jobs SET report=%s,output_graph_state_id=%s WHERE id=%s",
                 (Jsonb(report), graph, job_id),
             )
+            if (
+                not legacy_import
+                and status in {"completed", "partial"}
+                and not any(item.get("severity") == "error" for item in issues)
+                and job["parameters"]["documents"]
+                and all(
+                    report.get("files", {}).get(item["document_id"], {}).get("artifact_id")
+                    and not report["files"][item["document_id"]].get("error_code")
+                    for item in job["parameters"]["documents"]
+                )
+            ):
+                from app.review_contract import ReviewCreate
+                from app.review_repository import ReviewRepository
+
+                current = cur.execute(
+                    "SELECT current_version_id FROM programs WHERE id=%s", (job["program_id"],),
+                ).fetchone()["current_version_id"]
+                if current == job["input_version_id"]:
+                    review_id = ReviewRepository(self.pool).create(
+                        job["program_id"], f"automatic-prepare:{job_id}:{attempt}",
+                        ReviewCreate(
+                            import_job_id=job_id, expected_version_id=job["input_version_id"],
+                        ),
+                        connection=connection,
+                    )
+                    report["automatic_review_id"] = str(review_id)
+                else:
+                    report["automatic_preparation"] = "conflict"
+                cur.execute(
+                    "UPDATE processing_jobs SET report=%s WHERE id=%s", (Jsonb(report), job_id),
+                )
 
     def retry(self, program_id, job_id, expected_workflow_id):
         with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cur:

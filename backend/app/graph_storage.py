@@ -362,13 +362,23 @@ def save_graph(
             if found:
                 artifact = found["id"]
             elif producer or (data.get("review") or {}).get("review_id"):
+                projection_attempt = attempt
+                if not producer:
+                    # Каждая новая проекция документа имеет собственную редакцию.
+                    # Программа уже заблокирована вызывающей транзакцией записи версии.
+                    projection_attempt = cur.execute(
+                        "SELECT COALESCE(max(producing_attempt),0)+1 AS next_attempt "
+                        "FROM document_artifacts WHERE program_id=%s AND producing_job_id=%s "
+                        "AND document_id=%s AND kind='parsed_json'",
+                        (program_id, data["review"]["review_id"], document),
+                    ).fetchone()["next_attempt"]
                 artifact = parsed_artifact(
                     cur,
                     program_id,
                     document,
                     parsed[document],
                     producer or data["review"]["review_id"],
-                    attempt if producer else 1,
+                    projection_attempt,
                 )
             else:
                 raise DomainError(422, "У JSON документа нет сохранённого результата импорта")
