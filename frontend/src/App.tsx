@@ -1128,6 +1128,7 @@ function App() {
     } catch { return {}; }
   });
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
   const previousChoicesRef = useRef({ key: "", count: 0 });
   useEffect(() => {
     try { localStorage.setItem("education-review-stages", JSON.stringify(reviewStages)); }
@@ -2335,12 +2336,27 @@ function App() {
                           onClick={async () => {
                             if (!showChoices) { selectReviewStage("choices"); return; }
                             setCheckpointError(null);
-                            const error = await processing.checkpointChoices();
-                            if (error) setCheckpointError(error);
-                            else selectReviewStage("results");
+                            setCheckpointSubmitting(true);
+                            try {
+                              const error = await processing.checkpointChoices();
+                              if (error) setCheckpointError(error);
+                              else selectReviewStage("results");
+                            } finally {
+                              setCheckpointSubmitting(false);
+                            }
                           }}>
-                          {processing.reviewBusy && showChoices ? "Применяем изменения…" : showChoices ? "Далее — к замечаниям проверки" : "Назад к выбору вариантов"}
+                          {checkpointSubmitting && showChoices
+                            ? "Запускаем сборку графа…"
+                            : processing.reviewBusy && showChoices
+                              ? "Сохраняем выбранный вариант…"
+                              : showChoices ? "Далее — к замечаниям проверки" : "Назад к выбору вариантов"}
                         </button>
+                        {checkpointSubmitting && showChoices && (
+                          <div className="processing-caption" role="status">
+                            <p>Передаём сохранённые варианты на сборку графа. После этого автоматически проверим новую версию.</p>
+                            <progress aria-label="Запуск сборки графа" />
+                          </div>
+                        )}
                         {checkpointError && <p role="alert">{checkpointError}</p>}
                       </div>
                     )}
@@ -2348,14 +2364,14 @@ function App() {
 
                     {!isDemoMode && showResults && processing.checkJob && ["pending", "processing"].includes(processing.checkJob.status) && (
                       <div className="processing-caption" role="status">
-                        <p>Повторная проверка версии выполняется</p>
+                        <p>Шаг 2 из 2. Граф собран — проверяем новую версию и обновляем замечания.</p>
                         <progress max={100} value={processing.checkJob.progress} aria-label="Прогресс повторной проверки" />
                         <span> {processing.checkJob.progress}%</span>
                       </div>
                     )}
                     {!isDemoMode && showResults && graphBuildInProgress && (
                       <p className="processing-caption" role="status">
-                        Выбор сохранён. Формируем новую версию графа. Пока она не сохранена, проверки и чат недоступны.
+                        Шаг 1 из 2. Формируем новую версию графа по выбранным вариантам. Следом проверим её и обновим замечания.
                       </p>
                     )}
                     {!isDemoMode && showResults && ["failed", "conflict"].includes(processing.graphBuildJob?.status ?? "") && (
