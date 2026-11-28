@@ -88,7 +88,7 @@ def test_large_coverage_checks_all_chunks_and_preserves_original_source():
             "evidence_ids": course_ids[-1:],
         }]}
 
-    checks, findings = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=topics), llm_config=CONFIG, evaluator=evaluator,
     )
 
@@ -111,11 +111,14 @@ def test_small_coverage_uses_one_request():
             "evidence_ids": [course_rows[0]["id"]],
         }]}
 
-    result = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=["Анализ данных"]), llm_config=CONFIG, evaluator=evaluator,
     )
 
-    assert result == (1, [])
+    assert (checks, findings) == (1, [])
+    assert summaries == [{
+        "competency_code": CODE, "status": "supported", "reason": "Есть подтверждение",
+    }]
     assert called == [coverage.SYSTEM_PROMPT]
 
 
@@ -152,14 +155,14 @@ def test_targeted_coverage_respects_five_request_budget(
             "evidence_ids": [evidence_id],
         }]}
 
-    result = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=[f"Тема {index}" for index in range(topic_count)]),
         llm_config=CONFIG | {"max_requests_per_competency": 5},
         evaluator=evaluator,
         competency_code=CODE,
     )
 
-    assert result == (1, [])
+    assert (checks, findings) == (1, [])
     assert calls.count(coverage.EXTRACT_PROMPT) == expected_requests - 1
     assert calls.count(coverage.SYNTHESIS_PROMPT) == 1
     assert len(calls) == expected_requests
@@ -172,7 +175,7 @@ def test_targeted_coverage_does_not_fan_out_past_eight_requests():
         calls.append(options["_system_prompt"])
         return {"summary": "Наблюдение", "evidence_ids": [body["evidence"][0]["id"]]}
 
-    checks, findings = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(30)]),
         llm_config=CONFIG,
         evaluator=evaluator,
@@ -193,7 +196,7 @@ def test_large_coverage_rejects_citations_from_outside_chunk():
         calls.append(options["_system_prompt"])
         return {"summary": "Наблюдение по части", "evidence_ids": ["E9999"]}
 
-    checks, findings = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(10)]),
         llm_config=CONFIG, evaluator=evaluator,
     )
@@ -227,12 +230,12 @@ def test_invalid_observation_retries_only_that_part():
                 return {"summary": "Наблюдение без идентификаторов"}
         return {"summary": "Результат по части", "evidence_ids": evidence_ids[-1:]}
 
-    result = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(10)]),
         llm_config=CONFIG, evaluator=evaluator,
     )
 
-    assert result == (1, [])
+    assert (checks, findings) == (1, [])
     assert len(chunks) > 2
     assert retried == [chunks[1]]
 
@@ -256,12 +259,12 @@ def test_invalid_conclusion_retries_only_the_conclusion():
             "evidence_ids": [cited],
         }]}
 
-    result = coverage.evaluate_competency_coverage(
+    checks, findings, summaries = coverage.evaluate_competency_coverage(
         _documents(topics=[f"Тема {index} " + "содержание " * 95 for index in range(10)]),
         llm_config=CONFIG, evaluator=evaluator,
     )
 
-    assert result == (1, [])
+    assert (checks, findings) == (1, [])
     assert [prompt for prompt, _ in conclusions] == [
         coverage.SYNTHESIS_PROMPT, coverage.SYNTHESIS_RETRY_PROMPT,
     ]

@@ -719,6 +719,8 @@ def evaluate_competency_coverage(
     """
     groups_to_check: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
+    # Краткое резюме по каждой проверенной компетенции — для сводки в интерфейсе.
+    summaries: list[dict[str, Any]] = []
     checks = 0
     group_index = 0
 
@@ -747,6 +749,9 @@ def evaluate_competency_coverage(
                     code,
                     [_source_ref(document, row) for document, row in variants],
                 ))
+                summaries.append({
+                    "competency_code": code, "status": "uncertain", "reason": "нет учебного плана",
+                })
                 continue
             links = [
                 (curriculum, item, relation)
@@ -779,6 +784,10 @@ def evaluate_competency_coverage(
                         ],
                         extra={"reason": "Неоднозначная привязка relation к curriculum_item."},
                     ))
+                summaries.append({
+                    "competency_code": code, "status": "uncertain",
+                    "reason": "связь с планом нельзя однозначно сопоставить со строками",
+                })
                 # Иначе структурная часть R-09 уже сообщает об отсутствии связи.
                 continue
             checks += 1
@@ -821,6 +830,10 @@ def evaluate_competency_coverage(
                     ],
                     extra={"incomplete_reasons": list(dict.fromkeys(incomplete_reasons))},
                 ))
+                summaries.append({
+                    "competency_code": code, "status": "uncertain",
+                    "reason": "покрытие оценено не полностью; нужны недостающие материалы",
+                })
                 continue
 
             group_index += 1
@@ -882,6 +895,7 @@ def evaluate_competency_coverage(
                 f"Не удалось полностью оценить покрытие компетенции {code}: {detail}.",
                 code, _group_source_refs(group),
             ))
+            summaries.append({"competency_code": code, "status": "uncertain", "reason": detail})
             continue
         except Exception as exc:
             detail = (
@@ -897,6 +911,10 @@ def evaluate_competency_coverage(
                     f"{detail}.",
                     group["competency_code"], _group_source_refs(group),
                 ))
+                summaries.append({
+                    "competency_code": group["competency_code"], "status": "uncertain",
+                    "reason": "модель недоступна",
+                })
             continue
 
         result_rows = _result_rows(response, set(citable))
@@ -911,6 +929,10 @@ def evaluate_competency_coverage(
                     "нужна ручная проверка.",
                     code, _group_source_refs(group),
                 ))
+                summaries.append({
+                    "competency_code": code, "status": "uncertain",
+                    "reason": "модель не вернула результат по компетенции",
+                })
                 continue
 
             fields = _result_fields(rows[0], citable[group_id])
@@ -921,8 +943,15 @@ def evaluate_competency_coverage(
                     "нужна ручная проверка.",
                     code, _group_source_refs(group),
                 ))
+                summaries.append({
+                    "competency_code": code, "status": "uncertain",
+                    "reason": "модель вернула некорректный результат",
+                })
                 continue
             status, reason, cited = fields
+            summaries.append({
+                "competency_code": code, "status": status, "reason": reason.strip()[:700],
+            })
             if status == "supported":
                 continue
             by_id = {item["id"]: item for item in group["evidence"]}
@@ -947,4 +976,4 @@ def evaluate_competency_coverage(
                 extra={"evidence_ids": list(dict.fromkeys(cited)), "auto_merge": False},
             ))
 
-    return checks, findings
+    return checks, findings, summaries

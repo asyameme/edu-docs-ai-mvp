@@ -639,22 +639,24 @@ def run_local_check(documents, snapshot, job_id, *, config=None, ruleset=None, r
             "skipped": "skipped",
         }[status]
         rule_revision = validation_rule_revision(config, result_by_id[result["rule_id"]])
-        coverage.append(
-            {
-                "rule_code": result["rule_id"],
-                "rule_revision": rule_revision,
-                "status": coverage_status,
-                "checks": result["checks"],
-                "reason": (
-                    "Нет выполненных сравнений: нужные данные отсутствуют или правило неприменимо"
-                    if status == "skipped"
-                    else "Валидатор не смог сделать однозначный вывод; требуется ручная проверка"
-                    if status == "needs_review"
-                    else "Учтены выполненные сравнения; "
-                    "полнота проверки всех записей не гарантируется"
-                ),
-            }
-        )
+        entry = {
+            "rule_code": result["rule_id"],
+            "rule_revision": rule_revision,
+            "status": coverage_status,
+            "checks": result["checks"],
+            "reason": (
+                "Нет выполненных сравнений: нужные данные отсутствуют или правило неприменимо"
+                if status == "skipped"
+                else "Валидатор не смог сделать однозначный вывод; требуется ручная проверка"
+                if status == "needs_review"
+                else "Учтены выполненные сравнения; "
+                "полнота проверки всех записей не гарантируется"
+            ),
+        }
+        # R-09: краткое резюме модели по каждой компетенции (почему покрыта/не покрыта).
+        if result.get("summaries"):
+            entry["competencies"] = result["summaries"]
+        coverage.append(entry)
         for index, finding in enumerate(findings):
             source_ids = []
             source_mapping_limitations = []
