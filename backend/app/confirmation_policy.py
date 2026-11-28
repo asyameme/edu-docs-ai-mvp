@@ -1,13 +1,13 @@
-"""Политика подтверждения версии, отделённая от результата валидатора."""
+"""Политика замечаний и целостности, отделённая от результата валидатора."""
 
 from copy import deepcopy
 
 from app.review_logic import digest
 
 CONFIRMATION_POLICY = {
-    "revision": "mvp-confirmation-policy-v1",
+    "revision": "mvp-version-policy-v2",
     "normative_findings": "warning",
-    "warning_confirmation": "explicit_user_acceptance",
+    "warning_confirmation": "not_required",
     "graph_integrity_errors": "blocking",
     "required_coverage": "must_have_final_result",
 }

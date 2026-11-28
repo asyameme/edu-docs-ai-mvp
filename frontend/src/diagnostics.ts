@@ -10,6 +10,7 @@ export type Diagnostic = {
   message: string;
   documents: Array<{ id: string; name: string }>;
   detail: string | null;
+  sourceRefIds?: string[];
 };
 
 export type DiagnosticGroup = {
@@ -87,6 +88,7 @@ export function reviewDiagnostic(issue: ReviewIssue, documents: Diagnostic["docu
     category: issue.type, ruleCode: issue.rule_code,
     title: issue.rule_code === "R-11" ? alignmentTitles[issue.type] ?? issue.message : issue.message,
     message: issue.message, documents,
+    sourceRefIds: issue.source_ref_ids,
     detail: alignment ? [
       alignment.outcome_text ? `Результат обучения: ${alignment.outcome_text}` : alignment.outcome_id,
       alignment.reason ? `Пояснение: ${alignment.reason}` : null,
@@ -136,13 +138,4 @@ function parserDiagnosticTitle(message: string): string {
     return "Неоднозначно определена нагрузка для траекторий или форм обучения";
   }
   return message;
-}
-
-export function updateAcceptedWarnings(current: string[], ids: string[], accepted: boolean): string[] {
-  const next = new Set(current);
-  for (const id of ids) {
-    if (accepted) next.add(id);
-    else next.delete(id);
-  }
-  return [...next];
 }

@@ -51,6 +51,8 @@ export function useImportJob() {
   const prepareRequestRef = useRef("");
   const busyRef = useRef(false);
   const reviewBusyRef = useRef(false);
+  const locallyUpdatedVersionRef = useRef<string | null>(null);
+  const supersededVersionIdsRef = useRef(new Set<string>());
   const signatureRef = useRef<ProgramSignature | null>(null);
   const signatureSavingRef = useRef(false);
   const [signatureSaving, setSignatureSaving] = useState(false);
@@ -77,6 +79,7 @@ export function useImportJob() {
     const current = sessionRef.current;
     const next = { ...current, ...patch };
     if (patch.versionId && patch.versionId !== current.versionId) {
+      if (current.versionId) supersededVersionIdsRef.current.add(current.versionId);
       delete next.optionalRuleCheckJobIds;
       setOptionalRuleChecks({});
     }
@@ -113,6 +116,8 @@ export function useImportJob() {
 
   const applyProgramState = useCallback((latest: ProgramRead, analysisVersionId?: string | null) => {
     if (sessionRef.current.programId !== latest.id) return;
+    if (latest.current_version_id !== sessionRef.current.versionId
+      && supersededVersionIdsRef.current.has(latest.current_version_id)) return;
     openProgramState(latest);
 
     const current = sessionRef.current;
@@ -172,24 +177,18 @@ export function useImportJob() {
 
     const load = (async () => {
       const readPage = (id: string, offset: number) => api<ReviewDetails>(
-        `/api/v1/programs/${programId}/versions/${id}/review?limit=100&offset=${offset}`,
+        `/api/v1/programs/${programId}/versions/${id}/review?limit=100&offset=${offset}` +
+          `&include_graph=false&include_summary=${offset === 0}`,
       );
       const details = await readPage(versionId, 0);
       const issues = [...details.issues];
+      const refs = new Map(details.version.snapshot.source_refs.map((source) => [source.id, source]));
       for (let offset = issues.length; offset < details.issues_count; offset += 100) {
         const page = await readPage(versionId, offset);
         if (page.issues.length === 0) break;
         issues.push(...page.issues);
+        page.version.snapshot.source_refs.forEach((source) => refs.set(source.id, source));
       }
-      const current = sessionRef.current;
-      const sourceVersionIds = [...new Set([current.analysisVersionId, current.checkVersionId]
-        .filter((id): id is string => Boolean(id) && id !== versionId))];
-      const sourceDetails = await Promise.all(sourceVersionIds.map(async (id) => {
-        try { return await readPage(id, 0); }
-        catch { return null; }
-      }));
-      const refs = new Map(details.version.snapshot.source_refs.map((source) => [source.id, source]));
-      sourceDetails.forEach((source) => source?.version.snapshot.source_refs.forEach((item) => refs.set(item.id, item)));
       const complete = {
         ...details,
         issues,
@@ -201,10 +200,11 @@ export function useImportJob() {
       const active = sessionRef.current;
       if (active.programId === programId && active.versionId === versionId) {
         setReviewDetails(complete);
-        if (!complete.confirmed && complete.check_job_id && complete.check_report &&
-          (!active.checkJobId || active.checkVersionId !== versionId)
+        const checkId = complete.lifecycle?.check_job_id ?? complete.check_job_id;
+        if (!complete.confirmed && checkId && (complete.lifecycle || complete.check_report) &&
+          (active.checkJobId !== checkId || active.checkVersionId !== versionId)
         ) {
-          updateSession({ checkJobId: complete.check_job_id, checkVersionId: versionId });
+          updateSession({ checkJobId: checkId, checkVersionId: versionId });
         }
       }
       return complete;
@@ -223,7 +223,8 @@ export function useImportJob() {
   }, [updateSession]);
 
   useEffect(() => {
-    const pendingBuild = reviewDetails?.graph_build;
+    const pendingBuild = graphBuildJob?.pending_version_id === session.versionId
+      ? graphBuildJob : reviewDetails?.graph_build;
     if (!pendingBuild || !session.programId) {
       setGraphBuildJob(null);
       return;
@@ -232,7 +233,7 @@ export function useImportJob() {
     setGraphBuildJob(pendingBuild);
     let active = true;
     let timer: number | undefined;
-    const reviewId = reviewDetails.version.snapshot.review?.review_id;
+    const reviewId = reviewDetails?.version.snapshot.review?.review_id;
     const programId = session.programId;
 
     const applyBuiltVersion = async (build: GraphBuildJob) => {
@@ -298,8 +299,11 @@ export function useImportJob() {
   }, [
     reviewDetails?.graph_build?.id,
     reviewDetails?.graph_build?.status,
+    graphBuildJob?.id,
+    graphBuildJob?.status,
     reviewDetails?.version.snapshot.review?.review_id,
     session.programId,
+    session.versionId,
     updateSession,
     loadReviewDetails,
   ]);
@@ -316,7 +320,7 @@ export function useImportJob() {
       const restoredProgram = programs[0];
       try {
         const details = await api<ReviewDetails>(
-          `/api/v1/programs/${restoredProgram.id}/versions/${restoredProgram.current_version_id}/review?limit=1&offset=0`,
+          `/api/v1/programs/${restoredProgram.id}/versions/${restoredProgram.current_version_id}/review?limit=1&offset=0&include_graph=false`,
         );
         const savedReview = details.version.snapshot.review;
         if (!savedReview?.review_id || !savedReview.import_job_id) return;
@@ -500,7 +504,7 @@ export function useImportJob() {
     const recover = async () => {
       try {
         const details = await api<ReviewDetails>(
-          `/api/v1/programs/${session.programId}/versions/${program.current_version_id}/review?limit=1&offset=0`,
+          `/api/v1/programs/${session.programId}/versions/${program.current_version_id}/review?limit=1&offset=0&include_graph=false`,
         );
         const savedReview = details.version.snapshot.review;
         // Сверку могли переподготовить в другой вкладке или снаружи: тогда
@@ -547,6 +551,10 @@ export function useImportJob() {
   useEffect(() => {
     const sessionKey = `${session.programId}:${session.jobId}`;
     if (!canPrepareReview || session.reviewId || recoveredReviewFor !== sessionKey || prepareRequestRef.current) return;
+    if (job?.automatic_review_id) {
+      updateSession({ reviewId: job.automatic_review_id, prepareKey: undefined });
+      return;
+    }
     if (!session.prepareKey) {
       updateSession({ prepareKey: crypto.randomUUID() });
       return;
@@ -598,7 +606,7 @@ export function useImportJob() {
       try {
         const latest = await api<ProgramRead>(`/api/v1/programs/${current.programId}`);
         const details = await api<ReviewDetails>(
-          `/api/v1/programs/${current.programId}/versions/${latest.current_version_id}/review?limit=1&offset=0`,
+          `/api/v1/programs/${current.programId}/versions/${latest.current_version_id}/review?limit=1&offset=0&include_graph=false`,
         );
         const savedReview = details.version.snapshot.review;
         if (!active) return;
@@ -639,9 +647,9 @@ export function useImportJob() {
     const receive = (next: ReviewJob) => {
       if (!active) return;
       setReviewJob(next);
-      if (next.status === "completed") {
+      if (next.status === "completed" || (next.purpose === "prepare" && next.output_version_id)) {
         const analysisVersionId = next.analysis_version_id ?? next.output_version_id ?? undefined;
-        setNotice("");
+        setNotice(next.status === "failed" ? next.message || "Анализ документов недоступен." : "");
         void api<ProgramRead>(`/api/v1/programs/${session.programId}`)
           .then((latest) => {
             if (active) applyProgramState(latest, analysisVersionId);
@@ -693,7 +701,9 @@ export function useImportJob() {
 
   useEffect(() => {
     const versionId = session.versionId;
-    if (!session.programId || !session.reviewId || reviewJob?.status !== "completed" || !versionId) return;
+    if (versionId === locallyUpdatedVersionRef.current) return;
+    if (!session.programId || !session.reviewId || !versionId ||
+      (reviewJob?.status !== "completed" && !reviewJob?.output_version_id)) return;
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout>;
     const load = () => {
@@ -733,6 +743,9 @@ export function useImportJob() {
           }
         } else {
           setNotice(next.message || "Не удалось проверить версию");
+          if (sessionRef.current.versionId) {
+            await loadReviewDetails(sessionRef.current.versionId, session.programId);
+          }
         }
       } catch (error) {
         if (!active) return;
@@ -877,22 +890,56 @@ export function useImportJob() {
     }
   }
 
-  async function decide(conflictId: string, variantId: string) {
-    const current = sessionRef.current;
-    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) return;
-    const signature = signatureForProgram(signatureRef.current, current.programId);
-    if (!signature) {
-      setNotice("Укажите подпись для этой программы кнопкой над программой.");
-      return;
+  async function checkpointChoices(): Promise<string | null> {
+    const current = { ...sessionRef.current };
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) {
+      return "Дождитесь сохранения выбора.";
     }
     reviewBusyRef.current = true;
     setReviewBusy(true);
     try {
-      const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions`, {
+      const base = `/api/v1/programs/${current.programId}/reviews/${current.reviewId}/graph-build`;
+      const result = await api<{ graph_build: string | null; version_id: string }>(base, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version_id: current.versionId }),
+      });
+      if (!result.graph_build) return null;
+      const build = await api<GraphBuildJob>(base);
+      if (sessionRef.current.programId !== current.programId) return "Программа изменилась.";
+      if (build.status === "failed" || build.status === "conflict") {
+        setGraphBuildJob(build);
+        return build.message ?? "Не удалось применить изменения.";
+      }
+      setGraphBuildJob(build);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : "Не удалось применить изменения.";
+    } finally {
+      reviewBusyRef.current = false;
+      setReviewBusy(false);
+    }
+  }
+
+  async function decide(conflictId: string, variantId: string): Promise<string | null> {
+    const current = sessionRef.current;
+    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId) {
+      return "Сверка уже выполняется или версия программы изменилась. Повторите сохранение после обновления.";
+    }
+    const signature = signatureForProgram(signatureRef.current, current.programId);
+    if (!signature) {
+      const message = "Укажите подпись программы в верхней части страницы и повторите сохранение выбора.";
+      setNotice(message);
+      return message;
+    }
+    reviewBusyRef.current = true;
+    setReviewBusy(true);
+    try {
+      const version = await api<VersionRead | Pick<VersionRead, "id" | "number">>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions/draft`, {
         method: "POST",
         headers: operationHeaders(),
         body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, variant_id: variantId, signature }),
       });
+      locallyUpdatedVersionRef.current = reviewDetails?.lifecycle ? version.id : null;
       updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
       setCheckJob(null);
       setNotice("");
@@ -901,15 +948,18 @@ export function useImportJob() {
       // а актуальные данные догружаем в фоне: следующий клик не блокируется.
       setReviewDetails((details) => details && {
         ...details,
+        version: { ...details.version, id: version.id, number: version.number },
+        lifecycle: details.lifecycle ? { ...details.lifecycle, needs_projection: true, can_generate: false } : details.lifecycle,
         issues: details.issues.map((issue) => issue.id === conflictId
           ? { ...issue, decision: { variant_id: variantId, author: signature } }
           : issue),
       });
-      void loadReviewDetails(version.id, current.programId).catch(() => {
-        setNotice("Выбор сохранён, обновляем список расхождений…");
-      });
+
+      return null;
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось сохранить выбранное значение");
+      const message = error instanceof Error ? error.message : "Не удалось сохранить выбранное значение";
+      setNotice(message);
+      return message;
     } finally {
       reviewBusyRef.current = false;
       setReviewBusy(false);
@@ -930,16 +980,19 @@ export function useImportJob() {
     reviewBusyRef.current = true;
     setReviewBusy(true);
     try {
-      const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions`, {
+      const version = await api<VersionRead | Pick<VersionRead, "id" | "number">>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions/draft`, {
         method: "POST",
         headers: operationHeaders(),
         body: JSON.stringify({ expected_version_id: current.versionId, conflict_id: conflictId, custom_value: value, signature }),
       });
+      locallyUpdatedVersionRef.current = reviewDetails?.lifecycle ? version.id : null;
       updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
       setCheckJob(null);
       setNotice("");
       setReviewDetails((details) => details && {
         ...details,
+        version: { ...details.version, id: version.id, number: version.number },
+        lifecycle: details.lifecycle ? { ...details.lifecycle, needs_projection: true, can_generate: false } : details.lifecycle,
         issues: details.issues.map((issue) => issue.id === conflictId
           ? {
             ...issue,
@@ -947,9 +1000,7 @@ export function useImportJob() {
           }
           : issue),
       });
-      void loadReviewDetails(version.id, current.programId).catch(() => {
-        setNotice("Выбор сохранён, обновляем список расхождений…");
-      });
+
       return null;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось сохранить собственный вариант";
@@ -987,14 +1038,15 @@ export function useImportJob() {
         })),
         signature,
       };
-      const version = await api<VersionRead>(
-        `/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions/batch`,
+      const version = await api<VersionRead | Pick<VersionRead, "id" | "number">>(
+        `/api/v1/programs/${current.programId}/reviews/${current.reviewId}/decisions/draft/batch`,
         {
           method: "POST",
           headers: operationHeaders(),
           body: JSON.stringify(request),
         },
       );
+      locallyUpdatedVersionRef.current = reviewDetails?.lifecycle ? version.id : null;
       updateSession({ versionId: version.id, checkJobId: undefined, checkVersionId: undefined });
       setCheckJob(null);
       const selectedByConflictId = new Map<string, string>();
@@ -1007,12 +1059,7 @@ export function useImportJob() {
           ...latest.version,
           id: version.id,
           number: version.number,
-          snapshot: {
-            ...version.snapshot,
-            source_refs: version.snapshot.source_refs.length
-              ? version.snapshot.source_refs
-              : latest.version.snapshot.source_refs,
-          },
+          snapshot: "snapshot" in version ? version.snapshot : latest.version.snapshot,
         },
         issues: latest.issues.map((issue) => {
           const variantId = selectedByConflictId.get(issue.id);
@@ -1022,10 +1069,16 @@ export function useImportJob() {
         }),
         confirmed: false,
         confirmation: null,
+        lifecycle: latest.lifecycle ? {
+          ...latest.lifecycle, is_source: false, can_generate: false, needs_projection: true,
+          check_job_id: null, check_status: "not_started",
+          generation_reason: "Ожидаем результаты проверки этой версии.",
+        } : latest.lifecycle,
         check_job_id: null,
         check_report: null,
       }));
       setNotice("");
+
       return targets.length;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось сохранить выбранные формулировки");
@@ -1231,48 +1284,6 @@ export function useImportJob() {
     }
   }
 
-  async function confirm(acceptedWarningIds: string[], expectedVersionId?: string) {
-    const current = sessionRef.current;
-    if (expectedVersionId && current.versionId !== expectedVersionId) {
-      setNotice("Версия программы изменилась. Просмотрите актуальные замечания.");
-      return null;
-    }
-    if (reviewBusyRef.current || !current.programId || !current.reviewId || !current.versionId ||
-      !checkJob || checkJob.status !== "completed" || checkJob.input_version_id !== current.versionId
-    ) return null;
-    const signature = signatureForProgram(signatureRef.current, current.programId);
-    if (!signature) {
-      setNotice("Укажите подпись для этой программы кнопкой над программой.");
-      return null;
-    }
-    reviewBusyRef.current = true;
-    setReviewBusy(true);
-    try {
-      const version = await api<VersionRead>(`/api/v1/programs/${current.programId}/reviews/${current.reviewId}/confirm`, {
-        method: "POST",
-        headers: operationHeaders(),
-        body: JSON.stringify({
-          expected_version_id: current.versionId,
-          check_job_id: checkJob.id,
-          accepted_warning_ids: acceptedWarningIds,
-          signature,
-        }),
-      });
-      updateSession({ versionId: version.id });
-      setNotice("");
-      void loadReviewDetails(version.id, current.programId).catch(() => {
-        setNotice("Версия подтверждена. Не удалось обновить данные на экране.");
-      });
-      return version;
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось подтвердить версию");
-      return null;
-    } finally {
-      reviewBusyRef.current = false;
-      setReviewBusy(false);
-    }
-  }
-
   async function retryPrepare() {
     const current = sessionRef.current;
     setRerunSameImport(true);
@@ -1335,10 +1346,10 @@ export function useImportJob() {
     decide,
     decideCustom,
     decideLevelOnlyVariants,
+    checkpointChoices,
     acceptChatProposal,
     undoChatProposal,
     runCheck,
     runOptionalRuleCheck,
-    confirm,
   };
 }

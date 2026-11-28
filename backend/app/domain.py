@@ -183,7 +183,9 @@ class ReviewState(Contract):
     import_job_id: UUID
     analysis_version_id: UUID
     graph_ready: bool = True
+    lifecycle_policy: Literal["automatic_source_v2"] = "automatic_source_v2"
     decisions: list[ReviewDecision] = Field(default_factory=list)
+    projected_decision_ids: list[UUID] = Field(default_factory=list)
     confirmation: ReviewConfirmation | None = None
 
 
@@ -252,6 +254,9 @@ class SnapshotV2(SnapshotData):
             conflicts = [item.conflict_id for item in self.review.decisions]
             if len(conflicts) != len(set(conflicts)):
                 raise ValueError("More than one current decision for a conflict")
+            projected = self.review.projected_decision_ids
+            if len(projected) != len(set(projected)) or not set(projected).issubset(conflicts):
+                raise ValueError("Проекция ссылается на отсутствующее или повторное решение")
         return self
 
 

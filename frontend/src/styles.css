@@ -4357,6 +4357,13 @@ textarea:focus-visible {
 .diagnostic-group--error { border-left:3px solid #cf4545; }
 .diagnostic-group--warning { border-left:3px solid #d8aa45; }
 .diagnostic-group--info { border-left:3px solid #88a1b9; }
+.diagnostic-group--discussable { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; }
+.diagnostic-group--discussable > details { min-width:0; }
+.diagnostic-discuss-button { margin:13px 13px 13px 0; white-space:nowrap; font-size:12px; }
+@media(max-width:650px) {
+  .diagnostic-group--discussable { grid-template-columns:minmax(0,1fr); }
+  .diagnostic-discuss-button { justify-self:end; margin:0 13px 13px; }
+}
 .diagnostic-group > details > summary { display:flex; align-items:flex-start; gap:10px; padding:13px; cursor:pointer; list-style:none; }
 .diagnostic-group > details > summary::after { content:"+"; margin-left:auto; color:#64748b; }
 .diagnostic-group > details[open] > summary::after { content:"−"; }

@@ -24,6 +24,7 @@ export type ImportJob = {
   progress: number;
   files: ImportFile[];
   issues: ImportIssue[];
+  automatic_review_id?: string | null;
 };
 
 export type ProgramRead = {
@@ -58,6 +59,7 @@ export type ReviewJob = {
   output_version_id: string | null;
   status: "pending" | "processing" | "completed" | "failed" | "conflict";
   progress: number;
+  progress_stage: string | null;
   message: string | null;
   analysis_version_id: string | null;
   current_review_version_id: string | null;
@@ -204,12 +206,25 @@ export type ReviewSnapshot = {
     review_id?: string;
     import_job_id?: string;
     analysis_version_id?: string;
+    lifecycle_policy?: "automatic_source_v2";
     decisions: Array<{ conflict_id: string; variant_id: string; author: string | null }>;
     confirmation: { author: string | null } | null;
   } | null;
 };
 
 export type ReviewDetails = {
+  lifecycle?: {
+    policy: "automatic_source_v2";
+    saved: boolean;
+    needs_projection?: boolean;
+    is_source: boolean;
+    analysis_status: "pending" | "processing" | "completed" | "failed" | "conflict";
+    check_job_id: string | null;
+    check_status: "not_started" | "pending" | "processing" | "completed" | "failed" | "conflict";
+    can_generate: boolean;
+    generation_reason: string | null;
+    unresolved_relations: number;
+  } | null;
   version: {
     id: string;
     number: number;

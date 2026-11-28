@@ -11,8 +11,8 @@ import httpx
 import pytest
 from psycopg_pool import ConnectionPool
 from pydantic_ai import ModelRetry
-from test_generation_docx_patch import _paragraph, _table, make_docx
-from test_review_integration import choose, prepare
+from test_generation_docx_patch import _paragraph, _table
+from test_review_integration import choose, make_docx, prepare
 
 import worker.agent.read_adapter as read_adapter
 from app.config import get_settings
@@ -236,7 +236,7 @@ def test_reads_docx_source_after_import_and_review_from_postgres():
         source = next(
             item
             for item in version["snapshot"]["source_refs"]
-            if item["artifact_locator"] == "document"
+            if '"paragraph_index":1' in item["locator"].replace(" ", "")
         )
         pool = ConnectionPool(
             kwargs={

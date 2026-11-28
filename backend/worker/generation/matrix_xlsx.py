@@ -51,12 +51,12 @@ class MatrixRow:
     semester: int | None
     part: str | None
     credits: int | None
-    values: tuple[int, ...]
+    values: tuple[int | None, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class DerivedMatrix:
-    """Проекция графа: компетенции-колонки и строки со значениями 0/1."""
+    """Проекция графа: 0/1 для определённых ячеек, None для неразрешённых связей."""
 
     competency_codes: tuple[str, ...]
     rows: tuple[MatrixRow, ...]
@@ -154,11 +154,14 @@ def _formed_pairs(graph: EducationalGraph) -> tuple[tuple[str, int | None, str],
     return tuple(pairs)
 
 
-def derive_matrix(graph: EducationalGraph) -> DerivedMatrix:
+def derive_matrix(graph: EducationalGraph, *, unresolved_pairs=()) -> DerivedMatrix:
     """Собрать производную матрицу из графа программы."""
 
     codes = tuple(
-        sorted((_node_key(node.id) for node in graph.nodes if node.entity_type == "competency"),
+        sorted({
+            *(_node_key(node.id) for node in graph.nodes if node.entity_type == "competency"),
+            *(code for _, _, code in unresolved_pairs),
+        },
                key=_natural_code_key),
     )
     if not codes:
@@ -175,7 +178,15 @@ def derive_matrix(graph: EducationalGraph) -> DerivedMatrix:
             semester=entry["semester"],
             part=entry["part"],
             credits=entry["credits"],
-            values=tuple(_cell(entry["name"], entry["semester"], code, pairs) for code in codes),
+            values=tuple(
+                None if any(
+                    name == entry["name"] and candidate == code
+                    and (semester is None or entry["semester"] is None
+                         or semester == entry["semester"])
+                    for name, semester, candidate in unresolved_pairs
+                ) else _cell(entry["name"], entry["semester"], code, pairs)
+                for code in codes
+            ),
         )
         for entry in entries
     )
@@ -194,10 +205,13 @@ def _cell(discipline: str, semester: int | None, code: str,
     return 0
 
 
-def build_matrix_xlsx(source: DerivedMatrix | EducationalGraph) -> bytes:
+def build_matrix_xlsx(source: DerivedMatrix | EducationalGraph, *, unresolved_pairs=()) -> bytes:
     """Собрать XLSX производной матрицы в раскладке образца заказчика."""
 
-    matrix = source if isinstance(source, DerivedMatrix) else derive_matrix(source)
+    matrix = (
+        source if isinstance(source, DerivedMatrix)
+        else derive_matrix(source, unresolved_pairs=unresolved_pairs)
+    )
 
     workbook = Workbook()
     sheet = workbook.active
@@ -219,7 +233,15 @@ def build_matrix_xlsx(source: DerivedMatrix | EducationalGraph) -> bytes:
         sheet.cell(row=index, column=5, value=row.credits)
         sheet.cell(row=index, column=6, value=row.discipline)
         for offset, value in enumerate(row.values):
-            sheet.cell(row=index, column=_DISCIPLINE_COLUMN + 1 + offset, value=value)
+            sheet.cell(
+                row=index, column=_DISCIPLINE_COLUMN + 1 + offset,
+                value="?" if value is None else value,
+            )
+
+    if any(value is None for row in matrix.rows for value in row.values):
+        notes = workbook.create_sheet("Примечания")
+        notes["A1"] = "? — связь не определена однозначно в исходных документах; это не ноль."
+        notes.column_dimensions["A"].width = 100
 
     bold = Font(bold=True)
     for column in range(1, len(headers) + 1):
@@ -238,15 +260,18 @@ def build_matrix_xlsx(source: DerivedMatrix | EducationalGraph) -> bytes:
     return buffer.getvalue()
 
 
-def read_matrix_xlsx(content: bytes) -> tuple[tuple[str, ...], list[list[int]]]:
-    """Прочитать значения 0/1 из собранной матрицы (для проверок и тестов)."""
+def read_matrix_xlsx(content: bytes) -> tuple[tuple[str, ...], list[list[int | None]]]:
+    """Прочитать 0/1 и явно неопределённые ячейки из собранной матрицы."""
 
     sheet = load_workbook(BytesIO(content), read_only=True)[SHEET_NAME]
     codes = tuple(
         str(cell.value) for cell in sheet[2][_DISCIPLINE_COLUMN:] if cell.value is not None
     )
     values = [
-        [int(cell.value or 0) for cell in row[_DISCIPLINE_COLUMN:len(codes) + _DISCIPLINE_COLUMN]]
+        [
+            None if cell.value == "?" else int(cell.value or 0)
+            for cell in row[_DISCIPLINE_COLUMN:len(codes) + _DISCIPLINE_COLUMN]
+        ]
         for row in sheet.iter_rows(min_row=3)
         if row[_DISCIPLINE_COLUMN - 1].value is not None
     ]

@@ -99,13 +99,33 @@ class ReviewActivities:
     @activity.defn(name="review_execute_v1")
     def execute(self, request):
         job = self.repo.job_by_id(UUID(request["job_id"]))
+        expected_workflow = request.get("workflow_id", f"review-{job['id']}")
+        if job.get("workflow_id", expected_workflow) != expected_workflow:
+            return "superseded"
         if "outcome" in job["report"]:
             return job["report"]["outcome"]
         purpose = job["parameters"]["purpose"]
         is_local = job["parameters"].get("executor", "http") == "local"
-        self._note(job["id"], 10, "анализ документов")
+        is_automatic_prepare = (
+            purpose == "prepare"
+            and job["parameters"].get("schema_version", 1) == 2
+        )
+        self._note(
+            job["id"], 10,
+            "Сохраняем исходный граф документов" if is_automatic_prepare
+            else "Подготавливаем проверку документов",
+        )
         try:
+            if is_automatic_prepare:
+                self.repo.ensure_source_graph(job["id"])
+            self._note(
+                job["id"], 35,
+                "Сравниваем документы и готовим варианты" if purpose == "prepare"
+                else "Проверяем выбранные правила по графу",
+            )
             if is_local:
+                if not self.settings.local_validation_enabled:
+                    raise ValueError("Локальная проверка документов отключена")
                 input_data = job["parameters"]["input"]
                 rules = job["parameters"].get("local_rules") or load_rules()
                 expected_implementation = job["parameters"].get("implementation_revision")
@@ -205,7 +225,7 @@ class ReviewActivities:
                                 raise ValueError("Analysis response exceeds configured limit")
                             chunks.append(chunk)
                         raw = json.loads(b"".join(chunks))
-            self._note(job["id"], 55, "проверка результатов анализа")
+            self._note(job["id"], 65, "Проверяем результаты анализа")
             artifacts = []
             if purpose == "prepare":
                 documents = job["parameters"]["input"]["documents"]
@@ -277,8 +297,14 @@ class ReviewActivities:
                     }
                     for item, artifact in zip(raw.get("artifacts", []), artifacts, strict=True)
                 ]
-            self._note(job["id"], 90, "сохранение версии")
-            return self.repo.publish(job["id"], result, artifacts, raw_record, raw_hash)
+            self._note(job["id"], 90, "Сохраняем результаты сверки")
+            publish_options = (
+                {"expected_workflow_id": expected_workflow} if request.get("workflow_id") else {}
+            )
+            return self.repo.publish(
+                job["id"], result, artifacts, raw_record, raw_hash,
+                **publish_options,
+            )
         except httpx.TransportError as error:
             raise ApplicationError("Нет соединения с ML", type="AnalysisTemporary") from error
         except (httpx.HTTPStatusError, ValidationError, ValueError, DomainError) as error:
@@ -296,7 +322,7 @@ class ReviewActivities:
         job = self.repo.job_by_id(UUID(request["job_id"]))
         self.repo.fail(
             job["id"],
-            job["workflow_id"],
+            request.get("workflow_id", f"review-{job['id']}"),
             "analysis_unavailable",
             "Анализ не завершился после повторных попыток; исходные данные сохранены",
         )

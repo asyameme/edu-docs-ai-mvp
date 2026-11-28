@@ -22,7 +22,6 @@ from app.repository import Repository
 from app.review_contract import (
     CheckCreate,
     CheckResult,
-    ConfirmCreate,
     DecisionBatchCreate,
     DecisionCreate,
     ReviewCreate,
@@ -36,8 +35,19 @@ router = APIRouter(prefix="/api/v1/programs/{program_id}", tags=["Reviews"])
 _VERSION_READ_SERIALIZER = TypeAdapter(VersionRead)
 
 
-def version_response(value):
+class DecisionReceipt(BaseModel):
+    id: UUID
+    number: int
+
+
+def version_response(value, *, compact=False):
     """Сериализовать уже проверенную версию без повторной проверки всего графа."""
+    if compact:
+        return Response(
+            content=DecisionReceipt(id=value["id"], number=value["number"]).model_dump_json(),
+            status_code=201,
+            media_type="application/json",
+        )
     return Response(
         content=_VERSION_READ_SERIALIZER.dump_json(value, warnings="none"),
         status_code=201,
@@ -53,6 +63,7 @@ class ReviewJobRead(BaseModel):
     output_version_id: UUID | None
     status: Literal["pending", "processing", "completed", "failed", "conflict"]
     progress: int
+    progress_stage: str | None = None
     message: str | None = None
     analysis_version_id: UUID | None = None
     current_review_version_id: UUID | None = None
@@ -80,6 +91,7 @@ async def job_state(repo, client, program_id, job_id):
         "progress": 100
         if "outcome" in row["report"]
         else int(row["report"].get("progress_percent") or 0),
+        "progress_stage": row["report"].get("progress_stage"),
         "message": row["report"].get("message"),
         "document_ids": row["parameters"].get("manual_document_ids"),
         "competency_code": row["parameters"].get("manual_competency_code"),
@@ -210,9 +222,18 @@ async def review_events(
 
 @router.get("/versions/{version_id}/review")
 def read_version_review(
-    program_id: UUID, version_id: UUID, repo: RepoDep, limit: Limit = 50, offset: Offset = 0
+    program_id: UUID, version_id: UUID, repo: RepoDep, limit: Limit = 50, offset: Offset = 0,
+    include_graph: bool = True, include_summary: bool = True,
 ) -> dict:
-    return ReviewRepository(repo.pool).details(program_id, version_id, limit, offset)
+    return ReviewRepository(repo.pool).details(
+        program_id, version_id, limit, offset, include_graph=include_graph,
+        include_summary=include_summary,
+    )
+
+
+@router.post("/reviews/{review_id}/graph-build", status_code=202)
+def checkpoint_choices(program_id: UUID, review_id: UUID, body: CheckCreate, repo: RepoDep):
+    return ReviewRepository(repo.pool).checkpoint_choices(program_id, review_id, body.version_id)
 
 
 @router.get("/reviews/{review_id}/graph-build", response_model=GraphBuildRead)
@@ -220,7 +241,9 @@ def read_graph_build(program_id: UUID, review_id: UUID, repo: RepoDep) -> GraphB
     return ReviewRepository(repo.pool).graph_build_status(program_id, review_id)
 
 
-@router.post("/reviews/{review_id}/decisions", status_code=201, response_model=VersionRead)
+@router.post(
+    "/reviews/{review_id}/decisions", status_code=201, response_model=VersionRead
+)
 def decide(
     program_id: UUID,
     review_id: UUID,
@@ -228,12 +251,16 @@ def decide(
     operation_key: OperationKey,
     repo: RepoDep,
 ) -> Response:
-    version = ReviewRepository(repo.pool).decide(program_id, review_id, operation_key, body)
+    version = ReviewRepository(repo.pool).decide(
+        program_id, review_id, operation_key, body
+    )
     return version_response(version)
 
 
 @router.post(
-    "/reviews/{review_id}/decisions/batch", status_code=201, response_model=VersionRead
+    "/reviews/{review_id}/decisions/batch",
+    status_code=201,
+    response_model=VersionRead,
 )
 def decide_batch(
     program_id: UUID,
@@ -242,8 +269,31 @@ def decide_batch(
     operation_key: OperationKey,
     repo: RepoDep,
 ) -> Response:
-    version = ReviewRepository(repo.pool).decide_many(program_id, review_id, operation_key, body)
+    version = ReviewRepository(repo.pool).decide_many(
+        program_id, review_id, operation_key, body
+    )
     return version_response(version)
+
+
+@router.post(
+    "/reviews/{review_id}/decisions/draft", status_code=201, response_model=DecisionReceipt
+)
+def save_choice(program_id: UUID, review_id: UUID, body: DecisionCreate,
+                operation_key: OperationKey, repo: RepoDep) -> Response:
+    version = ReviewRepository(repo.pool).decide(
+        program_id, review_id, operation_key, body, defer_graph=True,
+    )
+    return version_response(version, compact=True)
+
+
+@router.post("/reviews/{review_id}/decisions/draft/batch", status_code=201,
+             response_model=DecisionReceipt)
+def save_choices(program_id: UUID, review_id: UUID, body: DecisionBatchCreate,
+                 operation_key: OperationKey, repo: RepoDep) -> Response:
+    version = ReviewRepository(repo.pool).decide_many(
+        program_id, review_id, operation_key, body, defer_graph=True,
+    )
+    return version_response(version, compact=True)
 
 
 @router.post("/reviews/{review_id}/checks", status_code=202)
@@ -292,16 +342,6 @@ async def read_check(
     }
 
 
-@router.post("/reviews/{review_id}/confirm", status_code=201, response_model=VersionRead)
-def confirm(
-    program_id: UUID,
-    review_id: UUID,
-    body: ConfirmCreate,
-    operation_key: OperationKey,
-    repo: RepoDep,
-) -> Response:
-    version = ReviewRepository(repo.pool).confirm(program_id, review_id, operation_key, body)
-    return version_response(version)
 
 
 @router.get(

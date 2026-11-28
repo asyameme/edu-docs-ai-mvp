@@ -4,7 +4,14 @@ import re
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, Field, JsonValue, StringConstraints, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    Field,
+    JsonValue,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.domain import Contract, Entity, RelationV2, SnapshotV2
 from app.parser_document import ParserDocument, parse_output
@@ -271,7 +278,9 @@ class AnalysisV2(CheckResult):
             if issue.requires_decision and not issue.variants:
                 raise ValueError("A decision issue must provide at least one variant")
             if issue.variants and any(
-                not isinstance(change, (DocumentMutation, CompetencyLinksMutation, SharedIndicatorTextMutation))
+                not isinstance(
+                    change, (DocumentMutation, CompetencyLinksMutation, SharedIndicatorTextMutation)
+                )
                 for variant in issue.variants
                 for change in variant.changes
             ):
@@ -345,13 +354,18 @@ class DecisionBatchCreate(Contract):
         return self
 
 
-CompetencyCode = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+CompetencyCode = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
 
 
 def _check_manual_scope(rule_codes, document_ids, competency_code):
     rules = set(rule_codes or ())
     if "R-11" in rules or document_ids is not None:
-        if rules != {"R-11"} or not document_ids or len(document_ids) != 1 or competency_code is not None:
+        if (
+            rules != {"R-11"} or not document_ids or len(document_ids) != 1
+            or competency_code is not None
+        ):
             raise ValueError("Для R-11 выберите одну РПД и запустите правило отдельно")
     if "R-09" in rules or competency_code is not None:
         if rules != {"R-09"} or not competency_code or document_ids is not None:
@@ -375,21 +389,6 @@ class CheckCreate(Contract):
     def check_manual_scope(self) -> Self:
         _check_manual_scope(self.rule_codes, self.document_ids, self.competency_code)
         return self
-
-
-class ConfirmCreate(Contract):
-    expected_version_id: UUID
-    check_job_id: UUID
-    accepted_warning_ids: list[UUID] = Field(default_factory=list)
-    signature: str = Field(min_length=1, max_length=120)
-
-    @field_validator("signature")
-    @classmethod
-    def normalize_signature(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Подпись не должна быть пустой")
-        return value
 
 
 class AnalysisDocument(Contract):

@@ -2460,11 +2460,25 @@
           "title": "Graph Ready",
           "type": "boolean"
         },
+        "lifecycle_policy": {
+          "const": "automatic_source_v2",
+          "default": "automatic_source_v2",
+          "title": "Lifecycle Policy",
+          "type": "string"
+        },
         "decisions": {
           "items": {
             "$ref": "#/$defs/ReviewDecision"
           },
           "title": "Decisions",
+          "type": "array"
+        },
+        "projected_decision_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Projected Decision Ids",
           "type": "array"
         },
         "confirmation": {

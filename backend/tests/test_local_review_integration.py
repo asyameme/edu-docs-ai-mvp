@@ -23,7 +23,7 @@ pytestmark = [
 ORIGINALS = Path(__file__).resolve().parents[2] / "tests" / "originals"
 
 
-def test_real_documents_prepare_choice_check_confirm_and_docx():
+def test_real_documents_prepare_choice_check_and_docx():
     original = (ORIGINALS / "РПД_матанализ1.docx").read_bytes()
     parsed = parse_local_document("РПД/source.docx", original, uuid4())
     formulation = parsed["competencies"][0]["formulation"]
@@ -60,7 +60,6 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
         assert imported["status"] == "partial", imported
         assert all(item["status"] == "completed" for item in imported["files"])
         assert not any(item["severity"] == "error" for item in imported["issues"])
-        assert http.get(root).json()["current_version_id"] == program["current_version_id"]
         prepared = post(
             http,
             root + "/reviews",
@@ -73,9 +72,8 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
         job = wait(http, root + "/reviews/" + prepared["id"])
         assert job["status"] == "completed", job
         version = http.get(root + "/versions/" + job["output_version_id"]).json()
-        assert version["snapshot"]["entities"] == []
-        assert version["snapshot"]["review"]["graph_ready"] is False
-        post(http, root + f"/reviews/{job['id']}/checks", {"version_id": version["id"]}, 409)
+        assert version["snapshot"]["entities"]
+        assert version["snapshot"]["review"]["graph_ready"] is True
         details = http.get(root + f"/versions/{version['id']}/review").json()
         issues = [i for i in details["issues"] if i["requires_decision"]]
         assert len(issues) == 1
@@ -127,17 +125,8 @@ def test_real_documents_prepare_choice_check_confirm_and_docx():
         assert all("evidence" not in issue and "checks" not in issue for issue in report["issues"])
         assert not any(i["severity"] == "blocking" for i in report["issues"])
         assert all("evidence" not in issue and "checks" not in issue for issue in details["issues"])
-        confirmed = post(
-            http,
-            root + f"/reviews/{job['id']}/confirm",
-            {
-                "expected_version_id": version["id"],
-                "check_job_id": checked["id"],
-                "signature": "Локальная приёмка",
-                "accepted_warning_ids": [i["id"] for i in report["issues"]],
-            },
-            201,
-        )
+        assert details["lifecycle"]["can_generate"]
+        confirmed = version
         generated = post(http, root + "/generation", {"version_id": confirmed["id"]}, 202)
         generated = wait(http, root + "/generation/" + generated["id"])
         assert generated["status"] == "completed", generated

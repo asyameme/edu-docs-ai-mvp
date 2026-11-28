@@ -1,32 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { groupDiagnostics, ruleDisplayLabel, type Diagnostic, type DiagnosticGroup } from "./diagnostics";
 
 const severityLabels = { error: "Ошибка", warning: "Предупреждение", info: "Информация" };
 const PAGE_SIZE = 12;
 
-type Acceptance = {
-  acceptedIds: string[];
+export type DiagnosticDiscussion = {
+  onDiscuss: (group: DiagnosticGroup) => void;
   disabled: boolean;
-  onChange: (ids: string[], accepted: boolean) => void;
 };
-
-function GroupAcceptance({ group, acceptance }: { group: DiagnosticGroup; acceptance: Acceptance }) {
-  const input = useRef<HTMLInputElement>(null);
-  const ids = group.items.map((item) => item.id);
-  const accepted = new Set(acceptance.acceptedIds);
-  const count = ids.filter((id) => accepted.has(id)).length;
-  useEffect(() => {
-    if (input.current) input.current.indeterminate = count > 0 && count < ids.length;
-  }, [count, ids.length]);
-  return (
-    <label className="diagnostic-acceptance">
-      <input ref={input} type="checkbox" checked={count === ids.length}
-        disabled={acceptance.disabled}
-        onChange={(event) => acceptance.onChange(ids, event.target.checked)} />
-      Учесть эту группу предупреждений{ids.length > 1 ? `, записей: ${ids.length}` : ""}
-    </label>
-  );
-}
 
 function DocumentDiagnostics({ items }: { items: Diagnostic[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -49,8 +30,8 @@ function DocumentDiagnostics({ items }: { items: Diagnostic[] }) {
   </li>;
 }
 
-function DiagnosticGroupCard({ group, acceptance, query }: {
-  group: DiagnosticGroup; acceptance?: Acceptance; query: string;
+function DiagnosticGroupCard({ group, query, discussion }: {
+  group: DiagnosticGroup; query: string; discussion?: DiagnosticDiscussion;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -67,7 +48,7 @@ function DiagnosticGroupCard({ group, acceptance, query }: {
     || items.some((item) => [item.message, item.detail ?? "", ...item.documents.map((document) => document.name)]
       .some((value) => value.toLocaleLowerCase("ru").includes(query))));
   return (
-    <li className={`diagnostic-group diagnostic-group--${group.severity}`}>
+    <li className={`diagnostic-group diagnostic-group--${group.severity}${discussion ? " diagnostic-group--discussable" : ""}`}>
       <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary>
           <span className={`severity-dot severity-dot--${group.severity}`} aria-hidden="true" />
@@ -93,12 +74,18 @@ function DiagnosticGroupCard({ group, acceptance, query }: {
           </div>
         )}
       </details>
-      {acceptance && <GroupAcceptance group={group} acceptance={acceptance} />}
+      {discussion && <button className="secondary-button diagnostic-discuss-button" type="button"
+        disabled={discussion.disabled} aria-label={`Обсудить с агентом: ${group.title}`}
+        onClick={() => discussion.onDiscuss(group)}>
+        Обсудить с агентом
+      </button>}
     </li>
   );
 }
 
-export function DiagnosticList({ items, acceptance }: { items: Diagnostic[]; acceptance?: Acceptance }) {
+export function DiagnosticList({ items, discussion }: {
+  items: Diagnostic[]; discussion?: DiagnosticDiscussion;
+}) {
   const [severity, setSeverity] = useState<"action" | "all" | Diagnostic["severity"]>("action");
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -114,7 +101,7 @@ export function DiagnosticList({ items, acceptance }: { items: Diagnostic[]; acc
   return (
     <div className="diagnostics">
       <p className="diagnostic-summary">
-        Групп: {groups.length} · Исходных записей: {items.length}. Повторы объединены, подробности раскрываются по нажатию.
+        Замечаний: {groups.length}. Повторяющиеся сообщения объединены.
       </p>
       <div className="diagnostic-toolbar">
         <label>Показать
@@ -141,14 +128,12 @@ export function DiagnosticList({ items, acceptance }: { items: Diagnostic[]; acc
           ? "Ошибок и предупреждений нет. Информационные сообщения доступны в фильтре."
           : "По выбранному фильтру замечаний нет."}
       </p>}
-      {/* Секция принятия предупреждений требует отметки каждой группы:
-          пагинация скрыла бы чекбоксы и блокировала подтверждение версии. */}
-      <ul className="diagnostic-groups">{visible.slice(0, acceptance ? visible.length : limit).map((group) => (
-        <DiagnosticGroupCard key={group.id} group={group} acceptance={acceptance} query={search} />
+      <ul className="diagnostic-groups">{visible.slice(0, limit).map((group) => (
+        <DiagnosticGroupCard key={group.id} group={group} query={search} discussion={discussion} />
       ))}</ul>
-      {!acceptance && visible.length > limit && <button type="button" className="secondary-button"
+      {visible.length > limit && <button type="button" className="secondary-button"
         onClick={() => setLimit((current) => current + PAGE_SIZE)}>
-        Показать ещё группы · осталось {visible.length - limit}
+        Показать ещё замечания · осталось {visible.length - limit}
       </button>}
     </div>
   );

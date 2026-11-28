@@ -1,4 +1,4 @@
-"""Настоящий HTTP/PostgreSQL/Temporal: подготовка, выбор, проверка и подтверждение."""
+"""Настоящий HTTP/PostgreSQL/Temporal: исходная версия, выбор и проверка."""
 
 import io
 import json
@@ -10,7 +10,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from test_generation_docx_patch import make_docx
+from docx import Document
+from test_generation_docx_patch import make_docx as minimal_docx
 
 pytestmark = [
     pytest.mark.integration,
@@ -38,6 +39,21 @@ def post(http, path, body, status, key=None):
     return response.json()
 
 
+def make_docx(*body_items):
+    """Создать полноценный DOCX для чтения через python-docx и проверки правок."""
+    complete = io.BytesIO()
+    Document().save(complete)
+    with zipfile.ZipFile(io.BytesIO(minimal_docx(*body_items))) as minimal:
+        document = minimal.read("word/document.xml")
+    result = io.BytesIO()
+    with zipfile.ZipFile(complete) as source, zipfile.ZipFile(result, "w") as target:
+        for item in source.infolist():
+            target.writestr(
+                item, document if item.filename == "word/document.xml" else source.read(item)
+            )
+    return result.getvalue()
+
+
 def prepare(http, filename="valid.docx", *, wait_analysis=True, content=None):
     program = post(http, "/api/v1/programs", {"name": "Искусственная проверка Backend4"}, 201)
     root = "/api/v1/programs/" + program["id"]
@@ -62,7 +78,7 @@ def prepare(http, filename="valid.docx", *, wait_analysis=True, content=None):
 
 def choose(http, root, job, variant_index=1):
     details = http.get(root + "/versions/" + job["output_version_id"] + "/review").json()
-    issue = details["issues"][0]
+    issue = next(item for item in details["issues"] if item["requires_decision"])
     body = {
         "expected_version_id": job["output_version_id"],
         "conflict_id": issue["id"],
@@ -84,58 +100,31 @@ def run_check(http, root, job, version_id):
     return wait(http, path + "/" + accepted["id"])
 
 
-def test_complete_review_preserves_original_sources_versions_and_confirmation():
+def test_complete_review_preserves_original_sources_versions_and_checked_export():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
-        original_docx = make_docx(
-            '<w:p><w:r><w:t>Тестовая дисциплина: 108 часов</w:t></w:r></w:p>'
-        )
-        root, imported, job = prepare(
-            http,
-            "РПД/РПД_матанализ1.docx",
-            content=original_docx,
-        )
+        original_docx = make_docx("<w:p><w:r><w:t>Тестовая дисциплина: 108 часов</w:t></w:r></w:p>")
+        root, imported, job = prepare(http, "РПД/РПД_матанализ1.docx", content=original_docx)
         assert job["status"] == "completed", job
         original = http.get(root + "/versions/" + job["output_version_id"]).json()
+        assert original["snapshot"]["entities"]
+        assert original["snapshot"]["source_refs"]
+        assert original["snapshot"]["review"]["decisions"] == []
         version, issue = choose(http, root, job)
         assert version["snapshot"]["entities"][0]["attributes"]["hours_total"] == 144
-        details = http.get(root + "/versions/" + version["id"] + "/review").json()
-        assert "graph_ready" not in details["prepare_report"]
-        assert "graph_build_issues" not in details["prepare_report"]
         checked = run_check(http, root, job, version["id"])
         assert checked["status"] == "completed", checked
         details = http.get(root + "/versions/" + version["id"] + "/review").json()
         assert details["check_report"]["coverage"][0]["reason"] == "Получено часов: 144"
-        body = {
-            "expected_version_id": version["id"],
-            "check_job_id": checked["id"],
-            "signature": "Тестовый пользователь",
-        }
-        path = root + "/reviews/" + job["id"] + "/confirm"
-        key = uuid4().hex
-        confirmed = post(http, path, body, 201, key)
-        assert version["snapshot"]["review"]["decisions"][0]["author"] == body["signature"]
-        assert confirmed["snapshot"]["review"]["confirmation"]["author"] == body["signature"]
-        assert post(http, path, body, 201, key)["id"] == confirmed["id"]
-        assert http.get(root + "/versions/" + original["id"]).json() == original
-        details = http.get(root + "/versions/" + confirmed["id"] + "/review").json()
-        assert details["confirmed"] is True
-        assert details["issues"][0]["id"] == issue["id"]
-        assert details["issues"][0]["effective_status"] == "resolved"
-        after_refs = {r["id"] for r in confirmed["snapshot"]["source_refs"]}
-        assert original["snapshot"]["entities"] == []
-        assert original["snapshot"]["source_refs"] == []
-        assert after_refs
-        source = confirmed["snapshot"]["source_refs"][0]
-        artifact = http.get(
-            root
-            + "/documents/"
-            + source["document_id"]
-            + "/artifacts/"
-            + source["artifact_id"]
-            + "/download"
+        assert details["lifecycle"]["can_generate"]
+        assert details["confirmation"] is None
+        assert (
+            next(i for i in details["issues"] if i["id"] == issue["id"])["effective_status"]
+            == "resolved"
         )
-        assert artifact.status_code == 200
-        assert artifact.text == "# Искусственный Markdown\n"
+        assert http.get(root + "/versions/" + original["id"]).json() == original
+        source = version["snapshot"]["source_refs"][0]
+        downloaded = http.get(root + "/documents/" + source["document_id"] + "/download")
+        assert downloaded.content == original_docx
         import psycopg
 
         from app.config import get_settings
@@ -148,118 +137,103 @@ def test_complete_review_preserves_original_sources_versions_and_confirmation():
             user=settings.postgres_user,
             password=settings.postgres_password.get_secret_value(),
         ) as conn:
-            for signed in (version, confirmed):
-                rows = conn.execute(
-                    "SELECT actor_type,actor_id FROM change_log WHERE version_id=%s",
-                    (signed["id"],),
-                ).fetchall()
-                assert rows
-                assert all(row == ("user", body["signature"]) for row in rows)
-            config, config_hash = conn.execute(
-                "SELECT parser_config,parser_config_hash FROM document_artifacts WHERE id=%s",
-                (source["artifact_id"],),
+            rows = conn.execute(
+                "SELECT actor_type,actor_id FROM change_log WHERE version_id=%s", (version["id"],)
+            ).fetchall()
+            assert rows and all(row == ("user", "Тестовый пользователь") for row in rows)
+            artifact, config, config_hash = conn.execute(
+                "SELECT id,parser_config,parser_config_hash FROM document_artifacts "
+                "WHERE producing_job_id=%s AND kind='markdown'",
+                (job["id"],),
             ).fetchone()
             assert config_hash == digest(config)
-
-        generation = post(
-            http,
-            root + "/generation",
-            {"version_id": confirmed["id"]},
-            202,
+        artifact_response = http.get(
+            root
+            + "/documents/"
+            + source["document_id"]
+            + "/artifacts/"
+            + str(artifact)
+            + "/download"
         )
+        assert artifact_response.status_code == 200
+        assert artifact_response.text == "# Искусственный Markdown\n"
+        generation = post(http, root + "/generation", {"version_id": version["id"]}, 202)
         generated = wait(http, root + "/generation/" + generation["id"])
         assert generated["status"] == "completed", generated
-        archive = http.get(root + "/generation/" + generation["id"] + "/download")
-        assert archive.status_code == 200
-        assert archive.headers["content-type"] == "application/zip"
-        assert len(http.get(root + "/versions").json()) == 4
+        assert http.get(root + "/generation/" + generation["id"] + "/download").status_code == 200
+        assert len(http.get(root + "/versions").json()) == 3
         assert http.get(root + "/imports/" + imported["id"]).json()["status"] == "completed"
         restored = post(
             http,
-            root + "/versions/" + confirmed["id"] + "/restore",
-            {"expected_version_id": confirmed["id"], "signature": "Тестовый пользователь"},
+            root + "/versions/" + version["id"] + "/restore",
+            {"expected_version_id": version["id"], "signature": "Тест"},
             201,
         )
-        assert restored["snapshot"]["review"] is None
-        assert http.get(root + "/versions/" + confirmed["id"] + "/review").json()["confirmed"]
+        assert restored["snapshot"]["review"]["decisions"]
+        restored_details = http.get(root + "/versions/" + restored["id"] + "/review").json()
+        assert restored_details["lifecycle"]["check_job_id"]
 
 
-def test_unresolved_graph_build_keeps_selected_decisions_and_reports_blocker():
+def test_unresolved_source_relation_keeps_graph_and_selected_decision():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, _, job = prepare(http, "РПД/unresolved.docx")
-        assert job["status"] == "completed", job
-
         version, _ = choose(http, root, job)
-
-        assert version["snapshot"]["entities"] == []
-        assert version["snapshot"]["review"]["graph_ready"] is False
+        assert version["snapshot"]["entities"]
+        assert version["snapshot"]["review"]["graph_ready"]
         assert len(version["snapshot"]["review"]["decisions"]) == 1
+        assert version["snapshot"]["metadata"]["unresolved_relations"]
+        checked = run_check(http, root, job, version["id"])
+        assert checked["status"] == "completed", checked
         details = http.get(root + "/versions/" + version["id"] + "/review").json()
-        assert "graph_ready" not in details["prepare_report"]
-        assert "graph_build_issues" not in details["prepare_report"]
-        build_issue = next(
-            issue for issue in details["issues"] if issue["rule_code"] == "BACKEND_GRAPH_BUILD"
+        observation = next(
+            i for i in details["issues"] if i["rule_code"] == "SOURCE_RELATION_UNRESOLVED"
         )
-        assert build_issue["severity"] == "blocking"
-        assert build_issue["source_document_ids"]
-        response = http.post(
-            root + "/reviews/" + job["id"] + "/confirm",
-            json={
-                "expected_version_id": version["id"],
-                "check_job_id": str(uuid4()),
-                "signature": "Тестовый пользователь",
-            },
-            headers={"Idempotency-Key": uuid4().hex},
-        )
-        assert response.status_code == 409
+        assert observation["severity"] == "warning"
+        assert observation["source_document_ids"]
 
 
-def test_unresolved_graph_without_user_choices_can_be_reanalyzed():
+def test_repeated_analysis_does_not_replace_saved_source_graph():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, imported, job = prepare(http, "noconflict-unresolved.docx")
-        assert job["status"] == "completed", job
-        version = http.get(root + "/versions/" + job["output_version_id"]).json()
-        assert version["snapshot"]["review"]["graph_ready"] is False
-        assert version["snapshot"]["review"]["graph_ready"] is False
-
-        retried = post(
+        source = http.get(root + "/versions/" + job["output_version_id"]).json()
+        assert source["snapshot"]["review"]["graph_ready"]
+        repeated = post(
             http,
             root + "/reviews",
             {
                 "import_job_id": imported["id"],
-                "expected_version_id": job["output_version_id"],
+                "expected_version_id": source["id"],
+                "rerun_same_import": True,
             },
             202,
         )
-        assert retried["status"] in {"pending", "processing"}
+        assert repeated["id"] == job["id"]
+        assert http.get(root + "/versions/" + source["id"]).json() == source
 
 
 @pytest.mark.parametrize("filename", ["warning.docx", "blocking.docx", "skipped.docx"])
-def test_confirmation_gates_warning_blocking_and_skipped_rules(filename):
+def test_export_allows_normative_warnings_but_requires_final_coverage(filename):
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, _, job = prepare(http, filename)
         version, _ = choose(http, root, job)
         checked = run_check(http, root, job, version["id"])
-        body = {
-            "expected_version_id": version["id"],
-            "check_job_id": checked["id"],
-            "signature": "Тестовый пользователь",
-        }
-        path = root + "/reviews/" + job["id"] + "/confirm"
-        post(http, path, body, 409)
-        if not filename.startswith("skipped"):
+        details = http.get(root + "/versions/" + version["id"] + "/review").json()
+        assert details["confirmation"] is None
+        if filename.startswith("skipped"):
+            assert not details["lifecycle"]["can_generate"]
+            post(http, root + "/generation", {"version_id": version["id"]}, 409)
+        else:
             assert checked["report"]["coverage"][0]["status"] == "failed"
             assert checked["report"]["issues"][0]["severity"] == "warning"
-            body["accepted_warning_ids"] = [checked["report"]["issues"][0]["id"]]
-            confirmed = post(http, path, body, 201)
-            assert confirmed["snapshot"]["review"]["confirmation"]["accepted_warning_ids"]
+            assert details["lifecycle"]["can_generate"]
+            post(http, root + "/generation", {"version_id": version["id"]}, 202)
 
 
 def test_stale_check_and_concurrent_choices_do_not_overwrite_history():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, _, job = prepare(http)
         details = http.get(root + "/versions/" + job["output_version_id"] + "/review").json()
-        issue = details["issues"][0]
+        issue = next(item for item in details["issues"] if item["requires_decision"])
         path = root + "/reviews/" + job["id"]
         requests = [
             {
@@ -298,15 +272,11 @@ def test_stale_check_and_concurrent_choices_do_not_overwrite_history():
             },
             201,
         )
-        post(
-            http,
-            path + "/confirm",
-            {
-                "expected_version_id": changed["id"],
-                "check_job_id": checked["id"],
-                "signature": "Тестовый пользователь",
-            },
-            409,
+        assert (
+            http.get(root + "/versions/" + changed["id"] + "/review").json()["lifecycle"][
+                "check_job_id"
+            ]
+            != checked["id"]
         )
         assert (
             changed["snapshot"]["entities"][0]["attributes"]["hours_total"]
@@ -322,7 +292,7 @@ def test_analysis_empty_many_invalid_and_retry_results(filename):
         root, _, job = prepare(http, filename)
         if filename.startswith("malformed"):
             assert job["status"] == "failed"
-            assert len(http.get(root + "/versions").json()) == 1
+            assert len(http.get(root + "/versions").json()) == 2
             return
         assert job["status"] == "completed", job
         details = http.get(
@@ -332,19 +302,11 @@ def test_analysis_empty_many_invalid_and_retry_results(filename):
             0 if filename.startswith("noconflict") else (19 if filename.startswith("many") else 1)
         )
         assert details["conflicts_count"] == expected
-        assert len(details["issues"]) == min(2, expected)
+        assert len(details["issues"]) == min(2, details["issues_count"])
+        assert sum(item["requires_decision"] for item in details["issues"]) <= expected
         if expected == 0:
             checked = run_check(http, root, job, job["output_version_id"])
-            post(
-                http,
-                root + "/reviews/" + job["id"] + "/confirm",
-                {
-                    "expected_version_id": job["output_version_id"],
-                    "check_job_id": checked["id"],
-                    "signature": "Тестовый пользователь",
-                },
-                201,
-            )
+            assert checked["status"] == "completed"
 
 
 def test_unresolved_conflict_foreign_ids_and_shared_operation_keys_are_rejected():
@@ -355,20 +317,10 @@ def test_unresolved_conflict_foreign_ids_and_shared_operation_keys_are_rejected(
             http,
             path + "/checks",
             {"version_id": job["output_version_id"]},
-            409,
-        )
-        post(
-            http,
-            path + "/confirm",
-            {
-                "expected_version_id": job["output_version_id"],
-                "check_job_id": str(uuid4()),
-                "signature": "Тестовый пользователь",
-            },
-            409,
+            202,
         )
         details = http.get(root + "/versions/" + job["output_version_id"] + "/review").json()
-        issue = details["issues"][0]
+        issue = next(item for item in details["issues"] if item["requires_decision"])
         post(
             http,
             path + "/decisions",
@@ -416,61 +368,62 @@ def test_unresolved_conflict_foreign_ids_and_shared_operation_keys_are_rejected(
         )
 
 
-def test_pregraph_review_has_no_graph_and_blocks_check_confirmation_chat_and_generation():
+def test_source_graph_is_available_before_choices_and_confirmation_endpoint_is_absent():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, _, job = prepare(http)
-        version = http.get(root + "/versions/" + job["output_version_id"]).json()
-        snapshot = version["snapshot"]
-        assert snapshot["review"]["graph_ready"] is False
-        assert snapshot["entities"] == []
-        assert snapshot["relations"] == []
-        assert snapshot["source_refs"] == []
-        assert post(
-            http,
-            root + "/reviews/" + job["id"] + "/checks",
-            {"version_id": job["output_version_id"]},
-            409,
-        )
-        assert post(
-            http,
-            root + "/chat/sessions",
-            {"version_id": job["output_version_id"]},
-            409,
-        )
-        assert post(
-            http,
-            root + "/generation",
-            {"version_id": job["output_version_id"]},
-            409,
-        )
+        identity = job["output_version_id"]
+        version = http.get(root + "/versions/" + identity).json()
+        assert version["snapshot"]["review"]["graph_ready"]
+        assert version["snapshot"]["entities"] and version["snapshot"]["source_refs"]
+        assert version["snapshot"]["review"]["decisions"] == []
+        checked = run_check(http, root, job, identity)
+        assert checked["status"] == "completed"
+        post(http, root + "/chat/sessions", {"version_id": identity}, 201)
+        post(http, root + "/generation", {"version_id": identity}, 202)
+        post(http, root + "/reviews/" + job["id"] + "/confirm", {}, 404)
 
 
-def test_concurrent_confirmation_creates_exactly_one_new_version():
+def test_concurrent_checkpoints_create_one_graph_build():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, _, job = prepare(http)
-        version, _ = choose(http, root, job)
-        checked = run_check(http, root, job, version["id"])
-        body = {
-            "expected_version_id": version["id"],
-            "check_job_id": checked["id"],
-            "signature": "Тестовый пользователь",
-        }
-        path = root + "/reviews/" + job["id"] + "/confirm"
+        details = http.get(root + "/versions/" + job["output_version_id"] + "/review").json()
+        issue = next(i for i in details["issues"] if i["requires_decision"])
+        pending = post(
+            http,
+            root + "/reviews/" + job["id"] + "/decisions/draft",
+            {
+                "expected_version_id": job["output_version_id"],
+                "conflict_id": issue["id"],
+                "variant_id": issue["variants"][0]["id"],
+                "signature": "Тест",
+            },
+            201,
+        )
+        path = root + "/reviews/" + job["id"] + "/graph-build"
         with ThreadPoolExecutor(max_workers=2) as executor:
             responses = list(
                 executor.map(
-                    lambda _: http.post(path, json=body, headers={"Idempotency-Key": uuid4().hex}),
-                    range(2),
+                    lambda _: http.post(path, json={"version_id": pending["id"]}), range(2)
                 )
             )
-        assert sorted(response.status_code for response in responses) == [201, 409]
+        assert all(response.status_code == 202 for response in responses)
+        assert responses[0].json() == responses[1].json()
+        assert wait(http, path)["status"] == "completed"
         assert len(http.get(root + "/versions").json()) == 4
 
 
 def test_analysis_cannot_overwrite_a_version_saved_while_ml_was_running():
     with httpx.Client(base_url="http://frontend", timeout=30, trust_env=False) as http:
         root, _, job = prepare(http, "slow.docx", wait_analysis=False)
-        current = http.get(root).json()["current_version_id"]
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            state = http.get(root + "/reviews/" + job["id"]).json()
+            if state["output_version_id"]:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("Исходный граф не появился до завершения анализа")
+        current = state["output_version_id"]
         manual = post(
             http,
             root + "/versions",
@@ -482,8 +435,8 @@ def test_analysis_cannot_overwrite_a_version_saved_while_ml_was_running():
             201,
         )
         final = wait(http, root + "/reviews/" + job["id"])
-        assert final["status"] == "conflict", final
-        assert final["output_version_id"] is None
+        assert final["status"] == "completed", final
+        assert final["output_version_id"] != manual["id"]
         assert http.get(root).json()["current_version_id"] == manual["id"]
 
 

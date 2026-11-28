@@ -154,6 +154,7 @@ def generate_program_package(
     notes: list[str] | None = None,
     *,
     applied: list[str] | None = None,
+    unresolved_pairs=(),
 ) -> bytes:
     """Generate patched source DOCX files and a derived matrix in one ZIP.
 
@@ -168,6 +169,9 @@ def generate_program_package(
 
     generated = _render_docx_documents(documents, notes, applied)
     generated.append(
-        GeneratedXlsx(file_name=matrix_file_name, content=build_matrix_xlsx(graph))
+        GeneratedXlsx(
+            file_name=matrix_file_name,
+            content=build_matrix_xlsx(graph, unresolved_pairs=unresolved_pairs),
+        )
     )
     return build_program_package(generated, manual_notes=notes or ())

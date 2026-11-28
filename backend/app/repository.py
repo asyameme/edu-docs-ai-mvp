@@ -199,10 +199,13 @@ class Repository:
                     raise DomainError(409, "Нельзя восстановить версию до сборки её графа")
                 from app.review_storage import insert_version
 
-                restored = {**restored, "schema_version": 2, "review": None}
+                has_review = bool(restored.get("review"))
+                restored = {**restored, "schema_version": 2, "review": (
+                    {**restored["review"], "confirmation": None} if has_review else None
+                )}
                 version_id = uuid4()
                 snapshot = SnapshotV2.model_validate(restored)
-                return insert_version(
+                version = insert_version(
                     cursor,
                     program_id,
                     current,
@@ -215,6 +218,17 @@ class Repository:
                     actor_type="user" if signature else "system",
                     actor_id=signature or "backend",
                 )
+                if has_review:
+                    from app.review_contract import CheckCreate
+                    from app.review_repository import ReviewRepository
+
+                    ReviewRepository(self.pool).create(
+                        program_id, "automatic-check:" + str(version_id),
+                        CheckCreate(version_id=version_id), purpose="check",
+                        review_id=snapshot.review.review_id, connection=connection,
+                        snapshot_override=snapshot,
+                    )
+                return version
             from app.review_storage import insert_version
 
             return insert_version(

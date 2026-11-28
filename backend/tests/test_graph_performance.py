@@ -325,3 +325,11 @@ def test_performance_migration_roundtrip_preserves_existing_states():
             conn.rollback()
     finally:
         engine.dispose()
+
+
+def test_graph_validation_uses_bounded_set_join_plan(graph_connection):
+    config = graph_connection.execute(
+        "SELECT proconfig FROM pg_proc WHERE oid='graph_validate_contents(uuid)'::regprocedure"
+    ).fetchone()["proconfig"]
+    assert "jit=off" in (config or [])
+    assert "enable_nestloop=off" in (config or [])
