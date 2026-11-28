@@ -161,6 +161,8 @@ class ReviewIssue(Contract):
     requires_decision: bool = False
     variants: list[Variant] = Field(default_factory=list)
     rpd_alignment: RpdAlignmentSummary | None = None
+    # Развернутое пояснение для человека: что означают числа и что проверять.
+    explanation: str | None = None
 
     @model_validator(mode="after")
     def variants_are_distinct(self) -> Self:
@@ -187,11 +189,21 @@ class Ruleset(Contract):
         return self
 
 
+class CompetencyCoverageSummary(Contract):
+    """Краткое резюме модели по одной компетенции для карточки R-09."""
+
+    competency_code: str = Field(min_length=1)
+    status: Literal["supported", "gap", "uncertain"]
+    reason: str | None = None
+
+
 class RuleCoverage(Contract):
     rule_code: str = Field(min_length=1)
     rule_revision: str = Field(min_length=1)
     status: Literal["passed", "failed", "needs_review", "skipped", "not_applicable"]
     reason: str | None = None
+    # Заполняется только R-09: резюме по каждой компетенции.
+    competencies: list[CompetencyCoverageSummary] | None = None
 
 
 class CheckResult(Contract):

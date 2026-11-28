@@ -2056,10 +2056,26 @@ function App() {
                                   </p>
                                 ) : running ? (
                                   <p className="optional-rule-check-status" role="status">
-                                    {check?.status === "pending" ? "Задание поставлено в очередь."
-                                      : "Проверяем документы. Это может занять несколько минут."}
+                                    Задание поставлено в очередь.
                                   </p>
                                 ) : null}
+                                {code === "R-09" && coverage?.competencies && coverage.competencies.length > 0 && (
+                                  <details className="r09-competency-summary">
+                                    <summary>Резюме по компетенциям · {coverage.competencies.length}</summary>
+                                    <ul className="r09-competency-list">
+                                      {coverage.competencies.map((item) => (
+                                        <li className="r09-competency-row" key={item.competency_code}>
+                                          <strong>{item.competency_code}</strong>
+                                          <span className={`r09-verdict r09-verdict--${item.status}`}>
+                                            {item.status === "supported" ? "Подтверждена"
+                                              : item.status === "gap" ? "Пробел" : "Требует проверки"}
+                                          </span>
+                                          <small>{item.reason}</small>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                )}
                                 {code === "R-11" && diagnostics.length > 0 && (
                                   <ul className="r11-explanations" aria-label="Пояснения модели к результатам проверки">
                                     {issues.map((issue: ReviewIssue) => {
@@ -2179,7 +2195,6 @@ function App() {
                         const compareFormulations = !finding.sharedIndicatorText
                           && (ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1;
                         const isCustom = selectedChoiceId === "__custom__";
-                        const isReject = selectedChoiceId === "__reject__";
                         const isUnsaved = Boolean(selectedChoiceId && !isResolved);
                         const isSavingChoice = processing.reviewBusy && savingFindingId === finding.id;
 
@@ -2258,19 +2273,6 @@ function App() {
                                       />
                                       <span className="choice-content"><span className="choice-value">Ввести свой вариант</span></span>
                                     </label>
-                                    {finding.ruleCode === "R-01" && (
-                                      <label className={`choice-card${isReject ? " is-selected" : ""}`}>
-                                        <input
-                                          type="radio"
-                                          name={`choice-${finding.id}`}
-                                          value="__reject__"
-                                          checked={isReject}
-                                          disabled={processing.reviewBusy}
-                                          onChange={() => chooseFindingChoice(finding.id, "__reject__")}
-                                        />
-                                        <span className="choice-content"><span className="choice-value">Отклонить сопоставление</span></span>
-                                      </label>
-                                    )}
                                   </>
                                 )}
                               </fieldset>
@@ -2303,7 +2305,7 @@ function App() {
                                 <button
                                   className="secondary-button"
                                   type="button"
-                                  disabled={!isUnsaved || isReject || (isCustom && !customText.trim()) || processing.reviewBusy}
+                                  disabled={!isUnsaved || (isCustom && !customText.trim()) || processing.reviewBusy}
                                   onClick={() => saveFindingChoice(finding.id, selectedChoiceId)}
                                 >
                                   {isSavingChoice ? "Сохраняем…" : "Применить выбранный вариант"}
@@ -2315,11 +2317,9 @@ function App() {
                                 )}
                               </div>
                             )}
-                            {finding.ruleCode === "R-01" && (isCustom || isReject) && (
+                            {finding.ruleCode === "R-01" && isCustom && (
                               <p className="competency-api-note" role="status">
-                                {isReject
-                                  ? "Отклонение сопоставления не меняет списки компетенций и не сохраняется как принятое решение."
-                                  : "Введите один код: он заменит единственный отличающийся код в обоих списках. При нескольких различиях выберите готовый вариант."}
+                                Введите один код: он заменит единственный отличающийся код в обоих списках. При нескольких различиях выберите готовый вариант.
                               </p>
                             )}
                             </div>
