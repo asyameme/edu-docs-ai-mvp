@@ -114,9 +114,11 @@ def test_delivery_retries_same_workflow_after_timeout_and_stops(monkeypatch, kin
         raise AssertionError("Повтор доставки не должен завершать задание ошибкой")
 
     repo = SimpleNamespace(
+        cancellations_pending=lambda: [],
         pending=lambda *args: [record] if not stop_event.is_set() else [],
         graph_build_pending=lambda: [record] if not stop_event.is_set() else [],
         turn_input=lambda _: {
+            "status": "pending",
             "session_id": uuid4(),
             "program_id": uuid4(),
             "version_id": uuid4(),

@@ -7,8 +7,9 @@ from datetime import timedelta
 from pydantic_ai import ConversationTypeAdapter
 from temporalio import activity
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
+from app.chat_cancellation import cancel_chat
 from app.chat_workflow import (
     MAX_CHAT_HISTORY_TURNS,
     ChatWorkflow,
@@ -20,6 +21,10 @@ from app.temporal_rpc import DELIVERY_TIMEOUT_SECONDS, temporal_rpc
 async def dispatch_chats(client, repo, queue, stop):
     while not stop.is_set():
         try:
+            for turn in await asyncio.to_thread(repo.cancellations_pending):
+                if stop.is_set():
+                    return
+                await cancel_chat(client, repo, turn)
             after = None
             while True:
                 batch = await asyncio.to_thread(repo.pending, after)
@@ -30,6 +35,8 @@ async def dispatch_chats(client, repo, queue, stop):
                         return
                     after = (created_at, turn_id)
                     payload = await asyncio.to_thread(repo.turn_input, turn_id)
+                    if payload["status"] != "pending":
+                        continue
                     turns = await asyncio.to_thread(
                         repo.prior_turns, payload, MAX_CHAT_HISTORY_TURNS
                     )
@@ -75,7 +82,9 @@ class ChatActivities:
 
     @activity.defn(name="chat_mark_running_v1")
     async def mark_running(self, turn_id: str) -> None:
-        return None
+        state = await asyncio.to_thread(self.repo.turn_status, turn_id)
+        if state["status"] != "pending":
+            raise ApplicationError("Запрос уже остановлен", non_retryable=True)
 
     @activity.defn(name="chat_mark_failed_v1")
     async def mark_failed(self, turn_id: str) -> None:

@@ -58,7 +58,8 @@ class ChatWriteRepository:
                 ) != "change_proposal":
                     raise DomainError(409, "Нет завершённого предложения для принятия")
                 if cur.execute(
-                    "SELECT 1 FROM chat_turns WHERE session_id=%s AND status='pending'",
+                "SELECT 1 FROM chat_turns WHERE session_id=%s "
+                "AND status IN ('pending','cancelling')",
                     (session_id,),
                 ).fetchone():
                     raise DomainError(409, "Дождитесь завершения текущего сообщения")

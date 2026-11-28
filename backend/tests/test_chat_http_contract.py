@@ -187,6 +187,8 @@ def test_history_has_typed_result_and_hides_internal_conversation(monkeypatch, r
     assert "$ref" in history_schema
     assert set(schema["components"]["schemas"]["TurnRead"]["properties"]["status"]["enum"]) == {
         "pending",
+        "cancelling",
+        "cancelled",
         "completed",
         "failed",
     }

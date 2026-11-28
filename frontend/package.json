@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview",
-    "test:level-variants": "node --experimental-strip-types --test tests/level-variants.test.mjs"
+    "test:level-variants": "node --experimental-strip-types --test tests/level-variants.test.mjs",
+    "test:chat": "node --experimental-strip-types --test tests/chat-run.test.mjs"
   },
   "dependencies": {
     "react": "^19.3.0",

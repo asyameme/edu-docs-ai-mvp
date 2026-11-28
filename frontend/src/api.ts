@@ -261,10 +261,13 @@ export type ChatOutput =
     unresolved_questions: string[];
   };
 
-export type ChatTurnHistoryRead = {
+export type ChatTurnRead = {
   id: string;
   run_id: string;
-  status: "pending" | "completed" | "failed";
+  status: "pending" | "cancelling" | "cancelled" | "completed" | "failed";
+};
+
+export type ChatTurnHistoryRead = ChatTurnRead & {
   user_text: string;
   result: ChatOutput | null;
   created_at: string;
