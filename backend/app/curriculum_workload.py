@@ -1,12 +1,19 @@
-"""Связь графа нагрузки учебного плана с исходными ячейками DOCX."""
+"""Связь нагрузки в графе с исходными ячейками DOCX."""
 
 import json
+from collections import defaultdict
+from io import BytesIO
 from uuid import UUID, uuid5
+from zipfile import BadZipFile
+
+from docx import Document
 
 from app.domain import SourceLink, SourceRefV2
 
-HOURS_COMPONENT_PREFIX = "/attributes/hours_by_kind/"
+HOURS_BY_KIND_PATH = "/attributes/hours_by_kind"
+HOURS_COMPONENT_PREFIX = HOURS_BY_KIND_PATH + "/"
 HOURS_TOTAL_PATH = "/attributes/hours_total"
+WORKLOAD_ENTITY_KINDS = {"curriculum_item", "discipline"}
 
 
 def workload_evidence(program_id, entity_id, document_id, cells, *, source=None):
@@ -29,7 +36,11 @@ def workload_evidence(program_id, entity_id, document_id, cells, *, source=None)
             target_id=entity_id,
             field_path=path,
             source_ref_id=ref.id,
-            observed_value={"value": cell["hours"], "unit": None, "cell_text": cell["text"]},
+            observed_value={
+                "value": cell["hours"], "unit": None, "cell_text": cell["text"],
+                **({"semester_hours": cell["semester_hours"]} if "semester_hours" in cell else {}),
+                **({"workload_mirror": True} if cell.get("workload_mirror") else {}),
+            },
         )
 
 
@@ -100,4 +111,140 @@ def with_legacy_curriculum_workload(snapshot, program_id, entity_ids, read_docum
         "entities": [members.get(item.id, item) for item in snapshot.entities],
         "source_refs": list(refs.values()),
         "source_links": links,
+    })
+
+
+def _rpd_workload_rows(source):
+    from worker.parser.discipline import extract_workload, organization_variant_rows
+
+    document = Document(BytesIO(source["content"]))
+    name = source["original_name"]
+    values, _ = extract_workload(document, name)
+    profiles, _ = organization_variant_rows(document, name)
+    rows = defaultdict(list)
+    for item in values:
+        ref = item["source_ref"]
+        if item["kind"] in {"hours", "hours_total"}:
+            rows[(ref.table, ref.row)].append(item)
+    return rows, profiles
+
+
+def _rpd_cells(items, period):
+    from worker.parser.common import normalize
+    from worker.parser.discipline import workload_hour_label
+
+    cells = {}
+    for item in items:
+        if item["kind"] != "hours" or {normalize(p) for p in item["periods"]} != {period}:
+            return {}
+        label = workload_hour_label(item)
+        value = item["value"]
+        if label is None or label in cells or value is None or value < 0 or value % 1:
+            return {}
+        cells[label] = {
+            "hours": int(value),
+            "text": item["raw"],
+            "source_ref": item["source_ref"].model_dump(mode="json"),
+        }
+    return cells
+
+
+def _discipline_workload_rows(entity, ref, rows, profiles):
+    """Вернуть ячейки односеместрового профиля и соответствующей строки «Итого»."""
+    locator = json.loads(ref.locator)
+    position = (locator.get("table"), locator.get("row"))
+    period = f"семестр {entity.attributes['semesters'][0]}"
+    primary = semester_row = _rpd_cells(rows.get(position, []), period)
+    if not primary:
+        for total in ("итого", "всего"):
+            primary = _rpd_cells(rows.get(position, []), total)
+            if primary:
+                break
+    observed = {name: cell["hours"] for name, cell in primary.items()}
+    if not primary or observed != entity.attributes.get("hours_by_kind"):
+        return None
+    if sum(observed.values()) != entity.attributes.get("hours_total"):
+        return None
+    if semester_row:
+        return primary, {}
+
+    candidates = [
+        _rpd_cells(items, period)
+        for other, items in rows.items()
+        if other != position and other[0] == position[0]
+        and profiles.get(other) == profiles.get(position)
+    ]
+    candidates = [cells for cells in candidates if cells]
+    if len(candidates) != 1 or candidates[0].keys() != primary.keys():
+        return None
+    semester = candidates[0]
+    for name, cell in primary.items():
+        cell["semester_hours"] = semester[name]["hours"]
+        semester[name]["workload_mirror"] = True
+    return primary, semester
+
+
+def with_editable_workload(snapshot, program_id, entity_ids, read_document):
+    snapshot = with_legacy_curriculum_workload(snapshot, program_id, entity_ids, read_document)
+    prepared = {
+        link.target_id for link in snapshot.source_links
+        if link.field_path.startswith(HOURS_COMPONENT_PREFIX)
+    }
+    disciplines = {
+        item.id: item for item in snapshot.entities
+        if item.id in entity_ids and item.id not in prepared and item.kind == "discipline"
+        and len(item.attributes.get("semesters") or []) == 1
+        and type(item.attributes.get("hours_total")) is int
+    }
+    if not disciplines:
+        return snapshot
+
+    refs = {ref.id: ref for ref in snapshot.source_refs}
+    parsed = {}
+    members = {}
+    cell_links = []
+    calculated_links = set()
+    for link in snapshot.source_links:
+        entity = disciplines.get(link.target_id)
+        if link.target_kind != "entity" or entity is None or link.field_path != HOURS_TOTAL_PATH:
+            continue
+        ref = refs[link.source_ref_id]
+        if ref.document_id not in parsed:
+            source = read_document(program_id, ref.document_id)
+            try:
+                parsed[ref.document_id] = _rpd_workload_rows(source)
+            except BadZipFile:
+                parsed[ref.document_id] = None
+        source_rows = parsed[ref.document_id]
+        if source_rows is None:
+            continue
+        cell_rows = _discipline_workload_rows(entity, ref, *source_rows)
+        if cell_rows is None:
+            continue
+        source_ref_ids = list(entity.source_ref_ids)
+        for cells in cell_rows:
+            for cell_ref, evidence in workload_evidence(
+                UUID(str(program_id)), entity.id, ref.document_id, cells, source=ref,
+            ):
+                refs.setdefault(cell_ref.id, cell_ref)
+                source_ref_ids.append(cell_ref.id)
+                cell_links.append(evidence)
+        members[entity.id] = entity.model_copy(update={
+            "source_ref_ids": list(dict.fromkeys(source_ref_ids)),
+        })
+        calculated_links.add((entity.id, ref.id))
+    if not members:
+        return snapshot
+    links = [
+        link.model_copy(update={"observed_value": {**link.observed_value, "calculated": True}})
+        if (link.target_id, link.source_ref_id) in calculated_links
+        and link.target_kind == "entity"
+        and link.field_path in {HOURS_TOTAL_PATH, HOURS_BY_KIND_PATH}
+        else link
+        for link in snapshot.source_links
+    ]
+    return snapshot.model_copy(update={
+        "entities": [members.get(item.id, item) for item in snapshot.entities],
+        "source_refs": list(refs.values()),
+        "source_links": links + cell_links,
     })

@@ -115,6 +115,18 @@ class ChatStatusData(BaseModel):
     status: Literal["pending", "processing", "cancelling"]
 
 
+class ChatProgressData(BaseModel):
+    run_id: UUID
+    message: str = Field(min_length=1, max_length=500)
+    steps: list[str] = Field(default_factory=list, max_length=8)
+
+
+class ChatProgressEvent(BaseModel):
+    id: UUID
+    event: Literal["progress"]
+    data: ChatProgressData
+
+
 class ChatFailureData(BaseModel):
     run_id: UUID
     message: str = "Не удалось выполнить запрос. Попробуйте отправить его ещё раз."
@@ -164,8 +176,8 @@ class ChatCancelledEvent(BaseModel):
 
 
 ChatEvent = Annotated[
-    ChatStatusEvent | ChatCompletedEvent | ChatFailedEvent
-    | ChatUnavailableEvent | ChatCancelledEvent,
+    ChatStatusEvent | ChatProgressEvent | ChatCompletedEvent
+    | ChatFailedEvent | ChatUnavailableEvent | ChatCancelledEvent,
     Field(discriminator="event"),
 ]
 
@@ -315,6 +327,7 @@ async def run_events(
     temporal_not_found_retries = 0
 
     async def events():
+        last_progress = None
         nonlocal temporal_not_found_retries
         while not await request.is_disconnected():
             state = await asyncio.to_thread(repository.session, program_id, session_id)
@@ -362,6 +375,20 @@ async def run_events(
             temporal_not_found_retries = 0
             if description.status == WorkflowExecutionStatus.RUNNING:
                 status = "processing"
+                try:
+                    progress = await temporal_rpc(
+                        request.app.state.resources.temporal.get_workflow_handle(
+                            f"chat-{run_id}"
+                        ).query("chat_progress_v1", rpc_timeout=timedelta(seconds=2)),
+                    )
+                    data = ChatProgressData(run_id=run_id, **progress)
+                    if data != last_progress:
+                        yield ServerSentEvent(id=str(run_id), event="progress", data=data)
+                        last_progress = data
+                except Exception:
+                    # Старые workflow могут не поддерживать запрос прогресса.
+                    # Недоступность подсказки не прерывает получение итогового ответа.
+                    pass
             elif description.status in {
                 WorkflowExecutionStatus.COMPLETED,
                 WorkflowExecutionStatus.FAILED,

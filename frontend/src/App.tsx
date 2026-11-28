@@ -6,6 +6,7 @@ import { groupDiagnostics, reviewDiagnostic, ruleDisplayLabel, updateAcceptedWar
 import { useImportJob } from "./useImportJob";
 import { api } from "./api";
 import { waitForChatRun } from "./chat-run";
+import { variantDocumentIds } from "./variantDocuments";
 import type {
   ChatOutput,
   ChatProposedChange,
@@ -121,6 +122,7 @@ type ChatMessage = {
   id: string;
   role: "agent" | "user";
   text: string;
+  pending?: boolean;
   result?: {
     kind: "coverage";
     title: string;
@@ -493,8 +495,21 @@ function findingCategoryLabel(ruleCode?: string) {
   }
 }
 
-function findingDocuments(finding: ReconciliationFinding) {
-  return [...new Set(finding.choices.flatMap((choice) => choice.documents))];
+const LEVEL_NOTE = /[([{]\s*(?:базовый|средний|продвинутый|пороговый|повышенный)\s*[)\]}]/i;
+
+// Рекомендуемый вариант: с пометкой уровня, иначе в большем числе документов,
+// иначе самый полный по тексту. Пользователь остаётся один на один с выбором —
+// подсветка только экономит чтение.
+function recommendedChoiceId(finding: ReconciliationFinding): string | null {
+  if (finding.choices.length === 0) return null;
+  const withLevel = finding.choices.find((choice) => LEVEL_NOTE.test(choice.value));
+  if (withLevel) return withLevel.id;
+  const maxDocuments = Math.max(...finding.choices.map((choice) => choice.documentCount));
+  if (maxDocuments > 0) {
+    const mostDocuments = finding.choices.filter((choice) => choice.documentCount === maxDocuments);
+    if (mostDocuments.length === 1) return mostDocuments[0].id;
+  }
+  return [...finding.choices].sort((left, right) => right.value.length - left.value.length)[0]?.id ?? null;
 }
 
 function issueRuleGroup(ruleId?: string) {
@@ -558,14 +573,46 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
           changeSourceIds.length ? changeSourceIds : issue.source_ref_ids,
           changeDocumentIds.length ? changeDocumentIds : issue.source_document_ids ?? [],
         );
-        return { id: variant.id, value: shortChoiceLabel(variant.label), documents: source.documents, documentCount: source.documentCount };
+        const isTextVariant = issueRuleGroup(issue.rule_code) === "R-07"
+          || issueRuleGroup(issue.rule_code) === "R-08";
+        const documents = issue.type !== "indicator_shared_text" && variant.changes.some((change) => change.op === "set_document_value")
+          ? variantDocumentIds(variant, isTextVariant).map((id) => documentNames.get(id) ?? `Документ ${id}`)
+          : source.documents;
+        return { id: variant.id, value: shortChoiceLabel(variant.label), documents, documentCount: documents.length };
       });
       const choiceSummary = choices.map((choice) => choice.value).join(" · ");
       const decision = issue.decision;
       const knownVariant = decision && issue.variants.some((variant) => variant.id === decision.variant_id);
-      const customDecision = decision && !knownVariant
-        ? (decision.changes ?? []).map((change) => change.value).find((value) => typeof value === "string" && value.trim())
-        : undefined;
+      let customDecision: string | undefined;
+      if (decision && !knownVariant) {
+        customDecision = decision.custom_value;
+        if (!customDecision && findingRuleGroup(issue.rule_code) === "R-01") {
+          const sourceLists = new Map<string, { collection: string; expected: string[] }>();
+          for (const variant of issue.variants) {
+            for (const change of variant.changes) {
+              if (change.op !== "set_competency_links") continue;
+              const key = `${change.document_id}:${change.collection}:${change.record_index}`;
+              sourceLists.set(key, { collection: change.collection, expected: change.expected_codes });
+            }
+          }
+          const originalLists = Array.from(sourceLists.values());
+          const planCodes = originalLists.find((list) => list.collection === "curriculum_items")?.expected;
+          const documentCodes = originalLists.find((list) => list.collection === "disciplines")?.expected;
+          const selectedLists = decision.changes?.filter((change) => change.op === "set_competency_links") ?? [];
+          const selectedPlan = selectedLists.find((change) => change.collection === "curriculum_items")?.codes;
+          const selectedDocument = selectedLists.find((change) => change.collection === "disciplines")?.codes;
+          if (planCodes && documentCodes && selectedPlan && selectedDocument) {
+            const common = new Set(planCodes.filter((code) => documentCodes.includes(code)));
+            customDecision = selectedPlan.find((code) => selectedDocument.includes(code) && !common.has(code));
+          }
+        }
+        if (!customDecision) {
+          const value = (decision.changes ?? [])
+            .map((change) => change.op === "set_document_value" ? change.value : undefined)
+            .find((item) => typeof item === "string" && item.trim());
+          if (typeof value === "string") customDecision = value;
+        }
+      }
 
       return {
         id: issue.id,
@@ -573,7 +620,7 @@ function mapReviewToProgram(details: ReviewDetails, job: ImportJob | null): Pars
         sharedIndicatorText: issue.type === "indicator_shared_text",
         title: issue.message,
         description: choiceSummary || `Проверьте расхождение: ${ruleDisplayLabel(issue.rule_code).toLocaleLowerCase("ru")}.`,
-        selectedChoiceId: decision?.variant_id,
+        selectedChoiceId: decision ? (knownVariant ? decision.variant_id : "__custom__") : undefined,
         choices,
         customDecision: typeof customDecision === "string" ? customDecision : null,
       };
@@ -704,7 +751,12 @@ function ChatScreen({
                     {message.result?.kind === "coverage" && (
                       <strong className="message-result-title">{message.result.title}</strong>
                     )}
-                    {message.text && <p className="message-body">{message.text}</p>}
+                    {message.text && <p className={`message-body${message.pending ? " chat-progress" : ""}`}
+                      role={message.pending ? "status" : undefined}
+                      aria-live={message.pending ? "polite" : undefined}>
+                      {message.pending && <span className="chat-progress-spinner" aria-hidden="true" />}
+                      {message.text}
+                    </p>}
                     {message.questions && <ul className="chat-clarification-questions">
                       {message.questions.map((question) => <li key={question}>{question}</li>)}
                     </ul>}
@@ -1028,6 +1080,7 @@ function App() {
   const [appliedChoices, setAppliedChoices] = useState<Record<string, string>>(chatPreviewChoices);
   const [savingFindingId, setSavingFindingId] = useState<string | null>(null);
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
+  const [choiceErrors, setChoiceErrors] = useState<Record<string, string>>({});
   const [findingFilter, setFindingFilter] = useState<FindingFilter>("all");
   const [findingStatusFilter, setFindingStatusFilter] = useState<FindingStatusFilter>("all");
   const [rpdDocumentId, setRpdDocumentId] = useState("");
@@ -1066,13 +1119,21 @@ function App() {
   const unresolvedCount = parsedProgram?.findings.filter((finding) => {
     const appliedChoice = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
     const selectedChoice = selectedChoices[finding.id];
+    if (appliedChoice === "__custom__") {
+      const currentText = (customValues[finding.id] ?? finding.customDecision ?? "").trim();
+      return (selectedChoice !== undefined && selectedChoice !== appliedChoice)
+        || !finding.customDecision
+        || currentText !== finding.customDecision.trim();
+    }
     return !appliedChoice || (selectedChoice !== undefined && selectedChoice !== appliedChoice);
   }).length ?? 0;
   const visibleFindings = (parsedProgram?.findings ?? []).filter((finding) => {
     if (findingFilter !== "all" && findingRuleGroup(finding.ruleCode) !== findingFilter) return false;
     const savedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
     const draftChoiceId = selectedChoices[finding.id];
-    const saved = Boolean(savedChoiceId && (!draftChoiceId || draftChoiceId === savedChoiceId));
+    const customTextMatches = savedChoiceId !== "__custom__"
+      || (customValues[finding.id] ?? finding.customDecision ?? "").trim() === finding.customDecision?.trim();
+    const saved = Boolean(savedChoiceId && (!draftChoiceId || draftChoiceId === savedChoiceId) && customTextMatches);
     return findingStatusFilter === "all" || (findingStatusFilter === "saved" ? saved : !saved);
   });
   const visibleIssues = (parsedProgram?.issues ?? []).filter((issue) =>
@@ -1282,6 +1343,10 @@ function App() {
     let active = true;
     void waitForChatRun(run.programId, run.runId, controller.signal, () => {
       if (active) setChatStopping(true);
+    }, (progress) => {
+      if (!active || activeChatRunRef.current?.runId !== run.runId) return;
+      setChatMessages((current) => current.map((item) => item.id === run.messageId
+        ? { ...item, text: progress.message, pending: true } : item));
     }).then((end) => {
       if (!active || activeChatRunRef.current?.runId !== run.runId) return;
       let message: ChatMessage;
@@ -1425,22 +1490,33 @@ function App() {
   function chooseFindingChoice(findingId: string, choiceId: string) {
     // Выбор только меняет черновик. Отправка на сервер — отдельное действие.
     setSelectedChoices((current) => ({ ...current, [findingId]: choiceId }));
+    setChoiceErrors((current) => {
+      const next = { ...current };
+      delete next[findingId];
+      return next;
+    });
   }
 
-  function saveFindingChoice(findingId: string, choiceId: string) {
+  async function saveFindingChoice(findingId: string, choiceId: string) {
     if (!choiceId || choiceId === "__reject__") return;
     if (choiceId === "__custom__") {
       const finding = parsedProgram?.findings.find((item) => item.id === findingId);
-      const text = (customValues[findingId] ?? "").trim();
+      const text = (customValues[findingId] ?? finding?.customDecision ?? "").trim();
       const group = finding ? findingRuleGroup(finding.ruleCode) : "other";
-      if (!finding || !text || (group !== "R-07" && group !== "R-08")) return;
+      if (!finding || !text || !["R-01", "R-07", "R-08"].includes(group)) return;
       if (isDemoMode) {
         // Только локальное поведение демонстрационного экрана.
         setAppliedChoices((current) => ({ ...current, [findingId]: choiceId }));
         return;
       }
+      setChoiceErrors((current) => {
+        const next = { ...current };
+        delete next[findingId];
+        return next;
+      });
       setSavingFindingId(findingId);
-      void processing.decideCustom(findingId, text);
+      const error = await processing.decideCustom(findingId, text);
+      if (error) setChoiceErrors((current) => ({ ...current, [findingId]: error }));
       return;
     }
     if (isDemoMode) {
@@ -1476,7 +1552,7 @@ function App() {
     const connection = chatConnectionRef.current;
     const optimisticId = `message-${crypto.randomUUID()}`;
     const userMessage: ChatMessage = { id: `${optimisticId}-user`, role: "user", text };
-    const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…" };
+    const pendingMessage: ChatMessage = { id: `${optimisticId}-agent`, role: "agent", text: "Отправляем запрос агенту…", pending: true };
     setChatMessages((current) => [...current, userMessage, pendingMessage]);
     chatSendingRef.current = true;
     setChatSending(true);
@@ -1496,7 +1572,7 @@ function App() {
         versionId: chatSession.version_id, runId: turn.run_id, messageId: pendingMessage.id,
       });
       setChatMessages((current) => current.map((item) => item.id === pendingMessage.id
-        ? { ...item, text: "Обрабатываю запрос…" } : item));
+        ? { ...item, text: "Запрос принят. Ожидаю ответа агента…" } : item));
     } catch (error) {
       if (chatConnectionRef.current !== connection) return;
       const failedMessage: ChatMessage = {
@@ -2038,10 +2114,26 @@ function App() {
                                   </p>
                                 ) : running ? (
                                   <p className="optional-rule-check-status" role="status">
-                                    {check?.status === "pending" ? "Задание поставлено в очередь."
-                                      : "Проверяем документы. Это может занять несколько минут."}
+                                    Задание поставлено в очередь.
                                   </p>
                                 ) : null}
+                                {code === "R-09" && coverage?.competencies && coverage.competencies.length > 0 && (
+                                  <details className="r09-competency-summary">
+                                    <summary>Резюме по компетенциям · {coverage.competencies.length}</summary>
+                                    <ul className="r09-competency-list">
+                                      {coverage.competencies.map((item) => (
+                                        <li className="r09-competency-row" key={item.competency_code}>
+                                          <strong>{item.competency_code}</strong>
+                                          <span className={`r09-verdict r09-verdict--${item.status}`}>
+                                            {item.status === "supported" ? "Подтверждена"
+                                              : item.status === "gap" ? "Пробел" : "Требует проверки"}
+                                          </span>
+                                          <small>{item.reason}</small>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                )}
                                 {code === "R-11" && diagnostics.length > 0 && (
                                   <ul className="r11-explanations" aria-label="Пояснения модели к результатам проверки">
                                     {issues.map((issue: ReviewIssue) => {
@@ -2059,8 +2151,8 @@ function App() {
                                         <li key={issue.id}>
                                           <span className={`r11-verdict r11-verdict--${alignment?.classification ?? "unknown"}`}>{verdict}</span>
                                           <div>
-                                            <strong>{alignment?.outcome_id ?? issue.message.slice(0, 40)}</strong>
-                                            {alignment?.reason && <p>{alignment.reason}</p>}
+                                            <p><b>В РПД заявлено:</b> {alignment?.outcome_text || "Формулировка не приведена в отчёте."}</p>
+                                            <p><b>Пояснение проверки:</b> {alignment?.reason || issue.message}</p>
                                             {assessmentEvidence.length > 0 && (
                                               <div className="r11-context">
                                                 <span className="r11-context-label">Цепочка оценивания</span>
@@ -2087,12 +2179,6 @@ function App() {
                                                   ))}
                                                 </ul>
                                               </div>
-                                            )}
-                                            {alignment?.outcome_text && (
-                                              <details className="r11-outcome-text">
-                                                <summary>Текст результата обучения</summary>
-                                                <p>{alignment.outcome_text}</p>
-                                              </details>
                                             )}
                                           </div>
                                         </li>
@@ -2149,8 +2235,17 @@ function App() {
                       {visibleFindings.map((finding, index) => {
                         const appliedChoiceId = isDemoMode ? appliedChoices[finding.id] : finding.selectedChoiceId;
                         const appliedChoice = finding.choices.find((choice) => choice.id === appliedChoiceId);
-                        const selectedChoiceId = selectedChoices[finding.id] ?? appliedChoiceId ?? "";
-                        const isResolved = Boolean(appliedChoice && selectedChoiceId === appliedChoice.id);
+                        const selectedChoiceId =
+                          selectedChoices[finding.id] ?? appliedChoiceId ?? recommendedChoiceId(finding) ?? "";
+                        const customText = customValues[finding.id] ?? finding.customDecision ?? "";
+                        const savedCustomMatches = Boolean(
+                          !isDemoMode && appliedChoiceId === "__custom__" && finding.customDecision &&
+                          customText.trim() === finding.customDecision.trim(),
+                        );
+                        const isResolved = Boolean(
+                          (appliedChoice && selectedChoiceId === appliedChoice.id) ||
+                          (savedCustomMatches && selectedChoiceId === "__custom__"),
+                        );
                         const ruleGroup = findingRuleGroup(finding.ruleCode);
                         const isChoiceFinding = ruleGroup === "R-01" || ruleGroup === "R-07" || ruleGroup === "R-08";
                         const allowsCustomChoice = !finding.sharedIndicatorText
@@ -2158,10 +2253,8 @@ function App() {
                         const compareFormulations = !finding.sharedIndicatorText
                           && (ruleGroup === "R-07" || ruleGroup === "R-08") && finding.choices.length > 1;
                         const isCustom = selectedChoiceId === "__custom__";
-                        const isReject = selectedChoiceId === "__reject__";
                         const isUnsaved = Boolean(selectedChoiceId && !isResolved);
                         const isSavingChoice = processing.reviewBusy && savingFindingId === finding.id;
-                        const customText = customValues[finding.id] ?? "";
 
                         return (
                           <details className={`variant-accordion-item${isResolved ? " is-resolved" : ""}`} key={finding.id} name="validator-variant-findings">
@@ -2214,6 +2307,12 @@ function App() {
                                         </span>
                                       </span>
                                     </label>
+                                    <details className="choice-sources">
+                                      <summary>Показать документы · {choice.documents.length}</summary>
+                                      {choice.documents.length > 0
+                                        ? <ul>{choice.documents.map((document) => <li key={document}>{document}</li>)}</ul>
+                                        : <p>Документы с этим значением не найдены.</p>}
+                                    </details>
                                   </div>
                                 ))}
                                 {compareFormulations && (
@@ -2232,28 +2331,9 @@ function App() {
                                       />
                                       <span className="choice-content"><span className="choice-value">Ввести свой вариант</span></span>
                                     </label>
-                                    {finding.ruleCode === "R-01" && (
-                                      <label className={`choice-card${isReject ? " is-selected" : ""}`}>
-                                        <input
-                                          type="radio"
-                                          name={`choice-${finding.id}`}
-                                          value="__reject__"
-                                          checked={isReject}
-                                          disabled={isConfirmed || processing.reviewBusy}
-                                          onChange={() => chooseFindingChoice(finding.id, "__reject__")}
-                                        />
-                                        <span className="choice-content"><span className="choice-value">Отклонить сопоставление</span></span>
-                                      </label>
-                                    )}
                                   </>
                                 )}
                               </fieldset>
-                            )}
-                            {isChoiceFinding && findingDocuments(finding).length > 0 && (
-                              <details className="choice-sources">
-                                <summary>Показать документы</summary>
-                                <ul>{findingDocuments(finding).map((document) => <li key={document}>{document}</li>)}</ul>
-                              </details>
                             )}
                             {allowsCustomChoice && isCustom && (
                               <div className="competency-custom-editor">
@@ -2267,7 +2347,14 @@ function App() {
                                   maxLength={4000}
                                   disabled={isConfirmed || processing.reviewBusy}
                                   placeholder={finding.ruleCode === "R-01" ? "Введите код" : "Введите формулировку"}
-                                  onChange={(event) => setCustomValues((current) => ({ ...current, [finding.id]: event.target.value }))}
+                                  onChange={(event) => {
+                                    setCustomValues((current) => ({ ...current, [finding.id]: event.target.value }));
+                                    setChoiceErrors((current) => {
+                                      const next = { ...current };
+                                      delete next[finding.id];
+                                      return next;
+                                    });
+                                  }}
                                 />
                               </div>
                             )}
@@ -2276,10 +2363,10 @@ function App() {
                                 <button
                                   className="secondary-button"
                                   type="button"
-                                  disabled={!isUnsaved || isReject || (isCustom && !customText.trim()) || processing.reviewBusy}
+                                  disabled={!isUnsaved || (isCustom && !customText.trim()) || processing.reviewBusy}
                                   onClick={() => saveFindingChoice(finding.id, selectedChoiceId)}
                                 >
-                                  {processing.reviewBusy ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
+                                  {isSavingChoice ? "Сохраняем…" : "Подтвердить и сохранить выбор"}
                                 </button>
                                 {isUnsaved && (
                                   <button className="secondary-button" type="button"
@@ -2293,12 +2380,14 @@ function App() {
                                   >Отменить выбор</button>
                                 )}
                                 {isResolved && <span className="competency-saved-note">Выбор сохранён в версии</span>}
+                                {choiceErrors[finding.id] && (
+                                  <p className="competency-api-note" role="alert">Не удалось сохранить выбор: {choiceErrors[finding.id]}</p>
+                                )}
                               </div>
                             )}
-                            {finding.ruleCode === "R-01" && (isCustom || isReject) && (
+                            {finding.ruleCode === "R-01" && isCustom && (
                               <p className="competency-api-note" role="status">
-                                Сохранение {isReject ? "отклонения сопоставления" : "собственного кода"} пока недоступно:
-                                API принимает только готовый вариант. Значение остаётся черновиком.
+                                Введите один код: он заменит единственный отличающийся код в обоих списках. При нескольких различиях выберите готовый вариант.
                               </p>
                             )}
                             </div>

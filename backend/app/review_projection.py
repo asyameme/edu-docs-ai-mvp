@@ -16,13 +16,14 @@ _ISSUE_FIELDS = {
     "severity",
     "status",
     "message",
+    "explanation",
     "source_ref_ids",
     "source_document_ids",
     "requires_decision",
     "variants",
     "rpd_alignment",
 }
-_COVERAGE_FIELDS = {"rule_code", "rule_revision", "status", "reason"}
+_COVERAGE_FIELDS = {"rule_code", "rule_revision", "status", "reason", "competencies"}
 
 
 def _short(value, limit=200):
@@ -127,6 +128,11 @@ def _project_issue(issue, selected_variant_id=None):
     if "variants" in issue:
         public_issue["variants"] = _distinct_text_variants(issue, selected_variant_id)
     public_issue["rpd_alignment"] = _rpd_alignment_summary(issue)
+    public_issue["explanation"] = (
+        issue.get("explanation")
+        or (issue.get("evidence") or {}).get("explanation")
+        or None
+    )
     public_issue["severity"] = issue_severity(issue)
     return public_issue
 

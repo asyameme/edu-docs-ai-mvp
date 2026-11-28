@@ -350,7 +350,7 @@ def test_dispatcher_pages_past_one_hundred_pending_turns():
                 "session_id": uuid4(),
             }
 
-        def prior_turns(self, turn, limit):
+        def prior_turns(self, turn, limit, offset=0):
             return []
 
     class Client:

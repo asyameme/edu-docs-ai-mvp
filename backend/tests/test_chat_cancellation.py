@@ -165,6 +165,36 @@ def test_sse_returns_cancelled_from_saved_history_without_temporal(monkeypatch):
     assert "event: failed" not in response.text
 
 
+def test_sse_keeps_main_progress_and_reports_cancellation(monkeypatch):
+    from temporalio.client import WorkflowExecutionStatus
+
+    program_id, run_id = uuid4(), uuid4()
+    states = iter(["pending", "cancelled"])
+
+    async def describe(**kwargs):
+        return SimpleNamespace(status=WorkflowExecutionStatus.RUNNING)
+
+    async def query(*args, **kwargs):
+        return {"message": "Читаю документ…", "steps": []}
+
+    repository = SimpleNamespace(
+        turn_input=lambda _: {"program_id": program_id, "session_id": uuid4()},
+        session=lambda *_: {"turns": [{"id": run_id, "status": next(states), "result": None}]},
+    )
+    monkeypatch.setattr(chat_api, "repo", lambda _: repository)
+    app = FastAPI()
+    app.include_router(chat_api.router)
+    app.state.resources = SimpleNamespace(temporal=SimpleNamespace(
+        get_workflow_handle=lambda _: SimpleNamespace(describe=describe, query=query),
+    ))
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+    assert response.status_code == 200
+    assert "event: progress" in response.text
+    assert "Читаю документ…" in response.text
+    assert "event: cancelled" in response.text
+
+
 @pytest.mark.parametrize("status", ["cancelling", "cancelled"])
 def test_late_result_is_discarded_before_reading_graph(status):
     repository = ChatRepository(None)

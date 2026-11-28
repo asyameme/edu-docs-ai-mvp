@@ -4516,6 +4516,48 @@ textarea:focus-visible {
 }
 
 /* Краткие пояснения модели к замечаниям R-11: вердикт + причина одним взглядом. */
+.r09-competency-summary {
+  margin-top: 12px;
+}
+
+.r09-competency-summary summary {
+  color: #426581;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.r09-competency-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.r09-competency-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  padding: 9px 11px;
+  border: 1px solid #e3e9ef;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.r09-competency-row strong {
+  color: #2f4459;
+  font-size: 12px;
+}
+
+.r09-competency-row small {
+  grid-column: 1 / -1;
+  color: #5b6875;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .r11-explanations {
   display: grid;
   gap: 8px;
@@ -4622,3 +4664,70 @@ textarea:focus-visible {
 }
 
 
+
+
+.chat-progress { display: flex; align-items: center; gap: 10px; color: #526274; }
+.chat-progress-spinner {
+  width: 14px; height: 14px; flex-shrink: 0; border: 2px solid #dce3fa;
+  border-top-color: #4167d8; border-radius: 50%; animation: chat-progress-spin 1s linear infinite;
+}
+@keyframes chat-progress-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chat-progress-spinner { animation: none; } }
+
+/* Списки в общей палитре интерфейса, с переносом строк в пределах поля. */
+@supports (appearance: base-select) {
+  .optional-rule-document-scope select,
+  .optional-rule-document-scope select::picker(select) { appearance: base-select; }
+  .optional-rule-document-scope select::picker(select) {
+    inline-size: anchor-size(self-inline);
+    max-inline-size: calc(100vw - 24px);
+    box-sizing: border-box;
+    padding: 4px;
+    border: 1px solid #d8e3f0;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgb(38 63 96 / 12%);
+    background: #fff;
+    color: #263f60;
+    font: 400 12px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .optional-rule-document-scope option {
+    display: block;
+    padding: 6px 8px;
+    border-radius: 4px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font: inherit;
+    font-weight: 400;
+    line-height: 1.4;
+    color: inherit;
+    background: #fff;
+    outline: none;
+  }
+  .optional-rule-document-scope option::checkmark { display: none; }
+  .optional-rule-document-scope option:checked {
+    background: #edf3fa;
+    color: #263f60;
+    box-shadow: inset 3px 0 #8298b5;
+  }
+  .optional-rule-document-scope option:hover {
+    background: #e3ebf4;
+    color: #294f80;
+  }
+  .optional-rule-document-scope option:focus-visible {
+    outline: 2px solid #8298b5;
+    outline-offset: -2px;
+  }
+  .optional-rule-document-scope select::picker-icon {
+    content: "";
+    width: 8px;
+    height: 5px;
+    margin-inline-start: auto;
+    align-self: center;
+    background: #263f60;
+    clip-path: polygon(0 0, 50% 60%, 100% 0, 100% 35%, 50% 100%, 0 35%);
+    rotate: none;
+  }
+}
+/* Статус над содержимым не сдвигает текст при разной длине подписи. */
+.r11-explanations > li { grid-template-columns: minmax(0, 1fr); }
+.r11-explanations > li > .r11-verdict { justify-self: start; white-space: normal; }

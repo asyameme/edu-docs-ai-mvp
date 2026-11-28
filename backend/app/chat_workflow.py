@@ -14,12 +14,14 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from app.chat_context import CONTEXT_RESERVE_TOKENS, DEFAULT_CONTEXT_TOKENS, trim_messages
+    from app.chat_findings import findings_limit_answer, limit_reason
     from app.chat_model import chat_agent
+    from app.chat_progress import ChatProgressState
     from worker.agent.contracts import ChatDeps
 
-# Окно истории: агент должен помнить контекст беседы, а не последние два
-# обмена. Kimi K3 держит большой контекст; бюджет входа одного запроса
-# поднят, чтобы чтение большой сущности не обрывало ход заготовленной фразой.
+# Прежние лимиты сохранены только для воспроизведения уже начатых workflow.
+# Новые ходы используют токенный бюджет chat-token-context-v3.
 MAX_CHAT_HISTORY_TURNS = 10
 MAX_CHAT_HISTORY_BYTES = 96_000
 MAX_CHAT_REQUEST_INPUT_TOKENS = 64_000
@@ -71,7 +73,9 @@ def _assistant_history_text(result) -> str:
             for item in result.get("changes") or []
         )
         summary = result.get("summary") or ""
-        return f"Предложение правки: {summary} ({changes})" if changes else summary
+        proposal = f"Предложение правки: {summary} ({changes})" if changes else summary
+        questions = " ".join(result.get("unresolved_questions") or [])
+        return " ".join(part for part in (proposal, questions) if part)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -118,9 +122,30 @@ def _conversation_for_turn(conversation: Conversation) -> Conversation:
     return compacted
 
 
+def token_conversation_from_turns(session_id, turns, budget):
+    """Восстанавливает видимую переписку, ограничивая её токенами."""
+    messages = []
+    for turn in turns:
+        messages.extend([
+            ModelRequest(parts=[UserPromptPart(content=turn["user_text"])]),
+            ModelResponse(parts=[TextPart(content=_assistant_history_text(turn["result"]))]),
+        ])
+    return Conversation(
+        conversation_id=str(session_id),
+        messages=trim_messages(messages, budget, allow_empty=True),
+    )
+
+
 @workflow.defn(name="ProgramChatWorkflowV1")
 class ChatWorkflow(PydanticAIWorkflow):
     __pydantic_ai_agents__ = [chat_agent] if chat_agent else []
+
+    def __init__(self):
+        self.chat_progress = ChatProgressState()
+
+    @workflow.query(name="chat_progress_v1")
+    def progress(self) -> dict:
+        return self.chat_progress.snapshot()
 
     @workflow.run
     async def run(self, payload: dict) -> dict:
@@ -137,23 +162,32 @@ class ChatWorkflow(PydanticAIWorkflow):
                 else Conversation()
             )
             # Conversation хранит usage всего диалога, а лимиты защищают один ход.
-            conversation = _conversation_for_turn(conversation)
+            token_context = workflow.patched("chat-token-context-v3")
+            context_tokens = payload.get("context_tokens", DEFAULT_CONTEXT_TOKENS)
+            if token_context:
+                conversation = replace(conversation, usage=RunUsage(), new_message_index=None)
+            else:
+                conversation = _conversation_for_turn(conversation)
             context_budget_v2 = workflow.patched("chat-context-budget-v2")
             limits = UsageLimits(
                 request_limit=8,
                 tool_calls_limit=12,
-                input_tokens_limit=MAX_CHAT_TURN_INPUT_TOKENS if context_budget_v2 else 32_000,
+                input_tokens_limit=(context_tokens * 8 if token_context else
+                                    MAX_CHAT_TURN_INPUT_TOKENS if context_budget_v2 else 32_000),
                 output_tokens_limit=4_000,
                 total_tokens_limit=None if context_budget_v2 else 36_000,
                 per_request_input_tokens_limit=(
+                    context_tokens - 4_000 if token_context else
                     MAX_CHAT_REQUEST_INPUT_TOKENS if context_budget_v2 else None
                 ),
             )
+            visible_history = list(conversation.messages)
             try:
                 result = await chat_agent.run(
                     payload["text"],
                     deps=ChatDeps(
-                        program_id=payload["program_id"], version_id=payload["version_id"]
+                        program_id=payload["program_id"], version_id=payload["version_id"],
+                        context_tokens=context_tokens if token_context else None,
                     ),
                     conversation=conversation,
                     usage_limits=limits,
@@ -164,13 +198,29 @@ class ChatWorkflow(PydanticAIWorkflow):
                 if not context_budget_v2:
                     raise
                 workflow.logger.warning("Превышен лимит чата: %s", error)
+                output = {"kind": "answer", "message": CHAT_LIMIT_MESSAGE, "sources": []}
+                if workflow.patched("chat-findings-summary-v1"):
+                    output = findings_limit_answer(self.chat_progress.findings_pages,
+                                                   limit_reason(error))
                 now = workflow.now()
                 conversation = replace(conversation, messages=[
                     *conversation.messages,
                     ModelRequest(parts=[UserPromptPart(content=payload["text"], timestamp=now)]),
-                    ModelResponse(parts=[TextPart(content=CHAT_LIMIT_MESSAGE)], timestamp=now),
+                    ModelResponse(parts=[TextPart(content=output["message"])], timestamp=now),
                 ])
-                output = {"kind": "answer", "message": CHAT_LIMIT_MESSAGE, "sources": []}
+            if token_context:
+                # В БД и Temporal не копируем длинные ответы инструментов и рассуждения.
+                now = workflow.now()
+                visible = list(visible_history)
+                visible.extend([
+                    ModelRequest(parts=[UserPromptPart(content=payload["text"], timestamp=now)]),
+                    ModelResponse(
+                        parts=[TextPart(content=_assistant_history_text(output))], timestamp=now,
+                    ),
+                ])
+                conversation = replace(conversation, messages=trim_messages(
+                    visible, context_tokens - CONTEXT_RESERVE_TOKENS, allow_empty=True,
+                ), usage=RunUsage(), new_message_index=None)
             serialized = ConversationTypeAdapter.dump_json(conversation).decode()
             await workflow.execute_activity(
                 "chat_save_result_v1",

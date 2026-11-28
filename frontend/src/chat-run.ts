@@ -1,3 +1,5 @@
+import { parseChatProgress, type ChatProgress } from "./chatProgress.ts";
+
 export type ChatRunEnd =
   | { status: "completed"; result: unknown }
   | { status: "failed" | "cancelled" };
@@ -7,6 +9,7 @@ export function waitForChatRun(
   runId: string,
   signal: AbortSignal,
   onCancelling: () => void,
+  onProgress: (progress: ChatProgress) => void = () => {},
 ): Promise<ChatRunEnd> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -27,6 +30,13 @@ export function waitForChatRun(
     };
     const abort = () => finish(new DOMException("Ожидание остановлено", "AbortError"));
     signal.addEventListener("abort", abort, { once: true });
+    stream.addEventListener("progress", (event) => {
+      if (settled) return;
+      try {
+        const progress = parseChatProgress(JSON.parse((event as MessageEvent).data));
+        if (progress) onProgress(progress);
+      } catch {}
+    });
     stream.addEventListener("completed", (event) => {
       try {
         finish(null, { status: "completed", result: JSON.parse((event as MessageEvent).data) });

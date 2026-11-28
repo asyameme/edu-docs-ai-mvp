@@ -28,10 +28,10 @@ class FakeEventSource extends EventTarget {
 
 afterEach(() => { globalThis.EventSource = originalEventSource; });
 
-function start(onCancelling = () => {}) {
+function start(onCancelling = () => {}, onProgress = () => {}) {
   globalThis.EventSource = FakeEventSource;
   const controller = new AbortController();
-  const result = waitForChatRun("program", "run", controller.signal, onCancelling);
+  const result = waitForChatRun("program", "run", controller.signal, onCancelling, onProgress);
   return { controller, result, stream: FakeEventSource.last };
 }
 
@@ -77,4 +77,28 @@ test("таймаут закрывает поток и предлагает ос�
   context.mock.timers.tick(5 * 60 * 1000);
   await assert.rejects(result, /Можно остановить запрос и отправить следующий/);
   assert.equal(stream.closed, true);
+});
+
+test("прогресс из main показывается до остановки, поздние подсказки игнорируются", async () => {
+  const progress = [];
+  const { result, stream } = start(() => {}, (value) => progress.push(value.message));
+  stream.emit("progress", { message: "Читаю документ…" });
+  assert.deepEqual(progress, ["Читаю документ…"]);
+  assert.equal(stream.closed, false);
+  stream.emit("cancelled");
+  stream.emit("progress", { message: "Поздняя подсказка" });
+  assert.deepEqual(await result, { status: "cancelled" });
+  assert.deepEqual(progress, ["Читаю документ…"]);
+});
+
+test("неверный прогресс не мешает получить итоговый ответ", async () => {
+  const progress = [];
+  const { result, stream } = start(() => {}, (value) => progress.push(value));
+  for (const value of [null, {}, { message: 1 }, { message: " " }]) {
+    stream.emit("progress", value);
+  }
+  stream.dispatchEvent(new MessageEvent("progress", { data: "invalid" }));
+  stream.emit("completed", { kind: "answer", message: "Готово", sources: [] });
+  assert.equal((await result).result.message, "Готово");
+  assert.deepEqual(progress, []);
 });

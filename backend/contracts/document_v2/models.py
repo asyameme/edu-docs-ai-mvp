@@ -85,6 +85,8 @@ class Discipline(BaseEntity):
     credit_units: int | None = Field(ge=1)
     hours_total: int | None = Field(ge=0)
     hours_by_kind: dict[str, int]
+    # Ячейки видов нагрузки РПД, когда итог вычислен из них.
+    workload_cells: dict[str, CurriculumWorkloadCell] | None = None
     control_forms: list[str] = []
     prerequisites: list[str] = []
     # Регистрационный номер рабочей программы с титула РПД/РПП; связывает

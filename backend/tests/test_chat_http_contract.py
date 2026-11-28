@@ -259,3 +259,44 @@ def test_sse_failed_event_keeps_public_shape(monkeypatch):
     assert "event: failed" in response.text
     assert str(run_id) in response.text
     assert '"message":' in response.text
+
+
+@pytest.mark.parametrize("progress_available", [True, False])
+def test_sse_progress_is_delivered_before_the_final_answer(monkeypatch, progress_available):
+    from temporalio.client import WorkflowExecutionStatus
+
+    program_id, session_id, run_id = uuid4(), uuid4(), uuid4()
+
+    class Repository:
+        reads = 0
+
+        def turn_input(self, _):
+            return {"program_id": program_id, "session_id": session_id}
+
+        def session(self, *_):
+            self.reads += 1
+            return {"turns": [{"id": run_id,
+                "status": "pending" if self.reads == 1 else "completed",
+                "result": {"kind": "answer", "message": "Ответ готов", "sources": []}}]}
+
+    class Handle:
+        async def describe(self, **kwargs):
+            return SimpleNamespace(status=WorkflowExecutionStatus.RUNNING)
+
+        async def query(self, name, **kwargs):
+            assert name == "chat_progress_v1"
+            if not progress_available:
+                raise RuntimeError("Старый workflow не поддерживает запрос")
+            return {"message": "Ищу компетенции…", "steps": ["Ищу компетенции…"]}
+
+    with client_for(monkeypatch, Repository()) as client:
+        client.app.state.resources = SimpleNamespace(
+            temporal=SimpleNamespace(get_workflow_handle=lambda _: Handle()))
+        response = client.get(f"/api/v1/programs/{program_id}/chat/runs/{run_id}/events")
+    assert response.status_code == 200
+    if progress_available:
+        assert response.text.index("event: progress") < response.text.index("event: completed")
+        assert "Ищу компетенции…" in response.text
+    else:
+        assert "event: progress" not in response.text
+    assert "Ответ готов" in response.text

@@ -16,6 +16,7 @@ class ChatDeps(BaseModel):
 
     program_id: UUID
     version_id: UUID
+    context_tokens: int | None = Field(default=None, ge=32_000, le=200_000)
 
 
 class EntitySearchHit(BaseModel):
@@ -38,6 +39,7 @@ class WorkloadField(BaseModel):
     hours: int
     field_path: str
     source_ref_id: UUID
+    semester_hours: int | None = None
 
 
 class EntityReadResult(BaseModel):
@@ -146,3 +148,19 @@ class ChangeProposal(BaseModel):
 
 
 ChatOutput = Answer | Clarification | ChangeProposal
+
+
+class RpdWorkloadAlignment(BaseModel):
+    """Запрос пользователя изменить общий объём РПД без указания отдельных граф."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["rpd_workload_alignment"]
+    discipline_name: str = Field(min_length=1, description="Точное название дисциплины")
+    hours: int = Field(ge=0, strict=True)
+    semesters: list[int] | None = Field(
+        default=None, description="Только явно указанные семестры. Без уточнения — все."
+    )
+
+
+AgentOutput = ChatOutput | RpdWorkloadAlignment

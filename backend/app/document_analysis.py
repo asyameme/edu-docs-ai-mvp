@@ -1,5 +1,6 @@
 """Документная стадия существующего валидатора в формате AnalysisV2 без графа."""
 
+import json
 from copy import deepcopy
 from uuid import UUID, uuid5
 
@@ -50,8 +51,31 @@ def _records(value, path=""):
             yield from _records(child, path + "/" + str(index))
 
 
-def _sources(finding, documents):
+def _source_index(documents):
+    """Индексирует документы и координаты источников для всех замечаний запуска."""
+    by_id, by_file, records_by_id = {}, {}, {}
+    for item in documents:
+        identity = str(item["document_id"])
+        filename = item["parsed"].get("meta", {}).get("file_name")
+        by_id[identity] = item
+        by_file.setdefault(filename, []).append(item)
+        records = {}
+        for path, row in _records(item["parsed"]):
+            locator = _locator(row["source_ref"])
+            key = _locator_key(locator)
+            records.setdefault(key, []).append((path, row, locator))
+        records_by_id[identity] = records
+    return {"by_id": by_id, "by_file": by_file, "records": records_by_id}
+
+
+def _locator_key(locator):
+    return json.dumps(locator, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sources(finding, documents, source_index=None):
     """Сопоставляет доказательства с документами, не выбирая первый одинаковый файл."""
+    if source_index is None:
+        source_index = _source_index(documents)
     sources, limitations = [], []
     evidence = finding["evidence"]
     variants = evidence.get("variants", [])
@@ -71,18 +95,23 @@ def _sources(finding, documents):
             continue
         seen.add(ref_key)
         identity = ref.get("document_id")
-        candidates = [
-            item for item in documents
-            if (str(item["document_id"]) == str(identity) if identity is not None
-                else item["parsed"].get("meta", {}).get("file_name") == ref.get("file"))
-        ]
+        if identity is not None:
+            candidate = source_index["by_id"].get(str(identity))
+            candidates = [candidate] if candidate is not None else []
+        else:
+            candidates = source_index["by_file"].get(ref.get("file"), [])
         if len(candidates) != 1:
             limitations.append("Документ источника не определён однозначно")
             continue
         item = candidates[0]
+        locator = _locator(ref)
+        key = _locator_key(locator)
         matches = [
-            (path, row) for path, row in _records(item["parsed"])
-            if _locator(row["source_ref"]) == _locator(ref)
+            (path, row)
+            for path, row, indexed_locator in source_index["records"].get(
+                str(item["document_id"]), {}
+            ).get(key, [])
+            if indexed_locator == locator
         ]
         if variant is not None:
             code = variant.get("code")
@@ -228,18 +257,23 @@ def _competency_link_variants(finding, documents, issue_id):
         item["code"] for document in original.values()
         for item in document.get("competencies", [])
     }
+    # Дисциплина может занимать несколько строк плана (по семестрам): список
+    # документа применяется ко всем им, иначе вариант терялся у многобеместровых.
     options = []
     if not evidence["shared_discipline"] and set(plan_codes) <= declared:
-        options.append((f"Список из учебного плана: {', '.join(plan_codes)}", rp, plan_codes))
-    if len(plan) == 1 and evidence["plan_row_is_exclusive"] and set(rp_codes) <= declared:
+        options.append((f"Список из учебного плана: {', '.join(plan_codes)}", [rp], plan_codes))
+    if evidence["plan_row_is_exclusive"] and set(rp_codes) <= declared:
         options.append((f"Список из {evidence['document_label']}: {', '.join(rp_codes)}",
-                        plan[0], rp_codes))
+                        plan, rp_codes))
     if not options:
         return [], ["Не удалось безопасно сопоставить связи с исходными строками"]
-    options.append(("Оставить расхождение в документах", rp, rp_codes))
+    options.append(("Оставить расхождение в документах", [rp], rp_codes))
     variants = []
-    for label, target, codes in options:
-        changes = [{"op": "set_competency_links", **target, "codes": codes}]
+    for label, targets, codes in options:
+        changes = [
+            {"op": "set_competency_links", **target, "codes": codes}
+            for target in targets
+        ]
         try:
             validate_document_mutation_variants(original, [changes])
         except (DomainError, ValueError):
@@ -260,6 +294,7 @@ def analyze_documents(documents, job_id, *, config=None):
     ruleset = {**validation_ruleset(config, inputs), "required_rules": []}
     report = run_document_rules(inputs, config, phase="document_reconciliation")
     rules = {rule["id"]: rule for rule in config["rules"]}
+    source_index = _source_index(documents)
     coverage, issues = [], []
     for result in report["results"]:
         revision = validation_rule_revision(config, rules[result["rule_id"]])
@@ -277,7 +312,7 @@ def analyze_documents(documents, job_id, *, config=None):
         for index, finding in enumerate(result["findings"]):
             issue_id = uuid5(UUID(str(job_id)),
                              f"{result['rule_id']}:{index}:{digest(finding)}")
-            sources, limitations = _sources(finding, documents)
+            sources, limitations = _sources(finding, documents, source_index)
             if finding["code"] == "competency_links_choice":
                 variants, variant_limits = _competency_link_variants(
                     finding, documents, issue_id

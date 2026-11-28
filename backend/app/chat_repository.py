@@ -139,13 +139,6 @@ class ChatRepository:
                 (session_id,),
             ).fetchone():
                 raise DomainError(409, "Дождитесь завершения предыдущего сообщения")
-            if (
-                cur.execute(
-                    "SELECT count(*) AS total FROM chat_turns WHERE session_id=%s", (session_id,)
-                ).fetchone()["total"]
-                >= get_settings().chat_max_turns
-            ):
-                raise DomainError(409, "Достигнут предел сообщений в этой сессии")
             cur.execute(
                 "INSERT INTO chat_turns(id,session_id,operation_key,request_hash,user_text,"
                 "workflow_id) "
@@ -231,15 +224,15 @@ class ChatRepository:
                 raise DomainError(409, "Чат станет доступен после сборки графа")
             return row
 
-    def prior_turns(self, turn, limit):
+    def prior_turns(self, turn, limit, offset=0):
         """Завершённые обмены до сообщения в той же сессии, от старых к новым."""
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             rows = cur.execute(
                 """SELECT user_text,result FROM chat_turns WHERE session_id=%s
                    AND status='completed' AND result IS NOT NULL
                    AND (created_at,id)<(%s,%s)
-                   ORDER BY created_at DESC,id DESC LIMIT %s""",
-                (turn["session_id"], turn["created_at"], turn["id"], limit),
+                   ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s""",
+                (turn["session_id"], turn["created_at"], turn["id"], limit, offset),
             ).fetchall()
         return rows[::-1]
 
@@ -267,15 +260,24 @@ class ChatRepository:
             if any(str(item["id"]) not in source_ids for item in result.get("sources", [])):
                 raise DomainError(422, "Ответ содержит источник вне выбранной версии")
             result["sources"] = [sources[str(item["id"])] for item in result.get("sources", [])]
+        elif result.get("kind") == "rpd_workload_alignment":
+            from app.domain import SnapshotV2
+            from worker.agent.contracts import RpdWorkloadAlignment
+            from worker.agent.proposal_apply import prepare_rpd_workload_alignment
+
+            result = prepare_rpd_workload_alignment(
+                SnapshotV2.model_validate(snapshot), turn["program_id"],
+                RpdWorkloadAlignment.model_validate(result), Repository(self.pool).document_content,
+            ).model_dump(mode="json")
         elif result.get("kind") == "change_proposal":
-            from app.curriculum_workload import with_legacy_curriculum_workload
+            from app.curriculum_workload import with_editable_workload
             from app.domain import SnapshotV2
             from worker.agent.contracts import ChangeProposal
             from worker.agent.proposal_apply import workload_targets
 
             targets = workload_targets(ChangeProposal.model_validate(result))
             if targets:
-                editable = with_legacy_curriculum_workload(
+                editable = with_editable_workload(
                     SnapshotV2.model_validate(snapshot), turn["program_id"], targets,
                     Repository(self.pool).document_content,
                 )

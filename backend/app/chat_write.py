@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
 
-from app.curriculum_workload import with_legacy_curriculum_workload
+from app.curriculum_workload import with_editable_workload
 from app.domain import SnapshotV2
 from app.errors import DomainError
 from app.repository import Repository
@@ -19,6 +19,7 @@ from worker.agent.proposal_apply import (
     ProposalApplicationError,
     apply_change,
     plan_approved_changes,
+    recalculate_calculated_totals,
     touched_document_ids,
     unwritable_changes,
     workload_targets,
@@ -82,7 +83,7 @@ class ChatWriteRepository:
                         (owner, document_id),
                     ).fetchone())
 
-                snapshot = with_legacy_curriculum_workload(
+                snapshot = with_editable_workload(
                     snapshot, program_id, workload_targets(proposal), read_source,
                 )
                 try:
@@ -134,6 +135,13 @@ class ChatWriteRepository:
                         "target_id": str(change.target_id), "field_path": change.field_path,
                         "value": change.new_value,
                     })
+                    # Итог, вычисленный из видов, пересчитывается сервером:
+                    # модель правит виды, арифметика и согласованность — на сервере.
+                    prior_changes.extend(recalculate_calculated_totals(snapshot, [{
+                        "op": "set_attribute", "target_kind": change.target_kind,
+                        "target_id": str(change.target_id), "field_path": change.field_path,
+                        "value": change.new_value,
+                    }]))
                     decisions = [
                         item for item in snapshot.review.decisions
                         if item.conflict_id != turn_id
